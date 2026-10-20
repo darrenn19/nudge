@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
@@ -29,11 +29,14 @@ jobs:
     name: Cross-compile core for Android
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-ndk --locked
       - name: Build nudge-core
-        env:
-          ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_LATEST_HOME }}
-        run: cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build -p nudge-core --release
+        # ANDROID_NDK_LATEST_HOME is preinstalled on GitHub's Ubuntu runners.
+        # It's a machine env var, so read it in the shell (not via ${{ env.* }}).
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          echo "Using NDK at $ANDROID_NDK_HOME"
+          cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build -p nudge-core --release
