@@ -11,6 +11,16 @@ repository.workspace = true
 name = "nudge_core"
 
 [dependencies]
+blake3 = "1.8.7"
+rcgen = { version = "0.14.7", default-features = false, features = ["aws_lc_rs"] }
+rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "net", "rt", "sync"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros", "sync"] }
 
 [lints]
 workspace = true

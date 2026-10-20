@@ -13,7 +13,11 @@ name = "nudge"
 path = "src/main.rs"
 
 [dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+dirs = "7.0.0"
 nudge-core = { path = "../core" }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
