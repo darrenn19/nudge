@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Flutter / Dart (app/ arrives in Phase 2)
+app/.dart_tool/
+app/build/
+app/.flutter-plugins*
+app/.packages
+app/**/GeneratedPluginRegistrant.*
+
+# Android
+*.iml
+.gradle/
+local.properties
+app/android/app/src/main/jniLibs/
+
+# Editors / OS
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db
+
+# Benchmark scratch output
+/bench-out/

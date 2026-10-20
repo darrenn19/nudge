@@ -1,0 +1,16 @@
+[package]
+name = "nudge-core"
+description = "Nudge transfer engine: protocol, transport, crypto, discovery. UI-agnostic."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "nudge_core"
+
+[dependencies]
+
+[lints]
+workspace = true
