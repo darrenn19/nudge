@@ -62,6 +62,7 @@ impl From<Peer> for DeviceInfo {
 }
 
 /// Something the app should react to. See `nudge_core::NodeEvent`.
+/// Sizes and IDs are i64 so they arrive in Dart as plain `int`s.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     /// Re-read `NudgeApp::devices`.
@@ -72,28 +73,28 @@ pub enum AppEvent {
     /// The pairing code on screen expired or was used.
     PairingClosed,
     TransferStarted {
-        id: u64,
+        id: i64,
         device_id: String,
         incoming: bool,
         file_name: String,
-        size: u64,
+        size: i64,
     },
     TransferProgress {
-        id: u64,
-        bytes: u64,
-        size: u64,
+        id: i64,
+        bytes: i64,
+        size: i64,
         bytes_per_sec: f64,
     },
     TransferDone {
-        id: u64,
+        id: i64,
         /// Saved file (incoming) or source file (outgoing).
         path: String,
-        bytes: u64,
+        bytes: i64,
         seconds: f64,
-        resumed_from: u64,
+        resumed_from: i64,
     },
     TransferFailed {
-        id: u64,
+        id: i64,
         error: String,
     },
 }
@@ -113,11 +114,11 @@ impl From<NodeEvent> for AppEvent {
                 file_name,
                 size,
             } => Self::TransferStarted {
-                id,
+                id: id as i64,
                 device_id: peer.to_string(),
                 incoming: direction == Direction::Incoming,
                 file_name,
-                size,
+                size: size as i64,
             },
             NodeEvent::TransferProgress {
                 id,
@@ -125,19 +126,22 @@ impl From<NodeEvent> for AppEvent {
                 size,
                 bytes_per_sec,
             } => Self::TransferProgress {
-                id,
-                bytes,
-                size,
+                id: id as i64,
+                bytes: bytes as i64,
+                size: size as i64,
                 bytes_per_sec,
             },
             NodeEvent::TransferDone { id, path, stats } => Self::TransferDone {
-                id,
+                id: id as i64,
                 path: path.to_string_lossy().into_owned(),
-                bytes: stats.bytes,
+                bytes: stats.bytes as i64,
                 seconds: stats.elapsed.as_secs_f64(),
-                resumed_from: stats.resumed_from,
+                resumed_from: stats.resumed_from as i64,
             },
-            NodeEvent::TransferFailed { id, error } => Self::TransferFailed { id, error },
+            NodeEvent::TransferFailed { id, error } => Self::TransferFailed {
+                id: id as i64,
+                error,
+            },
         }
     }
 }
@@ -256,10 +260,11 @@ impl NudgeApp {
     /// Send files to a paired device in the background. Returns one
     /// transfer ID per file; progress arrives as events.
     #[frb(sync)]
-    pub fn send_files(&self, device_id: String, paths: Vec<String>) -> Result<Vec<u64>> {
+    pub fn send_files(&self, device_id: String, paths: Vec<String>) -> Result<Vec<i64>> {
         let _guard = runtime().enter();
         let paths = paths.into_iter().map(PathBuf::from).collect();
-        Ok(self.node.send_files(parse_id(&device_id)?, paths))
+        let ids = self.node.send_files(parse_id(&device_id)?, paths);
+        Ok(ids.into_iter().map(|id| id as i64).collect())
     }
 }
 

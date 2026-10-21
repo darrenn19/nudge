@@ -5,3 +5,8 @@ analyzer:
     - build/**
     - android/**
     - windows/**
+    - rust_builder/**
+    - lib/src/rust/**
+
+formatter:
+  page_width: 100

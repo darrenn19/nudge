@@ -4,850 +4,1158 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/nudge.dart';
+
 import 'dart:async';
 import 'dart:convert';
+
 import 'frb_generated.dart';
 import 'frb_generated.io.dart' if (dart.library.js_interop) 'frb_generated.web.dart';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
+/// Main entrypoint of the Rust API
+class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
+  @internal
+  static final instance = RustLib._();
 
-                /// Main entrypoint of the Rust API
-                class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
-                  @internal
-                  static final instance = RustLib._();
+  RustLib._();
 
-                  RustLib._();
+  /// Initialize flutter_rust_bridge
+  static Future<void> init({
+    RustLibApi? api,
+    BaseHandler? handler,
+    ExternalLibrary? externalLibrary,
+    bool forceSameCodegenVersion = true,
+  }) async {
+    await instance.initImpl(
+      api: api,
+      handler: handler,
+      externalLibrary: externalLibrary,
+      forceSameCodegenVersion: forceSameCodegenVersion,
+    );
+  }
 
-                  /// Initialize flutter_rust_bridge
-                  static Future<void> init({
-                    RustLibApi? api,
-                    BaseHandler? handler,
-                    ExternalLibrary? externalLibrary,
-                    bool forceSameCodegenVersion = true,
-                  }) async {
-                    await instance.initImpl(
-                      api: api,
-                      handler: handler,
-                      externalLibrary: externalLibrary,
-                      forceSameCodegenVersion: forceSameCodegenVersion,
-                    );
-                  }
+  /// Initialize flutter_rust_bridge in mock mode.
+  /// No libraries for FFI are loaded.
+  static void initMock({required RustLibApi api}) {
+    instance.initMockImpl(api: api);
+  }
 
-                  /// Initialize flutter_rust_bridge in mock mode.
-                  /// No libraries for FFI are loaded.
-                  static void initMock({
-                    required RustLibApi api,
-                  }) {
-                    instance.initMockImpl(
-                      api: api,
-                    );
-                  }
+  /// Dispose flutter_rust_bridge
+  ///
+  /// The call to this function is optional, since flutter_rust_bridge (and everything else)
+  /// is automatically disposed when the app stops.
+  static void dispose() => instance.disposeImpl();
 
-                  /// Dispose flutter_rust_bridge
-                  ///
-                  /// The call to this function is optional, since flutter_rust_bridge (and everything else)
-                  /// is automatically disposed when the app stops.
-                  static void dispose() => instance.disposeImpl();
+  @override
+  ApiImplConstructor<RustLibApiImpl, RustLibWire> get apiImplConstructor => RustLibApiImpl.new;
 
-                  @override
-                  ApiImplConstructor<RustLibApiImpl, RustLibWire> get apiImplConstructor => RustLibApiImpl.new;
+  @override
+  WireConstructor<RustLibWire> get wireConstructor => RustLibWire.fromExternalLibrary;
 
-                  @override
-                  WireConstructor<RustLibWire> get wireConstructor => RustLibWire.fromExternalLibrary;
+  @override
+  Future<void> executeRustInitializers() async {
+    await api.crateApiNudgeInitApp();
+  }
 
-                  @override
-                  Future<void> executeRustInitializers() async {
-                    await api.crateApiNudgeInitApp();
+  @override
+  ExternalLibraryLoaderConfig get defaultExternalLibraryLoaderConfig =>
+      kDefaultExternalLibraryLoaderConfig;
 
-                    
-                  }
+  @override
+  String get codegenVersion => '2.13.0';
 
-                  @override
-                  ExternalLibraryLoaderConfig get defaultExternalLibraryLoaderConfig => kDefaultExternalLibraryLoaderConfig;
+  @override
+  int get rustContentHash => -171517190;
 
-                  @override
-                  String get codegenVersion => '2.13.0';
+  static const kDefaultExternalLibraryLoaderConfig = ExternalLibraryLoaderConfig(
+    stem: 'nudge_bridge',
+    ioDirectory: 'rust/target/release/',
+    webPrefix: 'pkg/',
+    wasmBindgenName: 'wasm_bindgen',
+  );
+}
 
-                  @override
-                  int get rustContentHash => -171517190;
+abstract class RustLibApi extends BaseApi {
+  void crateApiNudgeNudgeAppCancelPairing({required NudgeApp that});
 
-                  static const kDefaultExternalLibraryLoaderConfig = ExternalLibraryLoaderConfig(
-                    stem: 'nudge_bridge',
-                    ioDirectory: 'rust/target/release/',
-                    webPrefix: 'pkg/',
-                    wasmBindgenName: 'wasm_bindgen',
-                  );
-                }
-                
+  String crateApiNudgeNudgeAppDeviceId({required NudgeApp that});
 
-                abstract class RustLibApi extends BaseApi {
-                  void crateApiNudgeNudgeAppCancelPairing({required NudgeApp that });
+  String crateApiNudgeNudgeAppDeviceName({required NudgeApp that});
 
-String crateApiNudgeNudgeAppDeviceId({required NudgeApp that });
+  List<DeviceInfo> crateApiNudgeNudgeAppDevices({required NudgeApp that});
 
-String crateApiNudgeNudgeAppDeviceName({required NudgeApp that });
+  bool crateApiNudgeNudgeAppDiscoveryRunning({required NudgeApp that});
 
-List<DeviceInfo> crateApiNudgeNudgeAppDevices({required NudgeApp that });
+  String crateApiNudgeNudgeAppDownloadDir({required NudgeApp that});
 
-bool crateApiNudgeNudgeAppDiscoveryRunning({required NudgeApp that });
+  Stream<AppEvent> crateApiNudgeNudgeAppEvents({required NudgeApp that});
 
-String crateApiNudgeNudgeAppDownloadDir({required NudgeApp that });
+  Future<DeviceInfo> crateApiNudgeNudgeAppPair({required NudgeApp that, required String code});
 
-Stream<AppEvent> crateApiNudgeNudgeAppEvents({required NudgeApp that });
+  void crateApiNudgeNudgeAppRefresh({required NudgeApp that});
 
-Future<DeviceInfo> crateApiNudgeNudgeAppPair({required NudgeApp that , required String code });
+  Int64List crateApiNudgeNudgeAppSendFiles({
+    required NudgeApp that,
+    required String deviceId,
+    required List<String> paths,
+  });
 
-void crateApiNudgeNudgeAppRefresh({required NudgeApp that });
+  void crateApiNudgeNudgeAppSetDownloadDir({required NudgeApp that, required String dir});
 
-Uint64List crateApiNudgeNudgeAppSendFiles({required NudgeApp that , required String deviceId , required List<String> paths });
+  Future<NudgeApp> crateApiNudgeNudgeAppStart({
+    required String dataDir,
+    required String downloadDir,
+    required String deviceName,
+    required String platform,
+  });
 
-void crateApiNudgeNudgeAppSetDownloadDir({required NudgeApp that , required String dir });
+  String crateApiNudgeNudgeAppStartPairing({required NudgeApp that});
 
-Future<NudgeApp> crateApiNudgeNudgeAppStart({required String dataDir , required String downloadDir , required String deviceName , required String platform });
+  void crateApiNudgeNudgeAppUnpair({required NudgeApp that, required String deviceId});
 
-String crateApiNudgeNudgeAppStartPairing({required NudgeApp that });
+  Future<void> crateApiNudgeInitApp();
 
-void crateApiNudgeNudgeAppUnpair({required NudgeApp that , required String deviceId });
+  RustArcIncrementStrongCountFnType get rust_arc_increment_strong_count_NudgeApp;
 
-Future<void> crateApiNudgeInitApp();
+  RustArcDecrementStrongCountFnType get rust_arc_decrement_strong_count_NudgeApp;
 
-RustArcIncrementStrongCountFnType get rust_arc_increment_strong_count_NudgeApp;
+  CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_NudgeAppPtr;
+}
 
-RustArcDecrementStrongCountFnType get rust_arc_decrement_strong_count_NudgeApp;
+class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
+  RustLibApiImpl({
+    required super.handler,
+    required super.wire,
+    required super.generalizedFrbRustBinding,
+    required super.portManager,
+  });
 
-CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_NudgeAppPtr;
+  @override
+  void crateApiNudgeNudgeAppCancelPairing({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppCancelPairingConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppCancelPairingConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_cancel_pairing", argNames: ["that"]);
 
-                }
-                
+  @override
+  String crateApiNudgeNudgeAppDeviceId({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppDeviceIdConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
-                class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
-                  RustLibApiImpl({
-                    required super.handler,
-                    required super.wire,
-                    required super.generalizedFrbRustBinding,
-                    required super.portManager,
-                  });
+  TaskConstMeta get kCrateApiNudgeNudgeAppDeviceIdConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_device_id", argNames: ["that"]);
 
-                  @override void crateApiNudgeNudgeAppCancelPairing({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppCancelPairingConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
+  @override
+  String crateApiNudgeNudgeAppDeviceName({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppDeviceNameConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppDeviceNameConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_device_name", argNames: ["that"]);
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppCancelPairingConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_cancel_pairing",
-            argNames: ["that"],
-        );
-        
+  @override
+  List<DeviceInfo> crateApiNudgeNudgeAppDevices({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_list_device_info, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppDevicesConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
-@override String crateApiNudgeNudgeAppDeviceId({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppDeviceIdConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
+  TaskConstMeta get kCrateApiNudgeNudgeAppDevicesConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_devices", argNames: ["that"]);
 
+  @override
+  bool crateApiNudgeNudgeAppDiscoveryRunning({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_bool, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppDiscoveryRunningConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppDeviceIdConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_device_id",
-            argNames: ["that"],
-        );
-        
+  TaskConstMeta get kCrateApiNudgeNudgeAppDiscoveryRunningConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_discovery_running", argNames: ["that"]);
 
-@override String crateApiNudgeNudgeAppDeviceName({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppDeviceNameConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
+  @override
+  String crateApiNudgeNudgeAppDownloadDir({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppDownloadDirConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppDownloadDirConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_download_dir", argNames: ["that"]);
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppDeviceNameConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_device_name",
-            argNames: ["that"],
-        );
-        
-
-@override List<DeviceInfo> crateApiNudgeNudgeAppDevices({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_list_device_info,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppDevicesConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
-
-
-        TaskConstMeta get kCrateApiNudgeNudgeAppDevicesConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_devices",
-            argNames: ["that"],
-        );
-        
-
-@override bool crateApiNudgeNudgeAppDiscoveryRunning({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_bool,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppDiscoveryRunningConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
-
-
-        TaskConstMeta get kCrateApiNudgeNudgeAppDiscoveryRunningConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_discovery_running",
-            argNames: ["that"],
-        );
-        
-
-@override String crateApiNudgeNudgeAppDownloadDir({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppDownloadDirConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
-
-
-        TaskConstMeta get kCrateApiNudgeNudgeAppDownloadDirConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_download_dir",
-            argNames: ["that"],
-        );
-        
-
-@override Stream<AppEvent> crateApiNudgeNudgeAppEvents({required NudgeApp that })  { 
-            final sink = RustStreamSink<AppEvent>();
-            unawaited(handler.executeNormal(NormalTask(
-            callFfi: (port_) {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-sse_encode_StreamSink_app_event_Sse(sink, serializer);
+  @override
+  Stream<AppEvent> crateApiNudgeNudgeAppEvents({required NudgeApp that}) {
+    final sink = RustStreamSink<AppEvent>();
+    unawaited(
+      handler.executeNormal(
+        NormalTask(
+          callFfi: (port_) {
+            final serializer = SseSerializer(generalizedFrbRustBinding);
+            sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+              that,
+              serializer,
+            );
+            sse_encode_StreamSink_app_event_Sse(sink, serializer);
             pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7, port: port_);
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppEventsConstMeta,
-            argValues: [that, sink],
-            apiImpl: this,
-        )));
-            return sink.stream;
-             }
+          },
+          codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
+          constMeta: kCrateApiNudgeNudgeAppEventsConstMeta,
+          argValues: [that, sink],
+          apiImpl: this,
+        ),
+      ),
+    );
+    return sink.stream;
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppEventsConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_events", argNames: ["that", "sink"]);
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppEventsConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_events",
-            argNames: ["that", "sink"],
-        );
-        
-
-@override Future<DeviceInfo> crateApiNudgeNudgeAppPair({required NudgeApp that , required String code })  { return handler.executeNormal(NormalTask(
-            callFfi: (port_) {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-sse_encode_String(code, serializer);
-            pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8, port: port_);
-            
-            },
-            codec: 
-        SseCodec(
+  @override
+  Future<DeviceInfo> crateApiNudgeNudgeAppPair({required NudgeApp that, required String code}) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          sse_encode_String(code, serializer);
+          pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8, port: port_);
+        },
+        codec: SseCodec(
           decodeSuccessData: sse_decode_device_info,
           decodeErrorData: sse_decode_AnyhowException,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppPairConstMeta,
-            argValues: [that, code],
-            apiImpl: this,
-        )); }
+        ),
+        constMeta: kCrateApiNudgeNudgeAppPairConstMeta,
+        argValues: [that, code],
+        apiImpl: this,
+      ),
+    );
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppPairConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_pair", argNames: ["that", "code"]);
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppPairConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_pair",
-            argNames: ["that", "code"],
-        );
-        
+  @override
+  void crateApiNudgeNudgeAppRefresh({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppRefreshConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
-@override void crateApiNudgeNudgeAppRefresh({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppRefreshConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
+  TaskConstMeta get kCrateApiNudgeNudgeAppRefreshConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_refresh", argNames: ["that"]);
 
-
-        TaskConstMeta get kCrateApiNudgeNudgeAppRefreshConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_refresh",
-            argNames: ["that"],
-        );
-        
-
-@override Uint64List crateApiNudgeNudgeAppSendFiles({required NudgeApp that , required String deviceId , required List<String> paths })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-sse_encode_String(deviceId, serializer);
-sse_encode_list_String(paths, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_list_prim_u_64_strict,
+  @override
+  Int64List crateApiNudgeNudgeAppSendFiles({
+    required NudgeApp that,
+    required String deviceId,
+    required List<String> paths,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          sse_encode_String(deviceId, serializer);
+          sse_encode_list_String(paths, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 10)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_prim_i_64_strict,
           decodeErrorData: sse_decode_AnyhowException,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppSendFilesConstMeta,
-            argValues: [that, deviceId, paths],
-            apiImpl: this,
-        )); }
+        ),
+        constMeta: kCrateApiNudgeNudgeAppSendFilesConstMeta,
+        argValues: [that, deviceId, paths],
+        apiImpl: this,
+      ),
+    );
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppSendFilesConstMeta => const TaskConstMeta(
+    debugName: "NudgeApp_send_files",
+    argNames: ["that", "deviceId", "paths"],
+  );
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppSendFilesConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_send_files",
-            argNames: ["that", "deviceId", "paths"],
-        );
-        
+  @override
+  void crateApiNudgeNudgeAppSetDownloadDir({required NudgeApp that, required String dir}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          sse_encode_String(dir, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppSetDownloadDirConstMeta,
+        argValues: [that, dir],
+        apiImpl: this,
+      ),
+    );
+  }
 
-@override void crateApiNudgeNudgeAppSetDownloadDir({required NudgeApp that , required String dir })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-sse_encode_String(dir, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 11)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppSetDownloadDirConstMeta,
-            argValues: [that, dir],
-            apiImpl: this,
-        )); }
+  TaskConstMeta get kCrateApiNudgeNudgeAppSetDownloadDirConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_set_download_dir", argNames: ["that", "dir"]);
 
-
-        TaskConstMeta get kCrateApiNudgeNudgeAppSetDownloadDirConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_set_download_dir",
-            argNames: ["that", "dir"],
-        );
-        
-
-@override Future<NudgeApp> crateApiNudgeNudgeAppStart({required String dataDir , required String downloadDir , required String deviceName , required String platform })  { return handler.executeNormal(NormalTask(
-            callFfi: (port_) {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_String(dataDir, serializer);
-sse_encode_String(downloadDir, serializer);
-sse_encode_String(deviceName, serializer);
-sse_encode_String(platform, serializer);
-            pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12, port: port_);
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp,
+  @override
+  Future<NudgeApp> crateApiNudgeNudgeAppStart({
+    required String dataDir,
+    required String downloadDir,
+    required String deviceName,
+    required String platform,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(dataDir, serializer);
+          sse_encode_String(downloadDir, serializer);
+          sse_encode_String(deviceName, serializer);
+          sse_encode_String(platform, serializer);
+          pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12, port: port_);
+        },
+        codec: SseCodec(
+          decodeSuccessData:
+              sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp,
           decodeErrorData: sse_decode_AnyhowException,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppStartConstMeta,
-            argValues: [dataDir, downloadDir, deviceName, platform],
-            apiImpl: this,
-        )); }
+        ),
+        constMeta: kCrateApiNudgeNudgeAppStartConstMeta,
+        argValues: [dataDir, downloadDir, deviceName, platform],
+        apiImpl: this,
+      ),
+    );
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppStartConstMeta => const TaskConstMeta(
+    debugName: "NudgeApp_start",
+    argNames: ["dataDir", "downloadDir", "deviceName", "platform"],
+  );
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppStartConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_start",
-            argNames: ["dataDir", "downloadDir", "deviceName", "platform"],
-        );
-        
+  @override
+  String crateApiNudgeNudgeAppStartPairing({required NudgeApp that}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
+        constMeta: kCrateApiNudgeNudgeAppStartPairingConstMeta,
+        argValues: [that],
+        apiImpl: this,
+      ),
+    );
+  }
 
-@override String crateApiNudgeNudgeAppStartPairing({required NudgeApp that })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13)!;
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppStartPairingConstMeta,
-            argValues: [that],
-            apiImpl: this,
-        )); }
+  TaskConstMeta get kCrateApiNudgeNudgeAppStartPairingConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_start_pairing", argNames: ["that"]);
 
-
-        TaskConstMeta get kCrateApiNudgeNudgeAppStartPairingConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_start_pairing",
-            argNames: ["that"],
-        );
-        
-
-@override void crateApiNudgeNudgeAppUnpair({required NudgeApp that , required String deviceId })  { return handler.executeSync(SyncTask(
-            callFfi: () {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(that, serializer);
-sse_encode_String(deviceId, serializer);
-            return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
-            
-            },
-            codec: 
-        SseCodec(
+  @override
+  void crateApiNudgeNudgeAppUnpair({required NudgeApp that, required String deviceId}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          sse_encode_String(deviceId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
+        },
+        codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
           decodeErrorData: sse_decode_AnyhowException,
-        )
-        ,
-            constMeta: kCrateApiNudgeNudgeAppUnpairConstMeta,
-            argValues: [that, deviceId],
-            apiImpl: this,
-        )); }
+        ),
+        constMeta: kCrateApiNudgeNudgeAppUnpairConstMeta,
+        argValues: [that, deviceId],
+        apiImpl: this,
+      ),
+    );
+  }
 
+  TaskConstMeta get kCrateApiNudgeNudgeAppUnpairConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_unpair", argNames: ["that", "deviceId"]);
 
-        TaskConstMeta get kCrateApiNudgeNudgeAppUnpairConstMeta => const TaskConstMeta(
-            debugName: "NudgeApp_unpair",
-            argNames: ["that", "deviceId"],
+  @override
+  Future<void> crateApiNudgeInitApp() {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15, port: port_);
+        },
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
+        constMeta: kCrateApiNudgeInitAppConstMeta,
+        argValues: [],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNudgeInitAppConstMeta =>
+      const TaskConstMeta(debugName: "init_app", argNames: []);
+
+  RustArcIncrementStrongCountFnType get rust_arc_increment_strong_count_NudgeApp => wire
+      .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp;
+
+  RustArcDecrementStrongCountFnType get rust_arc_decrement_strong_count_NudgeApp => wire
+      .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp;
+
+  @protected
+  AnyhowException dco_decode_AnyhowException(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AnyhowException(raw as String);
+  }
+
+  @protected
+  NudgeApp
+  dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NudgeAppImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  NudgeApp
+  dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NudgeAppImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  NudgeApp dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return NudgeAppImpl.frbInternalDcoDecode(raw as List<dynamic>);
+  }
+
+  @protected
+  RustStreamSink<AppEvent> dco_decode_StreamSink_app_event_Sse(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError();
+  }
+
+  @protected
+  String dco_decode_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as String;
+  }
+
+  @protected
+  AppEvent dco_decode_app_event(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    switch (raw[0]) {
+      case 0:
+        return AppEvent_DevicesChanged();
+      case 1:
+        return AppEvent_Paired(device: dco_decode_box_autoadd_device_info(raw[1]));
+      case 2:
+        return AppEvent_PairingClosed();
+      case 3:
+        return AppEvent_TransferStarted(
+          id: dco_decode_i_64(raw[1]),
+          deviceId: dco_decode_String(raw[2]),
+          incoming: dco_decode_bool(raw[3]),
+          fileName: dco_decode_String(raw[4]),
+          size: dco_decode_i_64(raw[5]),
         );
-        
-
-@override Future<void> crateApiNudgeInitApp()  { return handler.executeNormal(NormalTask(
-            callFfi: (port_) {
-              
-            final serializer = SseSerializer(generalizedFrbRustBinding);
-            pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 15, port: port_);
-            
-            },
-            codec: 
-        SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        )
-        ,
-            constMeta: kCrateApiNudgeInitAppConstMeta,
-            argValues: [],
-            apiImpl: this,
-        )); }
-
-
-        TaskConstMeta get kCrateApiNudgeInitAppConstMeta => const TaskConstMeta(
-            debugName: "init_app",
-            argNames: [],
+      case 4:
+        return AppEvent_TransferProgress(
+          id: dco_decode_i_64(raw[1]),
+          bytes: dco_decode_i_64(raw[2]),
+          size: dco_decode_i_64(raw[3]),
+          bytesPerSec: dco_decode_f_64(raw[4]),
         );
-        
-
-RustArcIncrementStrongCountFnType get rust_arc_increment_strong_count_NudgeApp => wire.rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp;
-
-RustArcDecrementStrongCountFnType get rust_arc_decrement_strong_count_NudgeApp => wire.rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp;
-
-
-
-                  @protected AnyhowException dco_decode_AnyhowException(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return AnyhowException(raw as String); }
-
-@protected NudgeApp dco_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return NudgeAppImpl.frbInternalDcoDecode(raw as List<dynamic>); }
-
-@protected NudgeApp dco_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return NudgeAppImpl.frbInternalDcoDecode(raw as List<dynamic>); }
-
-@protected NudgeApp dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return NudgeAppImpl.frbInternalDcoDecode(raw as List<dynamic>); }
-
-@protected RustStreamSink<AppEvent> dco_decode_StreamSink_app_event_Sse(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-throw UnimplementedError(); }
-
-@protected String dco_decode_String(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return raw as String; }
-
-@protected AppEvent dco_decode_app_event(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-switch (raw[0]) {
-                case 0: return AppEvent_DevicesChanged();
-case 1: return AppEvent_Paired(device: dco_decode_box_autoadd_device_info(raw[1]),);
-case 2: return AppEvent_PairingClosed();
-case 3: return AppEvent_TransferStarted(id: dco_decode_u_64(raw[1]),deviceId: dco_decode_String(raw[2]),incoming: dco_decode_bool(raw[3]),fileName: dco_decode_String(raw[4]),size: dco_decode_u_64(raw[5]),);
-case 4: return AppEvent_TransferProgress(id: dco_decode_u_64(raw[1]),bytes: dco_decode_u_64(raw[2]),size: dco_decode_u_64(raw[3]),bytesPerSec: dco_decode_f_64(raw[4]),);
-case 5: return AppEvent_TransferDone(id: dco_decode_u_64(raw[1]),path: dco_decode_String(raw[2]),bytes: dco_decode_u_64(raw[3]),seconds: dco_decode_f_64(raw[4]),resumedFrom: dco_decode_u_64(raw[5]),);
-case 6: return AppEvent_TransferFailed(id: dco_decode_u_64(raw[1]),error: dco_decode_String(raw[2]),);
-                default: throw Exception("unreachable");
-            } }
-
-@protected bool dco_decode_bool(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return raw as bool; }
-
-@protected DeviceInfo dco_decode_box_autoadd_device_info(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return dco_decode_device_info(raw); }
-
-@protected DeviceInfo dco_decode_device_info(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-final arr = raw as List<dynamic>;
-                if (arr.length != 6) throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
-                return DeviceInfo(id: dco_decode_String(arr[0]),
-shortId: dco_decode_String(arr[1]),
-name: dco_decode_String(arr[2]),
-platform: dco_decode_String(arr[3]),
-paired: dco_decode_bool(arr[4]),
-online: dco_decode_bool(arr[5]),); }
-
-@protected double dco_decode_f_64(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return raw as double; }
-
-@protected List<String> dco_decode_list_String(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return (raw as List<dynamic>).map(dco_decode_String).toList(); }
-
-@protected List<DeviceInfo> dco_decode_list_device_info(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return (raw as List<dynamic>).map(dco_decode_device_info).toList(); }
-
-@protected Uint64List dco_decode_list_prim_u_64_strict(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return dcoDecodeUint64List(raw); }
-
-@protected Uint8List dco_decode_list_prim_u_8_strict(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return raw as Uint8List; }
-
-@protected BigInt dco_decode_u_64(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return dcoDecodeU64(raw); }
-
-@protected int dco_decode_u_8(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return raw as int; }
-
-@protected void dco_decode_unit(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return; }
-
-@protected BigInt dco_decode_usize(dynamic raw){ // Codec=Dco (DartCObject based), see doc to use other codecs
-return dcoDecodeU64(raw); }
-
-@protected AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-var inner = sse_decode_String(deserializer);
-        return AnyhowException(inner); }
-
-@protected NudgeApp sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return NudgeAppImpl.frbInternalSseDecode(sse_decode_usize(deserializer), sse_decode_i_32(deserializer)); }
-
-@protected NudgeApp sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return NudgeAppImpl.frbInternalSseDecode(sse_decode_usize(deserializer), sse_decode_i_32(deserializer)); }
-
-@protected NudgeApp sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return NudgeAppImpl.frbInternalSseDecode(sse_decode_usize(deserializer), sse_decode_i_32(deserializer)); }
-
-@protected RustStreamSink<AppEvent> sse_decode_StreamSink_app_event_Sse(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-throw UnimplementedError('Unreachable ()'); }
-
-@protected String sse_decode_String(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-var inner = sse_decode_list_prim_u_8_strict(deserializer);
-        return utf8.decoder.convert(inner); }
-
-@protected AppEvent sse_decode_app_event(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-
-            var tag_ = sse_decode_i_32(deserializer);
-            switch (tag_) { case 0: return AppEvent_DevicesChanged();case 1: var var_device = sse_decode_box_autoadd_device_info(deserializer);
-return AppEvent_Paired(device: var_device);case 2: return AppEvent_PairingClosed();case 3: var var_id = sse_decode_u_64(deserializer);
-var var_deviceId = sse_decode_String(deserializer);
-var var_incoming = sse_decode_bool(deserializer);
-var var_fileName = sse_decode_String(deserializer);
-var var_size = sse_decode_u_64(deserializer);
-return AppEvent_TransferStarted(id: var_id, deviceId: var_deviceId, incoming: var_incoming, fileName: var_fileName, size: var_size);case 4: var var_id = sse_decode_u_64(deserializer);
-var var_bytes = sse_decode_u_64(deserializer);
-var var_size = sse_decode_u_64(deserializer);
-var var_bytesPerSec = sse_decode_f_64(deserializer);
-return AppEvent_TransferProgress(id: var_id, bytes: var_bytes, size: var_size, bytesPerSec: var_bytesPerSec);case 5: var var_id = sse_decode_u_64(deserializer);
-var var_path = sse_decode_String(deserializer);
-var var_bytes = sse_decode_u_64(deserializer);
-var var_seconds = sse_decode_f_64(deserializer);
-var var_resumedFrom = sse_decode_u_64(deserializer);
-return AppEvent_TransferDone(id: var_id, path: var_path, bytes: var_bytes, seconds: var_seconds, resumedFrom: var_resumedFrom);case 6: var var_id = sse_decode_u_64(deserializer);
-var var_error = sse_decode_String(deserializer);
-return AppEvent_TransferFailed(id: var_id, error: var_error); default: throw UnimplementedError(''); }
-             }
-
-@protected bool sse_decode_bool(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return deserializer.buffer.getUint8() != 0; }
-
-@protected DeviceInfo sse_decode_box_autoadd_device_info(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return (sse_decode_device_info(deserializer)); }
-
-@protected DeviceInfo sse_decode_device_info(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-var var_id = sse_decode_String(deserializer);
-var var_shortId = sse_decode_String(deserializer);
-var var_name = sse_decode_String(deserializer);
-var var_platform = sse_decode_String(deserializer);
-var var_paired = sse_decode_bool(deserializer);
-var var_online = sse_decode_bool(deserializer);
-return DeviceInfo(id: var_id, shortId: var_shortId, name: var_name, platform: var_platform, paired: var_paired, online: var_online); }
-
-@protected double sse_decode_f_64(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return deserializer.buffer.getFloat64(); }
-
-@protected List<String> sse_decode_list_String(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-
-        var len_ = sse_decode_i_32(deserializer);
-        var ans_ = <String>[];
-        for (var idx_ = 0; idx_ < len_; ++idx_) { ans_.add(sse_decode_String(deserializer)); }
-        return ans_;
-         }
-
-@protected List<DeviceInfo> sse_decode_list_device_info(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-
-        var len_ = sse_decode_i_32(deserializer);
-        var ans_ = <DeviceInfo>[];
-        for (var idx_ = 0; idx_ < len_; ++idx_) { ans_.add(sse_decode_device_info(deserializer)); }
-        return ans_;
-         }
-
-@protected Uint64List sse_decode_list_prim_u_64_strict(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-var len_ = sse_decode_i_32(deserializer);
-                return deserializer.buffer.getUint64List(len_); }
-
-@protected Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-var len_ = sse_decode_i_32(deserializer);
-                return deserializer.buffer.getUint8List(len_); }
-
-@protected BigInt sse_decode_u_64(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return deserializer.buffer.getBigUint64(); }
-
-@protected int sse_decode_u_8(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return deserializer.buffer.getUint8(); }
-
-@protected void sse_decode_unit(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
- }
-
-@protected BigInt sse_decode_usize(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return deserializer.buffer.getBigUint64(); }
-
-@protected int sse_decode_i_32(SseDeserializer deserializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-return deserializer.buffer.getInt32(); }
-
-@protected void sse_encode_AnyhowException(AnyhowException self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_String(self.message, serializer); }
-
-@protected void sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(NudgeApp self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: true), serializer); }
-
-@protected void sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(NudgeApp self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: false), serializer); }
-
-@protected void sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(NudgeApp self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: null), serializer); }
-
-@protected void sse_encode_StreamSink_app_event_Sse(RustStreamSink<AppEvent> self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_String(self.setupAndSerialize(codec: SseCodec(
-            decodeSuccessData: sse_decode_app_event,
-            decodeErrorData: sse_decode_AnyhowException,
-        )), serializer); }
-
-@protected void sse_encode_String(String self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer); }
-
-@protected void sse_encode_app_event(AppEvent self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-switch (self) { case AppEvent_DevicesChanged(): sse_encode_i_32(0, serializer); case AppEvent_Paired(device: final device): sse_encode_i_32(1, serializer); sse_encode_box_autoadd_device_info(device, serializer);
-case AppEvent_PairingClosed(): sse_encode_i_32(2, serializer); case AppEvent_TransferStarted(id: final id,deviceId: final deviceId,incoming: final incoming,fileName: final fileName,size: final size): sse_encode_i_32(3, serializer); sse_encode_u_64(id, serializer);
-sse_encode_String(deviceId, serializer);
-sse_encode_bool(incoming, serializer);
-sse_encode_String(fileName, serializer);
-sse_encode_u_64(size, serializer);
-case AppEvent_TransferProgress(id: final id,bytes: final bytes,size: final size,bytesPerSec: final bytesPerSec): sse_encode_i_32(4, serializer); sse_encode_u_64(id, serializer);
-sse_encode_u_64(bytes, serializer);
-sse_encode_u_64(size, serializer);
-sse_encode_f_64(bytesPerSec, serializer);
-case AppEvent_TransferDone(id: final id,path: final path,bytes: final bytes,seconds: final seconds,resumedFrom: final resumedFrom): sse_encode_i_32(5, serializer); sse_encode_u_64(id, serializer);
-sse_encode_String(path, serializer);
-sse_encode_u_64(bytes, serializer);
-sse_encode_f_64(seconds, serializer);
-sse_encode_u_64(resumedFrom, serializer);
-case AppEvent_TransferFailed(id: final id,error: final error): sse_encode_i_32(6, serializer); sse_encode_u_64(id, serializer);
-sse_encode_String(error, serializer);
-  } }
-
-@protected void sse_encode_bool(bool self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-serializer.buffer.putUint8(self ? 1 : 0); }
-
-@protected void sse_encode_box_autoadd_device_info(DeviceInfo self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_device_info(self, serializer); }
-
-@protected void sse_encode_device_info(DeviceInfo self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_String(self.id, serializer);
-sse_encode_String(self.shortId, serializer);
-sse_encode_String(self.name, serializer);
-sse_encode_String(self.platform, serializer);
-sse_encode_bool(self.paired, serializer);
-sse_encode_bool(self.online, serializer);
- }
-
-@protected void sse_encode_f_64(double self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-serializer.buffer.putFloat64(self); }
-
-@protected void sse_encode_list_String(List<String> self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_i_32(self.length, serializer);
-        for (final item in self) { sse_encode_String(item, serializer); } }
-
-@protected void sse_encode_list_device_info(List<DeviceInfo> self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_i_32(self.length, serializer);
-        for (final item in self) { sse_encode_device_info(item, serializer); } }
-
-@protected void sse_encode_list_prim_u_64_strict(Uint64List self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_i_32(self.length, serializer);
-                    serializer.buffer.putUint64List(self); }
-
-@protected void sse_encode_list_prim_u_8_strict(Uint8List self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-sse_encode_i_32(self.length, serializer);
-                    serializer.buffer.putUint8List(self); }
-
-@protected void sse_encode_u_64(BigInt self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-serializer.buffer.putBigUint64(self); }
-
-@protected void sse_encode_u_8(int self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-serializer.buffer.putUint8(self); }
-
-@protected void sse_encode_unit(void self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
- }
-
-@protected void sse_encode_usize(BigInt self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-serializer.buffer.putBigUint64(self); }
-
-@protected void sse_encode_i_32(int self, SseSerializer serializer){ // Codec=Sse (Serialization based), see doc to use other codecs
-serializer.buffer.putInt32(self); }
-                }
-                
-
-            @sealed class NudgeAppImpl extends RustOpaque implements NudgeApp {
-                // Not to be used by end users
-                NudgeAppImpl.frbInternalDcoDecode(List<dynamic> wire):
-                    super.frbInternalDcoDecode(wire, _kStaticData);
-
-                // Not to be used by end users
-                NudgeAppImpl.frbInternalSseDecode(BigInt ptr, int externalSizeOnNative):
-                    super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
-
-                static final _kStaticData = RustArcStaticData(
-                    rustArcIncrementStrongCount: RustLib.instance.api.rust_arc_increment_strong_count_NudgeApp,
-                    rustArcDecrementStrongCount: RustLib.instance.api.rust_arc_decrement_strong_count_NudgeApp,
-                    rustArcDecrementStrongCountPtr: RustLib.instance.api.rust_arc_decrement_strong_count_NudgeAppPtr,
-                );
-
-                 void  cancelPairing()=>RustLib.instance.api.crateApiNudgeNudgeAppCancelPairing(that: this, );
-
-
- String  deviceId()=>RustLib.instance.api.crateApiNudgeNudgeAppDeviceId(that: this, );
-
-
- String  deviceName()=>RustLib.instance.api.crateApiNudgeNudgeAppDeviceName(that: this, );
-
-
-/// Paired devices first, then unpaired nearby ones.
- List<DeviceInfo>  devices()=>RustLib.instance.api.crateApiNudgeNudgeAppDevices(that: this, );
-
-
- bool  discoveryRunning()=>RustLib.instance.api.crateApiNudgeNudgeAppDiscoveryRunning(that: this, );
-
-
- String  downloadDir()=>RustLib.instance.api.crateApiNudgeNudgeAppDownloadDir(that: this, );
-
-
-/// Deliver events to Dart. Call once; later calls do nothing.
- Stream<AppEvent>  events()=>RustLib.instance.api.crateApiNudgeNudgeAppEvents(that: this, );
-
-
-/// Pair with the device showing `code` (scanned or pasted).
- Future<DeviceInfo>  pair({required String code })=>RustLib.instance.api.crateApiNudgeNudgeAppPair(that: this, code: code);
-
-
-/// Ask nearby devices to announce themselves now.
- void  refresh()=>RustLib.instance.api.crateApiNudgeNudgeAppRefresh(that: this, );
-
-
-/// Send files to a paired device in the background. Returns one
-/// transfer ID per file; progress arrives as events.
- Uint64List  sendFiles({required String deviceId , required List<String> paths })=>RustLib.instance.api.crateApiNudgeNudgeAppSendFiles(that: this, deviceId: deviceId, paths: paths);
-
-
- void  setDownloadDir({required String dir })=>RustLib.instance.api.crateApiNudgeNudgeAppSetDownloadDir(that: this, dir: dir);
-
-
-/// Show a pairing code: returns the text for the QR code. It works once
-/// and expires after five minutes (`AppEvent::PairingClosed`).
- String  startPairing()=>RustLib.instance.api.crateApiNudgeNudgeAppStartPairing(that: this, );
-
-
- void  unpair({required String deviceId })=>RustLib.instance.api.crateApiNudgeNudgeAppUnpair(that: this, deviceId: deviceId);
-
-
-            }
+      case 5:
+        return AppEvent_TransferDone(
+          id: dco_decode_i_64(raw[1]),
+          path: dco_decode_String(raw[2]),
+          bytes: dco_decode_i_64(raw[3]),
+          seconds: dco_decode_f_64(raw[4]),
+          resumedFrom: dco_decode_i_64(raw[5]),
+        );
+      case 6:
+        return AppEvent_TransferFailed(
+          id: dco_decode_i_64(raw[1]),
+          error: dco_decode_String(raw[2]),
+        );
+      default:
+        throw Exception("unreachable");
+    }
+  }
+
+  @protected
+  bool dco_decode_bool(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as bool;
+  }
+
+  @protected
+  DeviceInfo dco_decode_box_autoadd_device_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_device_info(raw);
+  }
+
+  @protected
+  DeviceInfo dco_decode_device_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6) throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return DeviceInfo(
+      id: dco_decode_String(arr[0]),
+      shortId: dco_decode_String(arr[1]),
+      name: dco_decode_String(arr[2]),
+      platform: dco_decode_String(arr[3]),
+      paired: dco_decode_bool(arr[4]),
+      online: dco_decode_bool(arr[5]),
+    );
+  }
+
+  @protected
+  double dco_decode_f_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as double;
+  }
+
+  @protected
+  PlatformInt64 dco_decode_i_64(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeI64(raw);
+  }
+
+  @protected
+  List<String> dco_decode_list_String(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_String).toList();
+  }
+
+  @protected
+  List<DeviceInfo> dco_decode_list_device_info(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_device_info).toList();
+  }
+
+  @protected
+  Int64List dco_decode_list_prim_i_64_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeInt64List(raw);
+  }
+
+  @protected
+  Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as Uint8List;
+  }
+
+  @protected
+  int dco_decode_u_8(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as int;
+  }
+
+  @protected
+  void dco_decode_unit(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return;
+  }
+
+  @protected
+  BigInt dco_decode_usize(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dcoDecodeU64(raw);
+  }
+
+  @protected
+  AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_String(deserializer);
+    return AnyhowException(inner);
+  }
+
+  @protected
+  NudgeApp
+  sse_decode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NudgeAppImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  NudgeApp
+  sse_decode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NudgeAppImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  NudgeApp sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return NudgeAppImpl.frbInternalSseDecode(
+      sse_decode_usize(deserializer),
+      sse_decode_i_32(deserializer),
+    );
+  }
+
+  @protected
+  RustStreamSink<AppEvent> sse_decode_StreamSink_app_event_Sse(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    throw UnimplementedError('Unreachable ()');
+  }
+
+  @protected
+  String sse_decode_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_list_prim_u_8_strict(deserializer);
+    return utf8.decoder.convert(inner);
+  }
+
+  @protected
+  AppEvent sse_decode_app_event(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var tag_ = sse_decode_i_32(deserializer);
+    switch (tag_) {
+      case 0:
+        return AppEvent_DevicesChanged();
+      case 1:
+        var var_device = sse_decode_box_autoadd_device_info(deserializer);
+        return AppEvent_Paired(device: var_device);
+      case 2:
+        return AppEvent_PairingClosed();
+      case 3:
+        var var_id = sse_decode_i_64(deserializer);
+        var var_deviceId = sse_decode_String(deserializer);
+        var var_incoming = sse_decode_bool(deserializer);
+        var var_fileName = sse_decode_String(deserializer);
+        var var_size = sse_decode_i_64(deserializer);
+        return AppEvent_TransferStarted(
+          id: var_id,
+          deviceId: var_deviceId,
+          incoming: var_incoming,
+          fileName: var_fileName,
+          size: var_size,
+        );
+      case 4:
+        var var_id = sse_decode_i_64(deserializer);
+        var var_bytes = sse_decode_i_64(deserializer);
+        var var_size = sse_decode_i_64(deserializer);
+        var var_bytesPerSec = sse_decode_f_64(deserializer);
+        return AppEvent_TransferProgress(
+          id: var_id,
+          bytes: var_bytes,
+          size: var_size,
+          bytesPerSec: var_bytesPerSec,
+        );
+      case 5:
+        var var_id = sse_decode_i_64(deserializer);
+        var var_path = sse_decode_String(deserializer);
+        var var_bytes = sse_decode_i_64(deserializer);
+        var var_seconds = sse_decode_f_64(deserializer);
+        var var_resumedFrom = sse_decode_i_64(deserializer);
+        return AppEvent_TransferDone(
+          id: var_id,
+          path: var_path,
+          bytes: var_bytes,
+          seconds: var_seconds,
+          resumedFrom: var_resumedFrom,
+        );
+      case 6:
+        var var_id = sse_decode_i_64(deserializer);
+        var var_error = sse_decode_String(deserializer);
+        return AppEvent_TransferFailed(id: var_id, error: var_error);
+      default:
+        throw UnimplementedError('');
+    }
+  }
+
+  @protected
+  bool sse_decode_bool(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint8() != 0;
+  }
+
+  @protected
+  DeviceInfo sse_decode_box_autoadd_device_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_device_info(deserializer));
+  }
+
+  @protected
+  DeviceInfo sse_decode_device_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_shortId = sse_decode_String(deserializer);
+    var var_name = sse_decode_String(deserializer);
+    var var_platform = sse_decode_String(deserializer);
+    var var_paired = sse_decode_bool(deserializer);
+    var var_online = sse_decode_bool(deserializer);
+    return DeviceInfo(
+      id: var_id,
+      shortId: var_shortId,
+      name: var_name,
+      platform: var_platform,
+      paired: var_paired,
+      online: var_online,
+    );
+  }
+
+  @protected
+  double sse_decode_f_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getFloat64();
+  }
+
+  @protected
+  PlatformInt64 sse_decode_i_64(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getPlatformInt64();
+  }
+
+  @protected
+  List<String> sse_decode_list_String(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <String>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_String(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DeviceInfo> sse_decode_list_device_info(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DeviceInfo>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_device_info(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  Int64List sse_decode_list_prim_i_64_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getInt64List(len_);
+  }
+
+  @protected
+  Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  int sse_decode_u_8(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getUint8();
+  }
+
+  @protected
+  void sse_decode_unit(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  BigInt sse_decode_usize(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getBigUint64();
+  }
+
+  @protected
+  int sse_decode_i_32(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return deserializer.buffer.getInt32();
+  }
+
+  @protected
+  void sse_encode_AnyhowException(AnyhowException self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.message, serializer);
+  }
+
+  @protected
+  void sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    NudgeApp self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: true), serializer);
+  }
+
+  @protected
+  void sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    NudgeApp self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: false), serializer);
+  }
+
+  @protected
+  void sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+    NudgeApp self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: null), serializer);
+  }
+
+  @protected
+  void sse_encode_StreamSink_app_event_Sse(
+    RustStreamSink<AppEvent> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(
+      self.setupAndSerialize(
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_app_event,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+      ),
+      serializer,
+    );
+  }
+
+  @protected
+  void sse_encode_String(String self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_prim_u_8_strict(utf8.encoder.convert(self), serializer);
+  }
+
+  @protected
+  void sse_encode_app_event(AppEvent self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    switch (self) {
+      case AppEvent_DevicesChanged():
+        sse_encode_i_32(0, serializer);
+      case AppEvent_Paired(device: final device):
+        sse_encode_i_32(1, serializer);
+        sse_encode_box_autoadd_device_info(device, serializer);
+      case AppEvent_PairingClosed():
+        sse_encode_i_32(2, serializer);
+      case AppEvent_TransferStarted(
+        id: final id,
+        deviceId: final deviceId,
+        incoming: final incoming,
+        fileName: final fileName,
+        size: final size,
+      ):
+        sse_encode_i_32(3, serializer);
+        sse_encode_i_64(id, serializer);
+        sse_encode_String(deviceId, serializer);
+        sse_encode_bool(incoming, serializer);
+        sse_encode_String(fileName, serializer);
+        sse_encode_i_64(size, serializer);
+      case AppEvent_TransferProgress(
+        id: final id,
+        bytes: final bytes,
+        size: final size,
+        bytesPerSec: final bytesPerSec,
+      ):
+        sse_encode_i_32(4, serializer);
+        sse_encode_i_64(id, serializer);
+        sse_encode_i_64(bytes, serializer);
+        sse_encode_i_64(size, serializer);
+        sse_encode_f_64(bytesPerSec, serializer);
+      case AppEvent_TransferDone(
+        id: final id,
+        path: final path,
+        bytes: final bytes,
+        seconds: final seconds,
+        resumedFrom: final resumedFrom,
+      ):
+        sse_encode_i_32(5, serializer);
+        sse_encode_i_64(id, serializer);
+        sse_encode_String(path, serializer);
+        sse_encode_i_64(bytes, serializer);
+        sse_encode_f_64(seconds, serializer);
+        sse_encode_i_64(resumedFrom, serializer);
+      case AppEvent_TransferFailed(id: final id, error: final error):
+        sse_encode_i_32(6, serializer);
+        sse_encode_i_64(id, serializer);
+        sse_encode_String(error, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_bool(bool self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint8(self ? 1 : 0);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_device_info(DeviceInfo self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_device_info(self, serializer);
+  }
+
+  @protected
+  void sse_encode_device_info(DeviceInfo self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.shortId, serializer);
+    sse_encode_String(self.name, serializer);
+    sse_encode_String(self.platform, serializer);
+    sse_encode_bool(self.paired, serializer);
+    sse_encode_bool(self.online, serializer);
+  }
+
+  @protected
+  void sse_encode_f_64(double self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putFloat64(self);
+  }
+
+  @protected
+  void sse_encode_i_64(PlatformInt64 self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putPlatformInt64(self);
+  }
+
+  @protected
+  void sse_encode_list_String(List<String> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_String(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_device_info(List<DeviceInfo> self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_device_info(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_prim_i_64_strict(Int64List self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putInt64List(self);
+  }
+
+  @protected
+  void sse_encode_list_prim_u_8_strict(Uint8List self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_u_8(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putUint8(self);
+  }
+
+  @protected
+  void sse_encode_unit(void self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+  }
+
+  @protected
+  void sse_encode_usize(BigInt self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putBigUint64(self);
+  }
+
+  @protected
+  void sse_encode_i_32(int self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    serializer.buffer.putInt32(self);
+  }
+}
+
+@sealed
+class NudgeAppImpl extends RustOpaque implements NudgeApp {
+  // Not to be used by end users
+  NudgeAppImpl.frbInternalDcoDecode(List<dynamic> wire)
+    : super.frbInternalDcoDecode(wire, _kStaticData);
+
+  // Not to be used by end users
+  NudgeAppImpl.frbInternalSseDecode(BigInt ptr, int externalSizeOnNative)
+    : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
+
+  static final _kStaticData = RustArcStaticData(
+    rustArcIncrementStrongCount: RustLib.instance.api.rust_arc_increment_strong_count_NudgeApp,
+    rustArcDecrementStrongCount: RustLib.instance.api.rust_arc_decrement_strong_count_NudgeApp,
+    rustArcDecrementStrongCountPtr:
+        RustLib.instance.api.rust_arc_decrement_strong_count_NudgeAppPtr,
+  );
+
+  void cancelPairing() => RustLib.instance.api.crateApiNudgeNudgeAppCancelPairing(that: this);
+
+  String deviceId() => RustLib.instance.api.crateApiNudgeNudgeAppDeviceId(that: this);
+
+  String deviceName() => RustLib.instance.api.crateApiNudgeNudgeAppDeviceName(that: this);
+
+  /// Paired devices first, then unpaired nearby ones.
+  List<DeviceInfo> devices() => RustLib.instance.api.crateApiNudgeNudgeAppDevices(that: this);
+
+  bool discoveryRunning() => RustLib.instance.api.crateApiNudgeNudgeAppDiscoveryRunning(that: this);
+
+  String downloadDir() => RustLib.instance.api.crateApiNudgeNudgeAppDownloadDir(that: this);
+
+  /// Deliver events to Dart. Call once; later calls do nothing.
+  Stream<AppEvent> events() => RustLib.instance.api.crateApiNudgeNudgeAppEvents(that: this);
+
+  /// Pair with the device showing `code` (scanned or pasted).
+  Future<DeviceInfo> pair({required String code}) =>
+      RustLib.instance.api.crateApiNudgeNudgeAppPair(that: this, code: code);
+
+  /// Ask nearby devices to announce themselves now.
+  void refresh() => RustLib.instance.api.crateApiNudgeNudgeAppRefresh(that: this);
+
+  /// Send files to a paired device in the background. Returns one
+  /// transfer ID per file; progress arrives as events.
+  Int64List sendFiles({required String deviceId, required List<String> paths}) => RustLib
+      .instance
+      .api
+      .crateApiNudgeNudgeAppSendFiles(that: this, deviceId: deviceId, paths: paths);
+
+  void setDownloadDir({required String dir}) =>
+      RustLib.instance.api.crateApiNudgeNudgeAppSetDownloadDir(that: this, dir: dir);
+
+  /// Show a pairing code: returns the text for the QR code. It works once
+  /// and expires after five minutes (`AppEvent::PairingClosed`).
+  String startPairing() => RustLib.instance.api.crateApiNudgeNudgeAppStartPairing(that: this);
+
+  void unpair({required String deviceId}) =>
+      RustLib.instance.api.crateApiNudgeNudgeAppUnpair(that: this, deviceId: deviceId);
+}

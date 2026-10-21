@@ -40,3 +40,51 @@ jobs:
           export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
           echo "Using NDK at $ANDROID_NDK_HOME"
           cargo ndk -t arm64-v8a -t armeabi-v7a -t x86_64 build -p nudge-core --release
+
+  app:
+    name: App (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: android
+            os: ubuntu-latest
+          - target: windows
+            os: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    env:
+      # Generated bridge code isn't held to the workspace's warning rules.
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.47.7
+          cache: true
+      - uses: actions/setup-java@v5
+        if: matrix.target == 'android'
+        with:
+          distribution: temurin
+          java-version: 17
+      - if: matrix.target == 'android'
+        run: rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/rust
+      - run: flutter pub get
+      - name: Check generated bindings are up to date
+        if: matrix.target == 'android'
+        run: |
+          cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
+          flutter_rust_bridge_codegen generate
+          git diff --exit-code -- lib/src/rust rust/src/frb_generated.rs
+      - run: dart format --output none --set-exit-if-changed lib
+      - run: flutter analyze
+      - if: matrix.target == 'android'
+        run: flutter build apk --debug
+      - if: matrix.target == 'windows'
+        run: flutter build windows --debug
