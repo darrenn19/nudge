@@ -1,9 +1,44 @@
 # Nudge Benchmarks
 
-Measured numbers only. Every performance change should add a row here. These replace the modeled estimates in `DESIGN.md`.
+Measured numbers only. Every performance change should add a row here. Phone ↔ PC numbers over Wi-Fi (Phase 2) will replace the modelled estimates in `DESIGN.md`; everything so far is one Windows PC talking to itself.
 
 ## How to run
-Phase 1 adds `nudge bench`. Record the command line used with every result.
+Always use a release build. Record the command line with every result.
+
+**Local (one machine, each layer separately):**
+```sh
+cargo run --release -p nudge-cli -- bench --size 2G --disk
+```
+Runs sender and receiver in one process over loopback and reports raw TCP, raw TLS, BLAKE3 alone, the full protocol memory-to-memory, and (with `--disk`) a real file transfer through the temp folder. CPU figures cover both ends together. `CPU s/GB` is the number to watch for phone battery.
+
+**Remote (a real network path, no disks):**
+```sh
+# receiving device
+nudge receive --discard --bind 0.0.0.0
+# sending device (the two must trust each other: nudge id / nudge trust)
+nudge bench --to <receiver-ip> --size 2G
+```
+
+## Layer breakdown (`nudge bench`)
+
+2026-10-20, uncommitted (Phase 1 step 5), this Windows PC, `nudge bench --size 2G --disk`, two runs:
+
+| Layer | MB/s (run 1 / 2) | CPU cores | CPU s/GB (both ends) |
+|---|---|---|---|
+| TCP, raw bytes | 1994 / 1914 | 0.84 / 0.75 | 0.42 / 0.39 |
+| TLS 1.3, raw bytes | 1073 / 956 | 1.44 / 1.33 | 1.34 / 1.39 |
+| BLAKE3 hashing alone (one side) | 5477 / 5455 | 0.98 / 1.02 | 0.18 / 0.19 |
+| Nudge protocol over TLS, memory → memory | 553 / 565 | 1.40 / 1.53 | 2.53 / 2.70 |
+| Nudge protocol over TLS, disk → disk | 437 / 445 | 1.81 / 1.69 | 4.14 / 3.80 |
+
+Setup cost (1-byte file over a fresh TLS connection, median of 10): **3.9 / 4.0 ms**.
+
+What this says:
+- **Encryption** costs about 1 CPU-second per GB across both ends. On loopback that halves raw speed (both ends share one CPU), but 1 GB/s is still far above any Wi-Fi link.
+- **Hashing** is cheap: about 0.19 CPU-seconds per GB per side.
+- **The protocol path loses about half of raw-TLS speed** (560 vs ~1000 MB/s) and uses about 1 CPU-second per GB more than TLS plus hashing should. That's overhead in our own pipeline (buffer allocation and copies, thread hand-offs), not in TLS or BLAKE3. It doesn't matter on this PC, where the disk caps real transfers at ~440 MB/s, but it will matter on phone CPUs. **First optimisation target**, once phone numbers exist.
+- **Setup is ~4 ms**, so small files are effectively instant on a fast link.
+- Earlier loopback rows below include the disk, which explains their wide spread.
 
 ## Results
 

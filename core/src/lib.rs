@@ -3,6 +3,7 @@
 //! Everything platform apps need lives behind this crate's public API:
 //! networking, crypto, discovery and file handling. No UI code here.
 
+pub mod bench;
 pub mod error;
 pub mod identity;
 pub mod protocol;

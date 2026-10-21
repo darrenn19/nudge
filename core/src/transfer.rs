@@ -81,6 +81,18 @@ fn chunk_end(pos: u64, size: u64) -> u64 {
     ((pos / CHUNK_SIZE + 1) * CHUNK_SIZE).min(size)
 }
 
+/// Where received bytes go: a file normally, or a discarding sink for benchmarks.
+pub trait Sink: Write + Send + 'static {
+    /// Make everything written so far durable.
+    fn sync(&mut self) -> io::Result<()>;
+}
+
+impl Sink for File {
+    fn sync(&mut self) -> io::Result<()> {
+        self.sync_data()
+    }
+}
+
 /// Send one file over `stream` and wait until the receiver confirms it is on disk.
 pub async fn send_file<S>(stream: &mut S, path: &Path) -> Result<TransferStats>
 where
@@ -93,17 +105,24 @@ where
         .to_owned();
     let file = File::open(path)?;
     let metadata = file.metadata()?;
-    let size = metadata.len();
-    let modified = modified_time(&metadata);
-    let start = Instant::now();
-
-    Offer {
+    let offer = Offer {
         name,
-        size,
-        modified,
-    }
-    .write_to(stream)
-    .await?;
+        size: metadata.len(),
+        modified: modified_time(&metadata),
+    };
+    send_from(stream, file, offer).await
+}
+
+/// Send `offer.size` bytes read from `source` (a file, or generated data for
+/// benchmarks) and wait until the receiver confirms it has them.
+pub async fn send_from<S, R>(stream: &mut S, source: R, offer: Offer) -> Result<TransferStats>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    R: Read + Seek + Send + 'static,
+{
+    let start = Instant::now();
+    let size = offer.size;
+    offer.write_to(stream).await?;
     let offset = match Response::read_from(stream).await? {
         Response::Accept { offset } if offset <= size && offset % CHUNK_SIZE == 0 => offset,
         Response::Accept { .. } => return Err(Error::Protocol("invalid resume offset")),
@@ -112,7 +131,7 @@ where
     };
 
     let (tx, mut rx) = mpsc::channel(PIPELINE_DEPTH);
-    let reader = tokio::task::spawn_blocking(move || read_pieces(file, offset, size, tx));
+    let reader = tokio::task::spawn_blocking(move || read_pieces(source, offset, size, tx));
 
     let mut sent = 0u64;
     while let Some(piece) = rx.recv().await {
@@ -172,7 +191,7 @@ where
         modified: offer.modified,
     };
 
-    let (partial, file, meta) = match resume::find(dir, &key)? {
+    let (partial, mut file, meta) = match resume::find(dir, &key)? {
         Some(partial) => {
             let (file, meta) = resume::reopen(&partial, &key)?;
             (partial, file, meta)
@@ -180,15 +199,70 @@ where
         None => resume::create(dir, &key, &name)?,
     };
     let offset = (partial.chunks_done * CHUNK_SIZE).min(size);
+    file.seek(SeekFrom::Start(offset))?;
 
     Response::Accept { offset }.write_to(stream).await?;
+    let pos = receive_pieces(stream, file, offset, size, Some(meta)).await?;
 
+    // Pick the final name now: something may have taken it since we started.
+    let final_path = if partial.base.exists() {
+        unique_path(dir, &name)
+    } else {
+        partial.base.clone()
+    };
+    fs::rename(partial.part_path(), &final_path)?;
+    resume::finish(&partial);
+    Response::Done.write_to(stream).await?;
+
+    Ok(ReceivedFile {
+        path: final_path,
+        stats: TransferStats {
+            bytes: pos - offset,
+            resumed_from: offset,
+            elapsed: start.elapsed(),
+        },
+    })
+}
+
+/// Receive one transfer into `sink` without saving a file or resume state.
+/// Used to measure network speed without the disk (`nudge receive --discard`).
+pub async fn receive_into<S, W>(stream: &mut S, sink: W) -> Result<(Offer, TransferStats)>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    W: Sink,
+{
+    let offer = Offer::read_from(stream).await?;
+    let start = Instant::now();
+    Response::Accept { offset: 0 }.write_to(stream).await?;
+    let bytes = receive_pieces(stream, sink, 0, offer.size, None).await?;
+    Response::Done.write_to(stream).await?;
+    let stats = TransferStats {
+        bytes,
+        resumed_from: 0,
+        elapsed: start.elapsed(),
+    };
+    Ok((offer, stats))
+}
+
+/// Read the data stream from `offset` to `size` and hand it to a writer thread
+/// that checks hashes and writes into `sink`. Returns the end position.
+/// Network errors are held until the writer has finished, so its progress is
+/// saved before we return.
+async fn receive_pieces<S, W>(
+    stream: &mut S,
+    sink: W,
+    offset: u64,
+    size: u64,
+    meta: Option<MetaWriter>,
+) -> Result<u64>
+where
+    S: AsyncRead + Unpin,
+    W: Sink,
+{
     let (tx, rx) = mpsc::channel(PIPELINE_DEPTH);
-    let writer = tokio::task::spawn_blocking(move || write_pieces(file, rx, offset, meta));
+    let writer = tokio::task::spawn_blocking(move || write_pieces(sink, rx, offset, meta));
 
-    // Network side. Errors are held until the writer has finished, so its
-    // progress is saved before we return.
-    let network = async {
+    let network = async move {
         let truncated = |e: io::Error, pos: u64| {
             if e.kind() == io::ErrorKind::UnexpectedEof {
                 Error::Truncated {
@@ -224,44 +298,30 @@ where
             }
         }
         Ok(pos)
+        // `tx` is dropped here, which tells the writer the stream has ended.
     };
     let network_result: Result<u64> = network.await;
-    drop(tx);
     writer.await.map_err(io::Error::other)??;
-    let pos = network_result?;
-
-    // Pick the final name now: something may have taken it since we started.
-    let final_path = if partial.base.exists() {
-        unique_path(dir, &name)
-    } else {
-        partial.base.clone()
-    };
-    fs::rename(partial.part_path(), &final_path)?;
-    resume::finish(&partial);
-    Response::Done.write_to(stream).await?;
-
-    Ok(ReceivedFile {
-        path: final_path,
-        stats: TransferStats {
-            bytes: pos - offset,
-            resumed_from: offset,
-            elapsed: start.elapsed(),
-        },
-    })
+    network_result
 }
 
-/// Disk side of sending: read the file from `offset`, hash each chunk, and
-/// pass data and hashes to the network loop in order.
-fn read_pieces(mut file: File, offset: u64, size: u64, tx: mpsc::Sender<io::Result<Piece>>) {
+/// Disk side of sending: read from `offset`, hash each chunk, and pass data
+/// and hashes to the network loop in order.
+fn read_pieces<R: Read + Seek>(
+    mut source: R,
+    offset: u64,
+    size: u64,
+    tx: mpsc::Sender<io::Result<Piece>>,
+) {
     let mut run = || -> io::Result<()> {
-        file.seek(SeekFrom::Start(offset))?;
+        source.seek(SeekFrom::Start(offset))?;
         let mut hasher = blake3::Hasher::new();
         let mut pos = offset;
         while pos < size {
             let end = chunk_end(pos, size);
             let want = (end - pos).min(BUF_SIZE as u64) as usize;
             let mut buf = vec![0u8; want];
-            file.read_exact(&mut buf)?;
+            source.read_exact(&mut buf)?;
             hasher.update(&buf);
             pos += want as u64;
             if tx.blocking_send(Ok(Piece::Data(buf))).is_err() {
@@ -282,25 +342,25 @@ fn read_pieces(mut file: File, offset: u64, size: u64, tx: mpsc::Sender<io::Resu
     }
 }
 
-/// Disk side of receiving: write data from `offset`, check each chunk's hash,
-/// and record verified chunks for resume. Always syncs and records progress
-/// before returning, whether the transfer finished, failed or was cut off, so
-/// `Done` is only sent once the file is safely stored.
-fn write_pieces(
-    mut file: File,
+/// Disk side of receiving: write data (the sink is already positioned at
+/// `offset`), check each chunk's hash, and record verified chunks for resume
+/// when `meta` is given. Always syncs and records progress before returning,
+/// whether the transfer finished, failed or was cut off, so `Done` is only
+/// sent once the data is safely stored.
+fn write_pieces<W: Sink>(
+    mut sink: W,
     mut rx: mpsc::Receiver<Piece>,
     offset: u64,
-    mut meta: MetaWriter,
+    mut meta: Option<MetaWriter>,
 ) -> Result<()> {
     let mut receive = || -> Result<()> {
-        file.seek(SeekFrom::Start(offset))?;
         let mut hasher = blake3::Hasher::new();
         let mut chunk = offset / CHUNK_SIZE;
         while let Some(piece) = rx.blocking_recv() {
             match piece {
                 Piece::Data(buf) => {
                     hasher.update(&buf);
-                    file.write_all(&buf)?;
+                    sink.write_all(&buf)?;
                 }
                 Piece::ChunkEnd(expected) => {
                     if hasher.finalize().as_bytes() != &expected {
@@ -308,9 +368,11 @@ fn write_pieces(
                     }
                     hasher.reset();
                     chunk += 1;
-                    meta.push(&expected);
-                    if meta.pending_chunks() >= CHECKPOINT_CHUNKS {
-                        checkpoint(&file, &mut meta)?;
+                    if let Some(meta) = meta.as_mut() {
+                        meta.push(&expected);
+                        if meta.pending_chunks() >= CHECKPOINT_CHUNKS {
+                            checkpoint(&mut sink, meta)?;
+                        }
                     }
                 }
             }
@@ -318,7 +380,10 @@ fn write_pieces(
         Ok(())
     };
     let result = receive();
-    let saved = checkpoint(&file, &mut meta);
+    let saved = match meta.as_mut() {
+        Some(meta) => checkpoint(&mut sink, meta),
+        None => sink.sync(),
+    };
     result?;
     saved?;
     Ok(())
@@ -326,8 +391,8 @@ fn write_pieces(
 
 /// Make written data durable, then record its chunks as resumable.
 /// The order matters: the meta file must never get ahead of the data.
-fn checkpoint(file: &File, meta: &mut MetaWriter) -> io::Result<()> {
-    file.sync_data()?;
+fn checkpoint<W: Sink>(sink: &mut W, meta: &mut MetaWriter) -> io::Result<()> {
+    sink.sync()?;
     meta.flush()
 }
 
