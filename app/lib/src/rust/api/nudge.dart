@@ -95,8 +95,10 @@ sealed class AppEvent with _$AppEvent {
     required double seconds,
     required PlatformInt64 resumedFrom,
   }) = AppEvent_TransferDone;
-  const factory AppEvent.transferFailed({required PlatformInt64 id, required String error}) =
-      AppEvent_TransferFailed;
+  const factory AppEvent.transferFailed({
+    required PlatformInt64 id,
+    required String error,
+  }) = AppEvent_TransferFailed;
 }
 
 /// A device as the app shows it.

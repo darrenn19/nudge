@@ -82,7 +82,10 @@ jobs:
           cargo install flutter_rust_bridge_codegen --version 2.13.0 --locked
           flutter_rust_bridge_codegen generate
           git diff --exit-code -- lib/src/rust rust/src/frb_generated.rs
-      - run: dart format --output none --set-exit-if-changed lib
+      # Skip generated code in lib/src/rust: it must stay exactly as the generator writes it.
+      - name: Check formatting
+        shell: bash
+        run: dart format --output none --set-exit-if-changed $(find lib -name '*.dart' -not -path 'lib/src/rust/*')
       - run: flutter analyze
       - if: matrix.target == 'android'
         run: flutter build apk --debug
