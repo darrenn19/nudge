@@ -13,6 +13,8 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -93,8 +95,41 @@ impl Sink for File {
     }
 }
 
+/// Live position of a transfer, readable from any thread while it runs.
+/// Updating it is one relaxed atomic store per buffer, so it costs nothing.
+#[derive(Clone, Debug, Default)]
+pub struct Progress(Arc<AtomicU64>);
+
+impl Progress {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Bytes of the file that have crossed the network so far, counted from
+    /// the start of the file (a resumed transfer starts at its offset).
+    pub fn position(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+
+    fn set(&self, pos: u64) {
+        self.0.store(pos, Ordering::Relaxed);
+    }
+}
+
 /// Send one file over `stream` and wait until the receiver confirms it is on disk.
 pub async fn send_file<S>(stream: &mut S, path: &Path) -> Result<TransferStats>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    send_file_tracked(stream, path, &Progress::new()).await
+}
+
+/// `send_file`, reporting its position through `progress`.
+pub async fn send_file_tracked<S>(
+    stream: &mut S,
+    path: &Path,
+    progress: &Progress,
+) -> Result<TransferStats>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -110,12 +145,26 @@ where
         size: metadata.len(),
         modified: modified_time(&metadata),
     };
-    send_from(stream, file, offer).await
+    send_from_tracked(stream, file, offer, progress).await
 }
 
 /// Send `offer.size` bytes read from `source` (a file, or generated data for
 /// benchmarks) and wait until the receiver confirms it has them.
 pub async fn send_from<S, R>(stream: &mut S, source: R, offer: Offer) -> Result<TransferStats>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    R: Read + Seek + Send + 'static,
+{
+    send_from_tracked(stream, source, offer, &Progress::new()).await
+}
+
+/// `send_from`, reporting its position through `progress`.
+pub async fn send_from_tracked<S, R>(
+    stream: &mut S,
+    source: R,
+    offer: Offer,
+    progress: &Progress,
+) -> Result<TransferStats>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     R: Read + Seek + Send + 'static,
@@ -133,12 +182,14 @@ where
     let (tx, mut rx) = mpsc::channel(PIPELINE_DEPTH);
     let reader = tokio::task::spawn_blocking(move || read_pieces(source, offset, size, tx));
 
+    progress.set(offset);
     let mut sent = 0u64;
     while let Some(piece) = rx.recv().await {
         match piece? {
             Piece::Data(buf) => {
                 stream.write_all(&buf).await?;
                 sent += buf.len() as u64;
+                progress.set(offset + sent);
             }
             Piece::ChunkEnd(hash) => stream.write_all(&hash).await?,
         }
@@ -181,9 +232,31 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let offer = Offer::read_from(stream).await?;
+    receive_offered(stream, offer, dir, peer, &Progress::new()).await
+}
+
+/// Second half of `receive_file`, for callers that already read the `Offer`
+/// (to show what's arriving before it does). Reports its position through
+/// `progress`.
+pub async fn receive_offered<S>(
+    stream: &mut S,
+    offer: Offer,
+    dir: &Path,
+    peer: Option<Fingerprint>,
+    progress: &Progress,
+) -> Result<ReceivedFile>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let start = Instant::now();
     let size = offer.size;
-    let name = sanitize_file_name(&offer.name)?;
+    let name = match sanitize_file_name(&offer.name) {
+        Ok(name) => name,
+        Err(e) => {
+            let _ = Response::Reject.write_to(stream).await;
+            return Err(e);
+        }
+    };
     let key = TransferKey {
         peer: peer.map_or([0; 32], |p| *p.as_bytes()),
         name: offer.name,
@@ -202,7 +275,7 @@ where
     file.seek(SeekFrom::Start(offset))?;
 
     Response::Accept { offset }.write_to(stream).await?;
-    let pos = receive_pieces(stream, file, offset, size, Some(meta)).await?;
+    let pos = receive_pieces(stream, file, offset, size, Some(meta), progress).await?;
 
     // Pick the final name now: something may have taken it since we started.
     let final_path = if partial.base.exists() {
@@ -234,7 +307,7 @@ where
     let offer = Offer::read_from(stream).await?;
     let start = Instant::now();
     Response::Accept { offset: 0 }.write_to(stream).await?;
-    let bytes = receive_pieces(stream, sink, 0, offer.size, None).await?;
+    let bytes = receive_pieces(stream, sink, 0, offer.size, None, &Progress::new()).await?;
     Response::Done.write_to(stream).await?;
     let stats = TransferStats {
         bytes,
@@ -254,11 +327,13 @@ async fn receive_pieces<S, W>(
     offset: u64,
     size: u64,
     meta: Option<MetaWriter>,
+    progress: &Progress,
 ) -> Result<u64>
 where
     S: AsyncRead + Unpin,
     W: Sink,
 {
+    progress.set(offset);
     let (tx, rx) = mpsc::channel(PIPELINE_DEPTH);
     let writer = tokio::task::spawn_blocking(move || write_pieces(sink, rx, offset, meta));
 
@@ -284,6 +359,7 @@ where
                     .await
                     .map_err(|e| truncated(e, pos))?;
                 pos += want as u64;
+                progress.set(pos);
                 if tx.send(Piece::Data(buf)).await.is_err() {
                     return Ok(pos); // writer failed; its error is reported below
                 }

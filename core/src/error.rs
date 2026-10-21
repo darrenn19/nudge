@@ -40,6 +40,18 @@ pub enum Error {
 
     #[error("connection closed early: received {got} of {expected} bytes")]
     Truncated { got: u64, expected: u64 },
+
+    #[error("not a valid pairing code: {0}")]
+    BadPairingCode(String),
+
+    #[error("the other device didn't accept the pairing code (it may have expired)")]
+    PairingRejected,
+
+    #[error("couldn't reach the other device")]
+    Unreachable,
+
+    #[error("device discovery failed: {0}")]
+    Discovery(String),
 }
 
 impl From<std::io::Error> for Error {

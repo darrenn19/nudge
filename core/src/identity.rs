@@ -5,7 +5,7 @@
 //! certificate authority. Pairing = adding a peer's fingerprint to the
 //! trusted list.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -31,6 +31,10 @@ pub struct Fingerprint([u8; 32]);
 impl Fingerprint {
     pub fn of(cert: &CertificateDer<'_>) -> Self {
         Self(*blake3::hash(cert.as_ref()).as_bytes())
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
     }
 
     pub fn as_bytes(&self) -> &[u8; 32] {
@@ -126,69 +130,105 @@ impl Identity {
     }
 }
 
-/// Fingerprints of devices we accept connections from and connect to.
-/// Cheap to clone; clones share the same list, so pairing a new device
-/// takes effect on live TLS configs immediately.
+/// Devices we accept connections from and connect to, with the names they
+/// gave when pairing. Cheap to clone; clones share the same list, so pairing
+/// a new device takes effect on live TLS configs immediately.
 #[derive(Clone, Default, Debug)]
-pub struct TrustedPeers(Arc<RwLock<HashSet<Fingerprint>>>);
+pub struct TrustedPeers(Arc<RwLock<HashMap<Fingerprint, String>>>);
 
 impl TrustedPeers {
     pub fn new(peers: impl IntoIterator<Item = Fingerprint>) -> Self {
-        Self(Arc::new(RwLock::new(peers.into_iter().collect())))
+        let peers = peers.into_iter().map(|fp| (fp, String::new()));
+        Self(Arc::new(RwLock::new(peers.collect())))
     }
 
-    /// Load `trusted_peers.txt` from `dir` (one fingerprint per line, `#` comments).
-    /// A missing file means no trusted peers yet.
+    /// Load `trusted_peers.txt` from `dir`: one device per line, as its
+    /// fingerprint optionally followed by a space and its name. Lines
+    /// starting with `#` are comments. A missing file means no peers yet.
     pub fn load(dir: &Path) -> Result<Self> {
         let text = match fs::read_to_string(dir.join(TRUSTED_FILE)) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e.into()),
         };
-        let peers = text
-            .lines()
-            .map(|l| l.split('#').next().unwrap_or("").trim())
-            .filter(|l| !l.is_empty())
-            .map(Fingerprint::from_str)
-            .collect::<Result<Vec<_>>>()?;
-        Ok(Self::new(peers))
+        let mut peers = HashMap::new();
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let (fp, name) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+            peers.insert(fp.parse()?, name.trim().to_owned());
+        }
+        Ok(Self(Arc::new(RwLock::new(peers))))
     }
 
     pub fn save(&self, dir: &Path) -> Result<()> {
-        let mut peers: Vec<String> = self.read().iter().map(ToString::to_string).collect();
-        peers.sort();
-        let mut text = String::from("# Devices this one trusts. One fingerprint per line.\n");
-        for p in peers {
-            text.push_str(&p);
+        let mut text = String::from("# Devices this one trusts: fingerprint, then name.\n");
+        for (fp, name) in self.list() {
+            let line = format!("{fp} {name}");
+            text.push_str(line.trim_end());
             text.push('\n');
         }
         fs::create_dir_all(dir)?;
-        fs::write(dir.join(TRUSTED_FILE), text)?;
+        // Write then rename, so a crash never leaves a half-written list.
+        let tmp = dir.join(format!("{TRUSTED_FILE}.tmp"));
+        fs::write(&tmp, text)?;
+        fs::rename(tmp, dir.join(TRUSTED_FILE))?;
         Ok(())
     }
 
-    /// Returns true if the peer was newly added.
+    /// Returns true if the peer was newly added. Keeps any name it already had.
     pub fn add(&self, peer: Fingerprint) -> bool {
-        self.0
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(peer)
+        let mut peers = self.write();
+        if peers.contains_key(&peer) {
+            return false;
+        }
+        peers.insert(peer, String::new());
+        true
+    }
+
+    /// Add a peer or update its name. Returns true if it was newly added.
+    pub fn add_named(&self, peer: Fingerprint, name: &str) -> bool {
+        self.write().insert(peer, clean_name(name)).is_none()
     }
 
     pub fn remove(&self, peer: &Fingerprint) -> bool {
-        self.0
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(peer)
+        self.write().remove(peer).is_some()
     }
 
     pub fn contains(&self, peer: &Fingerprint) -> bool {
-        self.read().contains(peer)
+        self.read().contains_key(peer)
     }
 
-    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashSet<Fingerprint>> {
+    /// The name a peer gave when pairing (empty if unknown).
+    pub fn name_of(&self, peer: &Fingerprint) -> Option<String> {
+        self.read().get(peer).cloned()
+    }
+
+    /// Every trusted peer and its name, sorted by name then fingerprint.
+    pub fn list(&self) -> Vec<(Fingerprint, String)> {
+        let mut peers: Vec<_> = self.read().iter().map(|(fp, n)| (*fp, n.clone())).collect();
+        peers.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.0.cmp(&b.0.0)));
+        peers
+    }
+
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<Fingerprint, String>> {
         self.0.read().unwrap_or_else(|e| e.into_inner())
     }
+
+    fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<Fingerprint, String>> {
+        self.0.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Device names are shown in lists and stored one per line: keep them to
+/// one line of printable text.
+pub fn clean_name(name: &str) -> String {
+    let one_line: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    crate::protocol::truncate(one_line.trim(), crate::protocol::MAX_DEVICE_NAME_LEN).to_owned()
 }
 
 #[cfg(test)]
@@ -236,5 +276,37 @@ mod tests {
         assert!(!peers.add(fp));
         peers.save(dir.path()).unwrap();
         assert!(TrustedPeers::load(dir.path()).unwrap().contains(&fp));
+    }
+
+    #[test]
+    fn trusted_peer_names_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (
+            Identity::generate().unwrap().fingerprint(),
+            Identity::generate().unwrap().fingerprint(),
+        );
+        let peers = TrustedPeers::default();
+        assert!(peers.add_named(a, "Galaxy S25 #2\nevil"));
+        assert!(peers.add(b));
+        assert!(!peers.add(a)); // keeps the name
+        peers.save(dir.path()).unwrap();
+
+        let loaded = TrustedPeers::load(dir.path()).unwrap();
+        assert_eq!(loaded.name_of(&a).unwrap(), "Galaxy S25 #2 evil");
+        assert_eq!(loaded.name_of(&b).unwrap(), "");
+        assert_eq!(loaded.list().len(), 2);
+    }
+
+    #[test]
+    fn trusted_peers_reads_old_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = Identity::generate().unwrap().fingerprint();
+        fs::write(
+            dir.path().join(TRUSTED_FILE),
+            format!("# Devices this one trusts.\n\n{fp}\n"),
+        )
+        .unwrap();
+        let loaded = TrustedPeers::load(dir.path()).unwrap();
+        assert_eq!(loaded.name_of(&fp).unwrap(), "");
     }
 }

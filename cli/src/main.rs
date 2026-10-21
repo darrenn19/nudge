@@ -8,11 +8,12 @@ use clap::{Parser, Subcommand};
 use nudge_core::bench::{self, Discard};
 use nudge_core::transfer::receive_into;
 use nudge_core::{
-    DEFAULT_PORT, Error, Fingerprint, Identity, Tls, TransferStats, TrustedPeers, receive_file,
-    send_file,
+    DEFAULT_PORT, Direction, Error, Fingerprint, Identity, Node, NodeConfig, NodeEvent, Tls,
+    TransferStats, TrustedPeers, receive_file, send_file,
 };
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::UnboundedReceiver;
 
 #[derive(Parser)]
 #[command(name = "nudge", version, about = "Fast, private file transfer")]
@@ -38,6 +39,31 @@ enum Command {
     Trust {
         /// The other device's fingerprint, from `nudge id` on that device.
         fingerprint: String,
+    },
+    /// Pair with another device by QR code.
+    ///
+    /// Without a code: show this device's code (as a QR in the terminal) and
+    /// wait for the other device to scan it. With a code: pair with the
+    /// device that is showing it.
+    Pair {
+        /// Pairing code text (starts with `nudge:pair?`), from the other device.
+        code: Option<String>,
+    },
+    /// List nearby and paired devices.
+    Devices {
+        /// Seconds to listen for nearby devices.
+        #[arg(long, default_value_t = 3)]
+        wait: u64,
+    },
+    /// Run as a full device: be discoverable, accept pairing, and save files
+    /// from paired devices without asking. What the apps do, minus the UI.
+    Serve {
+        /// Folder to save files into.
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+        /// Also show a pairing code at startup.
+        #[arg(long)]
+        pair: bool,
     },
     /// Wait for incoming files and save them.
     Receive {
@@ -114,6 +140,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Id => show_id(&identity_dir),
         Command::Trust { fingerprint } => trust(&identity_dir, &fingerprint),
+        Command::Pair { code } => pair(identity_dir, code).await,
+        Command::Devices { wait } => devices(identity_dir, wait).await,
+        Command::Serve { dir, pair } => serve(identity_dir, dir, pair).await,
         Command::Receive {
             dir,
             port,
@@ -144,6 +173,155 @@ fn trust(identity_dir: &Path, fingerprint: &str) -> Result<()> {
         println!("Now trusting {}", fp.short());
     } else {
         println!("{} was already trusted", fp.short());
+    }
+    Ok(())
+}
+
+/// This computer's name, as other devices will see it.
+fn device_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_else(|_| "Nudge CLI".to_owned())
+}
+
+async fn start_node(
+    identity_dir: PathBuf,
+    download_dir: PathBuf,
+) -> Result<(Node, UnboundedReceiver<NodeEvent>)> {
+    let config = NodeConfig::new(
+        identity_dir,
+        download_dir,
+        &device_name(),
+        std::env::consts::OS,
+    );
+    let (node, events) = Node::start(config).await?;
+    if !node.discovery_running() {
+        eprintln!("Warning: device discovery couldn't start on this network.");
+    }
+    Ok((node, events))
+}
+
+fn print_qr(text: &str) {
+    match qrcode::QrCode::new(text) {
+        Ok(qr) => {
+            // Inverted, so it scans on the usual dark terminal background.
+            let image = qr
+                .render::<qrcode::render::unicode::Dense1x2>()
+                .dark_color(qrcode::render::unicode::Dense1x2::Light)
+                .light_color(qrcode::render::unicode::Dense1x2::Dark)
+                .quiet_zone(true)
+                .build();
+            println!("{image}");
+        }
+        Err(e) => eprintln!("(couldn't draw a QR code: {e})"),
+    }
+}
+
+/// Show a pairing code and wait until someone uses it (or it expires).
+async fn show_pairing_code(node: &Node, events: &mut UnboundedReceiver<NodeEvent>) -> Result<()> {
+    let code = node.start_pairing();
+    print_qr(&code);
+    println!("Scan this with Nudge on your phone, or on another computer run:");
+    println!("  nudge pair \"{code}\"");
+    println!("The code works once and expires in 5 minutes.\n");
+    while let Some(event) = events.recv().await {
+        match event {
+            NodeEvent::Paired { peer } => {
+                println!(
+                    "Paired with {} ({})",
+                    peer.device_name,
+                    peer.fingerprint.short()
+                );
+                return Ok(());
+            }
+            NodeEvent::PairingClosed => anyhow::bail!("the pairing code expired"),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+async fn pair(identity_dir: PathBuf, code: Option<String>) -> Result<()> {
+    let (node, mut events) = start_node(identity_dir, std::env::temp_dir()).await?;
+    match code {
+        Some(code) => {
+            // Give discovery a moment, in case the code's addresses don't work.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let peer = node.pair(&code).await?;
+            println!(
+                "Paired with {} ({})",
+                peer.device_name,
+                peer.fingerprint.short()
+            );
+            Ok(())
+        }
+        None => show_pairing_code(&node, &mut events).await,
+    }
+}
+
+async fn devices(identity_dir: PathBuf, wait: u64) -> Result<()> {
+    let (node, _events) = start_node(identity_dir, std::env::temp_dir()).await?;
+    node.refresh();
+    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+    let peers = node.peers();
+    if peers.is_empty() {
+        println!("No devices found. Pair one with `nudge pair`.");
+    }
+    for p in peers {
+        let status = match (p.paired, p.online) {
+            (true, true) => "paired, nearby",
+            (true, false) => "paired, not seen",
+            (false, _) => "nearby, not paired",
+        };
+        let platform = if p.platform.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", p.platform)
+        };
+        println!(
+            "{}  {}{platform}  ({status})",
+            p.fingerprint.short(),
+            p.device_name
+        );
+    }
+    Ok(())
+}
+
+async fn serve(identity_dir: PathBuf, dir: PathBuf, pair: bool) -> Result<()> {
+    let (node, mut events) = start_node(identity_dir, dir.clone()).await?;
+    println!(
+        "{} is ready on port {} (fingerprint {}), saving to {}",
+        node.device_name(),
+        node.port(),
+        node.fingerprint().short(),
+        dir.display()
+    );
+    if pair {
+        show_pairing_code(&node, &mut events).await?;
+    }
+    let mut names = std::collections::HashMap::new();
+    while let Some(event) = events.recv().await {
+        match event {
+            NodeEvent::TransferStarted {
+                id,
+                direction: Direction::Incoming,
+                file_name,
+                size,
+                ..
+            } => {
+                println!("Receiving {file_name} ({})...", human_size(size));
+                names.insert(id, file_name);
+            }
+            NodeEvent::TransferDone { id, path, stats } if names.remove(&id).is_some() => {
+                println!("Received {}: {}", path.display(), summary(&stats));
+            }
+            NodeEvent::TransferFailed { id, error } => {
+                let name = names.remove(&id).unwrap_or_default();
+                eprintln!("Transfer {name} failed: {error}");
+            }
+            NodeEvent::Paired { peer } => println!("Paired with {}", peer.device_name),
+            _ => {}
+        }
     }
     Ok(())
 }

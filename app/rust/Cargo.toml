@@ -1,0 +1,19 @@
+[package]
+name = "nudge_bridge"
+description = "Glue between the Flutter app and nudge-core (flutter_rust_bridge)."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+anyhow = "1"
+flutter_rust_bridge = "=2.13.0"
+nudge-core = { path = "../../core" }
+tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

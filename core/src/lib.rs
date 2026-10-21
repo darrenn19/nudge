@@ -4,8 +4,11 @@
 //! networking, crypto, discovery and file handling. No UI code here.
 
 pub mod bench;
+pub mod discovery;
 pub mod error;
 pub mod identity;
+pub mod node;
+pub mod pairing;
 pub mod protocol;
 pub mod resume;
 pub mod tls;
@@ -13,6 +16,7 @@ pub mod transfer;
 
 pub use error::{Error, Result};
 pub use identity::{Fingerprint, Identity, TrustedPeers};
+pub use node::{Direction, Node, NodeConfig, NodeEvent, Peer};
 pub use tls::Tls;
 pub use transfer::{ReceivedFile, TransferStats, receive_file, send_file};
 

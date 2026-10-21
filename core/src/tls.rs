@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::WebPkiSupportedAlgorithms;
@@ -26,6 +27,9 @@ use crate::{Error, Result};
 pub struct Tls {
     connector: TlsConnector,
     acceptor: TlsAcceptor,
+    trusted: TrustedPeers,
+    own: Fingerprint,
+    pairing: Arc<AtomicBool>,
 }
 
 impl Tls {
@@ -35,9 +39,11 @@ impl Tls {
     pub fn new(identity: &Identity, trusted: TrustedPeers) -> Result<Self> {
         // aws-lc-rs: AES-GCM runs on the CPU's hardware AES instructions.
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let pairing = Arc::new(AtomicBool::new(false));
         let verifier = Arc::new(PinnedPeers {
-            trusted,
+            trusted: trusted.clone(),
             own: identity.fingerprint(),
+            pairing: pairing.clone(),
             algorithms: provider.signature_verification_algorithms,
         });
 
@@ -55,7 +61,24 @@ impl Tls {
         Ok(Self {
             connector: TlsConnector::from(Arc::new(client)),
             acceptor: TlsAcceptor::from(Arc::new(server)),
+            trusted,
+            own: identity.fingerprint(),
+            pairing,
         })
+    }
+
+    /// While open, `accept` also lets in devices that aren't trusted yet, so
+    /// one that scanned this device's pairing code can prove it. Callers
+    /// must check `is_trusted` on every accepted connection and only allow
+    /// a pairing request from an untrusted peer. Outgoing connections stay
+    /// strict either way.
+    pub fn set_pairing_open(&self, open: bool) {
+        self.pairing.store(open, Ordering::SeqCst);
+    }
+
+    /// Whether `peer` is this device or one it has paired with.
+    pub fn is_trusted(&self, peer: &Fingerprint) -> bool {
+        *peer == self.own || self.trusted.contains(peer)
     }
 
     /// Open a TLS session as the connecting side.
@@ -123,10 +146,12 @@ impl fmt::Display for Untrusted {
 
 impl std::error::Error for Untrusted {}
 
-/// Accepts exactly the certificates whose fingerprints are trusted.
+/// Accepts exactly the certificates whose fingerprints are trusted (plus,
+/// as the listening side, any certificate while pairing is open).
 struct PinnedPeers {
     trusted: TrustedPeers,
     own: Fingerprint,
+    pairing: Arc<AtomicBool>,
     algorithms: WebPkiSupportedAlgorithms,
 }
 
@@ -205,6 +230,11 @@ impl ClientCertVerifier for PinnedPeers {
         _intermediates: &[CertificateDer<'_>],
         _now: UnixTime,
     ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        // The handshake still proves the client holds this certificate's key,
+        // so the fingerprint `accept` reports is genuine.
+        if self.pairing.load(Ordering::SeqCst) {
+            return Ok(ClientCertVerified::assertion());
+        }
         self.check(end_entity)
             .map(|()| ClientCertVerified::assertion())
     }

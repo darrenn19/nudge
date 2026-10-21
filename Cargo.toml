@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["core", "cli"]
+# The app's bridge crate is built by the Flutter toolchain (cargokit), with
+# generated code that doesn't follow this workspace's lints.
+exclude = ["app/rust"]
 
 [workspace.package]
 version = "0.1.0"
