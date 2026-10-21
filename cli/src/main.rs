@@ -140,12 +140,12 @@ async fn receive(
         tcp.set_nodelay(true)?;
         let result = match &tls {
             Some(tls) => match tls.accept(tcp).await {
-                Ok((mut stream, _peer)) => receive_one(&mut stream, &dir).await,
+                Ok((mut stream, peer)) => receive_one(&mut stream, &dir, Some(peer)).await,
                 Err(e) => Err(e),
             },
             None => {
                 let mut tcp = tcp;
-                receive_one(&mut tcp, &dir).await
+                receive_one(&mut tcp, &dir, None).await
             }
         };
         if let Err(e) = result {
@@ -158,11 +158,15 @@ async fn receive(
     }
 }
 
-async fn receive_one<S>(stream: &mut S, dir: &Path) -> nudge_core::Result<()>
+async fn receive_one<S>(
+    stream: &mut S,
+    dir: &Path,
+    peer: Option<Fingerprint>,
+) -> nudge_core::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let file = receive_file(stream, dir).await?;
+    let file = receive_file(stream, dir, peer).await?;
     let _ = stream.shutdown().await;
     println!("Received {}: {}", file.path.display(), summary(&file.stats));
     Ok(())
@@ -219,8 +223,13 @@ fn hint_trust(e: &Error) {
 }
 
 fn summary(stats: &TransferStats) -> String {
+    let resumed = if stats.resumed_from > 0 {
+        format!(", resumed from {}", human_size(stats.resumed_from))
+    } else {
+        String::new()
+    };
     format!(
-        "{} in {:.2} s ({:.1} MB/s)",
+        "{} in {:.2} s ({:.1} MB/s{resumed})",
         human_size(stats.bytes),
         stats.elapsed.as_secs_f64(),
         stats.mb_per_sec()

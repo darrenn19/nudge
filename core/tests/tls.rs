@@ -44,7 +44,7 @@ async fn paired_devices_transfer_over_tls() {
     let receiver = tokio::spawn(async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let (mut stream, peer) = laptop_tls.accept(tcp).await.unwrap();
-        let file = receive_file(&mut stream, &dst).await.unwrap();
+        let file = receive_file(&mut stream, &dst, Some(peer)).await.unwrap();
         (file, peer)
     });
 
@@ -130,6 +130,7 @@ async fn plain_tcp_client_is_rejected() {
     let offer = nudge_core::protocol::Offer {
         name: "x".into(),
         size: 1,
+        modified: 0,
     };
     let _ = offer.write_to(&mut tcp).await;
     assert!(receiver.await.unwrap().is_err());

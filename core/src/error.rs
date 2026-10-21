@@ -35,6 +35,9 @@ pub enum Error {
     #[error("the receiver rejected the transfer")]
     Rejected,
 
+    #[error("data corrupted: chunk {chunk} failed its BLAKE3 check")]
+    ChunkMismatch { chunk: u64 },
+
     #[error("connection closed early: received {got} of {expected} bytes")]
     Truncated { got: u64, expected: u64 },
 }

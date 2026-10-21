@@ -1,9 +1,10 @@
 //! Wire messages. See `docs/PROTOCOL.md` for the full description.
 //!
 //! Flow for one file:
-//! 1. Sender → `Offer` (magic, version, file name, size)
+//! 1. Sender → `Offer` (magic, version, file name, size, modified time)
 //! 2. Receiver → `Response::Accept { offset }` (or `Reject`)
-//! 3. Sender → raw file bytes from `offset` to the end, streamed with no acks
+//! 3. Sender → file bytes from `offset` to the end, streamed with no acks;
+//!    each `CHUNK_SIZE` chunk is followed by its 32-byte BLAKE3 hash
 //! 4. Receiver → `Response::Done` once the file is safely on disk
 //!
 //! All integers are big-endian.
@@ -15,6 +16,9 @@ use crate::{Error, PROTOCOL_VERSION, Result};
 /// First bytes of every connection, so stray traffic fails fast.
 pub const MAGIC: [u8; 4] = *b"NUDG";
 
+/// Length of a BLAKE3 chunk hash on the wire.
+pub const HASH_LEN: usize = 32;
+
 /// Longest file name accepted on the wire, in bytes.
 pub const MAX_NAME_LEN: usize = 1024;
 
@@ -23,6 +27,9 @@ pub const MAX_NAME_LEN: usize = 1024;
 pub struct Offer {
     pub name: String,
     pub size: u64,
+    /// Modification time in ns since the Unix epoch; 0 = unknown.
+    /// Used with name and size to decide whether a transfer can resume.
+    pub modified: u64,
 }
 
 impl Offer {
@@ -31,12 +38,13 @@ impl Offer {
         if name.len() > MAX_NAME_LEN {
             return Err(Error::BadFileName(self.name.clone()));
         }
-        let mut buf = Vec::with_capacity(4 + 2 + 2 + name.len() + 8);
+        let mut buf = Vec::with_capacity(4 + 2 + 2 + name.len() + 8 + 8);
         buf.extend_from_slice(&MAGIC);
         buf.extend_from_slice(&PROTOCOL_VERSION.to_be_bytes());
         buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
         buf.extend_from_slice(name);
         buf.extend_from_slice(&self.size.to_be_bytes());
+        buf.extend_from_slice(&self.modified.to_be_bytes());
         w.write_all(&buf).await?;
         w.flush().await?;
         Ok(())
@@ -64,7 +72,12 @@ impl Offer {
         let name =
             String::from_utf8(name).map_err(|_| Error::Protocol("file name is not UTF-8"))?;
         let size = r.read_u64().await?;
-        Ok(Self { name, size })
+        let modified = r.read_u64().await?;
+        Ok(Self {
+            name,
+            size,
+            modified,
+        })
     }
 }
 
@@ -121,6 +134,7 @@ mod tests {
         let offer = Offer {
             name: "holiday 📷.jpg".into(),
             size: 123_456_789_012,
+            modified: 1_760_000_000_123_456_789,
         };
         let mut buf = Vec::new();
         offer.write_to(&mut buf).await.unwrap();
