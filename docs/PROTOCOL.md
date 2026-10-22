@@ -133,3 +133,24 @@ A chunk's hash is appended only after it passed its check **and** the data file 
 - Cleanup of abandoned partial files
 - Multi-file streams (Phase 4)
 - Error codes
+
+## Browser sharing
+Code: `core/src/node/web.rs`, page: `core/src/node/web_page.html`. For people without Nudge. Off until the user turns it on ("Share without the app"); stops after 10 minutes with no browser connected.
+
+**Transport.** Plain HTTP/1.1 on TCP port 47802 (any free port if taken), one request per connection (`Connection: close`). A browser can't trust Nudge's self-signed certificate without a warning, so there's no TLS: anyone who can watch the network traffic can read the files, and the link's secret is the only access control. Meant for networks the user trusts.
+
+**The link** (shown as a QR code): `http://<this device's LAN IPv4>:<port>/t/<secret>`, where the secret is 16 random bytes as 32 hex characters. Every path outside `/t/<secret>` is a 404; the secret is compared in constant time. Responses carry `Cache-Control: no-store` and the page `Referrer-Policy: no-referrer`.
+
+**Routes** (all under `/t/<secret>`; `s` is the tab's session ID, 64 hex):
+
+| Route | Purpose |
+|---|---|
+| `GET /` | The page. |
+| `GET /events[?s=]` | Server-sent events. Opening it makes the tab a device; an unknown or missing `s` starts a new session. Events: `hello` (`session`, `from` = this device's name, `name` = what the tab appears as), `offer` (`batch`, `files[]` of `id`, `name`, `size`), `withdrawn` (`batch`; no answer in 5 minutes), `download` (`id`, `name`: fetch this file now). A `: ping` comment every 15 s. |
+| `POST /answer?s=&batch=&accept=1\|0` | Accept or decline an offer. |
+| `GET /f/<id>?s=` | Download an accepted file (`Content-Disposition: attachment`). Only the file the last `download` event named, once. |
+| `POST /u?s=&name=` | Send a file to this device. Needs `Content-Length`; the body is the file. Saved to the download folder without a prompt (the user invited the tab by showing the code); the name is sanitized like an `Offer` name. |
+
+**Sessions.** A tab is listed while its event stream is open. When the stream drops (phone locked, tab in the background) it keeps its place for 30 s; reconnecting with its `s` within that time restores it, including any unanswered offer and the pending download. Tabs are named after the device type from the User-Agent ("iPhone", "Android phone", ...), with " 2", " 3" for repeats. Apps see them as peers with platform `browser`.
+
+**Sending to a tab.** One offer per send (all its files). After Accept, files download one at a time: the server sends `download` for the next file when the previous one has been streamed.

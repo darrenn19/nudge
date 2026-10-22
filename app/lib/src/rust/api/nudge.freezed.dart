@@ -56,7 +56,7 @@ extension AppEventPatterns on AppEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult Function( AppEvent_Paired value)?  paired,TResult Function( AppEvent_PairingClosed value)?  pairingClosed,TResult Function( AppEvent_TransferStarted value)?  transferStarted,TResult Function( AppEvent_TransferProgress value)?  transferProgress,TResult Function( AppEvent_TransferDone value)?  transferDone,TResult Function( AppEvent_TransferFailed value)?  transferFailed,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult Function( AppEvent_Paired value)?  paired,TResult Function( AppEvent_PairingClosed value)?  pairingClosed,TResult Function( AppEvent_TransferStarted value)?  transferStarted,TResult Function( AppEvent_TransferProgress value)?  transferProgress,TResult Function( AppEvent_TransferDone value)?  transferDone,TResult Function( AppEvent_TransferFailed value)?  transferFailed,TResult Function( AppEvent_WebShareStopped value)?  webShareStopped,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
@@ -66,7 +66,8 @@ return pairingClosed(_that);case AppEvent_TransferStarted() when transferStarted
 return transferStarted(_that);case AppEvent_TransferProgress() when transferProgress != null:
 return transferProgress(_that);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that);case AppEvent_TransferFailed() when transferFailed != null:
-return transferFailed(_that);case _:
+return transferFailed(_that);case AppEvent_WebShareStopped() when webShareStopped != null:
+return webShareStopped(_that);case _:
   return orElse();
 
 }
@@ -84,7 +85,7 @@ return transferFailed(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_DevicesChanged value)  devicesChanged,required TResult Function( AppEvent_Paired value)  paired,required TResult Function( AppEvent_PairingClosed value)  pairingClosed,required TResult Function( AppEvent_TransferStarted value)  transferStarted,required TResult Function( AppEvent_TransferProgress value)  transferProgress,required TResult Function( AppEvent_TransferDone value)  transferDone,required TResult Function( AppEvent_TransferFailed value)  transferFailed,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_DevicesChanged value)  devicesChanged,required TResult Function( AppEvent_Paired value)  paired,required TResult Function( AppEvent_PairingClosed value)  pairingClosed,required TResult Function( AppEvent_TransferStarted value)  transferStarted,required TResult Function( AppEvent_TransferProgress value)  transferProgress,required TResult Function( AppEvent_TransferDone value)  transferDone,required TResult Function( AppEvent_TransferFailed value)  transferFailed,required TResult Function( AppEvent_WebShareStopped value)  webShareStopped,}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged():
@@ -94,7 +95,8 @@ return pairingClosed(_that);case AppEvent_TransferStarted():
 return transferStarted(_that);case AppEvent_TransferProgress():
 return transferProgress(_that);case AppEvent_TransferDone():
 return transferDone(_that);case AppEvent_TransferFailed():
-return transferFailed(_that);}
+return transferFailed(_that);case AppEvent_WebShareStopped():
+return webShareStopped(_that);}
 }
 /// A variant of `map` that fallback to returning `null`.
 ///
@@ -108,7 +110,7 @@ return transferFailed(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult? Function( AppEvent_Paired value)?  paired,TResult? Function( AppEvent_PairingClosed value)?  pairingClosed,TResult? Function( AppEvent_TransferStarted value)?  transferStarted,TResult? Function( AppEvent_TransferProgress value)?  transferProgress,TResult? Function( AppEvent_TransferDone value)?  transferDone,TResult? Function( AppEvent_TransferFailed value)?  transferFailed,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult? Function( AppEvent_Paired value)?  paired,TResult? Function( AppEvent_PairingClosed value)?  pairingClosed,TResult? Function( AppEvent_TransferStarted value)?  transferStarted,TResult? Function( AppEvent_TransferProgress value)?  transferProgress,TResult? Function( AppEvent_TransferDone value)?  transferDone,TResult? Function( AppEvent_TransferFailed value)?  transferFailed,TResult? Function( AppEvent_WebShareStopped value)?  webShareStopped,}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
@@ -118,7 +120,8 @@ return pairingClosed(_that);case AppEvent_TransferStarted() when transferStarted
 return transferStarted(_that);case AppEvent_TransferProgress() when transferProgress != null:
 return transferProgress(_that);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that);case AppEvent_TransferFailed() when transferFailed != null:
-return transferFailed(_that);case _:
+return transferFailed(_that);case AppEvent_WebShareStopped() when webShareStopped != null:
+return webShareStopped(_that);case _:
   return null;
 
 }
@@ -135,7 +138,7 @@ return transferFailed(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  devicesChanged,TResult Function( DeviceInfo device)?  paired,TResult Function()?  pairingClosed,TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult Function( PlatformInt64 id,  String error)?  transferFailed,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  devicesChanged,TResult Function( DeviceInfo device)?  paired,TResult Function()?  pairingClosed,TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult Function( PlatformInt64 id,  String error)?  transferFailed,TResult Function()?  webShareStopped,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
 return devicesChanged();case AppEvent_Paired() when paired != null:
@@ -144,7 +147,8 @@ return pairingClosed();case AppEvent_TransferStarted() when transferStarted != n
 return transferStarted(_that.id,_that.deviceId,_that.incoming,_that.fileName,_that.size);case AppEvent_TransferProgress() when transferProgress != null:
 return transferProgress(_that.id,_that.bytes,_that.size,_that.bytesPerSec);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that.id,_that.path,_that.bytes,_that.seconds,_that.resumedFrom);case AppEvent_TransferFailed() when transferFailed != null:
-return transferFailed(_that.id,_that.error);case _:
+return transferFailed(_that.id,_that.error);case AppEvent_WebShareStopped() when webShareStopped != null:
+return webShareStopped();case _:
   return orElse();
 
 }
@@ -162,7 +166,7 @@ return transferFailed(_that.id,_that.error);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  devicesChanged,required TResult Function( DeviceInfo device)  paired,required TResult Function()  pairingClosed,required TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)  transferStarted,required TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)  transferProgress,required TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)  transferDone,required TResult Function( PlatformInt64 id,  String error)  transferFailed,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  devicesChanged,required TResult Function( DeviceInfo device)  paired,required TResult Function()  pairingClosed,required TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)  transferStarted,required TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)  transferProgress,required TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)  transferDone,required TResult Function( PlatformInt64 id,  String error)  transferFailed,required TResult Function()  webShareStopped,}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged():
 return devicesChanged();case AppEvent_Paired():
@@ -171,7 +175,8 @@ return pairingClosed();case AppEvent_TransferStarted():
 return transferStarted(_that.id,_that.deviceId,_that.incoming,_that.fileName,_that.size);case AppEvent_TransferProgress():
 return transferProgress(_that.id,_that.bytes,_that.size,_that.bytesPerSec);case AppEvent_TransferDone():
 return transferDone(_that.id,_that.path,_that.bytes,_that.seconds,_that.resumedFrom);case AppEvent_TransferFailed():
-return transferFailed(_that.id,_that.error);}
+return transferFailed(_that.id,_that.error);case AppEvent_WebShareStopped():
+return webShareStopped();}
 }
 /// A variant of `when` that fallback to returning `null`
 ///
@@ -185,7 +190,7 @@ return transferFailed(_that.id,_that.error);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  devicesChanged,TResult? Function( DeviceInfo device)?  paired,TResult? Function()?  pairingClosed,TResult? Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult? Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult? Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult? Function( PlatformInt64 id,  String error)?  transferFailed,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  devicesChanged,TResult? Function( DeviceInfo device)?  paired,TResult? Function()?  pairingClosed,TResult? Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult? Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult? Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult? Function( PlatformInt64 id,  String error)?  transferFailed,TResult? Function()?  webShareStopped,}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
 return devicesChanged();case AppEvent_Paired() when paired != null:
@@ -194,7 +199,8 @@ return pairingClosed();case AppEvent_TransferStarted() when transferStarted != n
 return transferStarted(_that.id,_that.deviceId,_that.incoming,_that.fileName,_that.size);case AppEvent_TransferProgress() when transferProgress != null:
 return transferProgress(_that.id,_that.bytes,_that.size,_that.bytesPerSec);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that.id,_that.path,_that.bytes,_that.seconds,_that.resumedFrom);case AppEvent_TransferFailed() when transferFailed != null:
-return transferFailed(_that.id,_that.error);case _:
+return transferFailed(_that.id,_that.error);case AppEvent_WebShareStopped() when webShareStopped != null:
+return webShareStopped();case _:
   return null;
 
 }
@@ -630,5 +636,37 @@ as String,
 
 
 }
+
+/// @nodoc
+
+
+class AppEvent_WebShareStopped extends AppEvent {
+  const AppEvent_WebShareStopped(): super._();
+  
+
+
+
+
+
+
+@override
+bool operator ==(Object other) {
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_WebShareStopped);
+}
+
+
+@override
+int get hashCode => runtimeType.hashCode;
+
+@override
+String toString() {
+    return 'AppEvent.webShareStopped()';
+}
+
+
+}
+
+
+
 
 // dart format on

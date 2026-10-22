@@ -86,16 +86,18 @@ class MainActivity : FlutterActivity() {
             // opened (or picked), so sending starts the moment they're ready.
             channel?.invokeMethod("shareStarting", null)
         }
+        // "Share by QR code" in the share sheet: for someone without Nudge.
+        val byQr = intent.component?.className?.endsWith(SHARE_BY_QR) == true
         when (intent.action) {
             Intent.ACTION_SEND -> {
                 val uri = intent.stream()
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
                 when {
-                    uri != null -> open(listOf(uri))
-                    !text.isNullOrBlank() -> worker.execute { deliver(listOf(SharedFiles.text(this, text))) }
+                    uri != null -> open(listOf(uri), byQr)
+                    !text.isNullOrBlank() -> worker.execute { deliver(listOf(SharedFiles.text(this, text)), byQr) }
                 }
             }
-            Intent.ACTION_SEND_MULTIPLE -> open(intent.streams())
+            Intent.ACTION_SEND_MULTIPLE -> open(intent.streams(), byQr)
             ACTION_PICK_FILES -> pick(null)
         }
         // Don't handle the same share twice if the activity is recreated.
@@ -103,14 +105,15 @@ class MainActivity : FlutterActivity() {
     }
 
     /** Opening can mean copying (see [SharedFiles]), so it happens off the UI thread. */
-    private fun open(uris: List<Uri>) {
+    private fun open(uris: List<Uri>, byQr: Boolean = false) {
         if (uris.isEmpty()) return
-        worker.execute { deliver(uris.mapNotNull { SharedFiles.open(this, it) }) }
+        worker.execute { deliver(uris.mapNotNull { SharedFiles.open(this, it) }, byQr) }
     }
 
-    private fun deliver(files: List<Map<String, Any>>) = main.post {
+    /** [byQr] marks files for someone without Nudge (see `takeShared` in Dart). */
+    private fun deliver(files: List<Map<String, Any>>, byQr: Boolean = false) = main.post {
         if (files.isEmpty()) return@post
-        incoming.addAll(files)
+        incoming.addAll(if (byQr) files.map { it + ("byQr" to true) } else files)
         channel?.invokeMethod("sharedAvailable", null)
     }
 
@@ -202,6 +205,8 @@ class MainActivity : FlutterActivity() {
         const val CHANNEL = "nudge/activity"
         const val ACTION_PICK_FILES = "io.github.darrenn19.nudge.PICK_FILES"
         private const val PICK_REQUEST = 4201
+        /** The share sheet entry declared as an alias of this activity. */
+        private const val SHARE_BY_QR = ".ShareByQr"
         private val SEND_ACTIONS = setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE, ACTION_PICK_FILES)
     }
 }

@@ -13,13 +13,14 @@ name = "nudge_core"
 [dependencies]
 blake3 = "1.8.7"
 cpu-time = "1.0.0"
+httparse = "1.10"
 if-addrs = "0.15.0"
 mdns-sd = "0.21.6"
 rcgen = { version = "0.14.7", default-features = false, features = ["aws_lc_rs"] }
 rustls = { version = "0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
 socket2 = "0.6.5"
 thiserror = "2"
-tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
 
 [dev-dependencies]

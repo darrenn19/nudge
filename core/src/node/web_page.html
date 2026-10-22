@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Nudge</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg: #f5f6fb; --card: #ffffff; --text: #1a1c23; --muted: #626879;
+    --line: #e2e5ee; --accent: #3d5afe; --on-accent: #ffffff; --ok: #1f9d55; --bad: #c62828;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111318; --card: #1b1e26; --text: #e6e8ef; --muted: #9aa0b2;
+      --line: #2b2f3b; --accent: #8c9eff; --on-accent: #0b1036; --ok: #5fd38d; --bad: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 520px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { margin-bottom: 20px; }
+  h1 { font-size: 24px; margin: 0; }
+  h2 { font-size: 17px; margin: 0 0 4px; }
+  .muted { color: var(--muted); }
+  .status { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--ok); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+    padding: 16px; margin-bottom: 12px;
+  }
+  .offer { border-color: var(--accent); }
+  .files { margin: 10px 0 14px; padding: 0; list-style: none; }
+  .files li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; }
+  .files .name { overflow-wrap: anywhere; }
+  .files .size { color: var(--muted); white-space: nowrap; }
+  .actions { display: flex; gap: 8px; }
+  button, .button {
+    flex: 1; appearance: none; border: 0; border-radius: 12px; padding: 12px 16px;
+    font: inherit; font-weight: 600; cursor: pointer; text-align: center;
+    background: var(--line); color: var(--text); display: inline-block;
+  }
+  .primary { background: var(--accent); color: var(--on-accent); }
+  button:disabled { opacity: .6; cursor: default; }
+  .row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row .name { overflow-wrap: anywhere; }
+  .state { white-space: nowrap; color: var(--muted); }
+  .state.ok { color: var(--ok); }
+  .state.bad { color: var(--bad); }
+  progress { width: 100%; height: 6px; accent-color: var(--accent); }
+  .hidden { display: none; }
+  .note { font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Nudge</h1>
+    <div class="status"><span class="dot" id="dot"></span><span class="muted" id="status">Connecting…</span></div>
+  </header>
+
+  <div id="offers"></div>
+
+  <section class="card" id="waiting">
+    <h2>Keep this page open</h2>
+    <div class="muted">Files <span class="from">the other device</span> sends will appear here for you to accept.</div>
+  </section>
+
+  <section class="card">
+    <h2>Send files to <span class="from">the other device</span></h2>
+    <p class="muted note" style="margin:0 0 12px">They're saved straight to its Downloads.</p>
+    <label class="button primary" style="display:block">Choose files<input type="file" id="pick" multiple class="hidden"></label>
+    <div id="uploads"></div>
+  </section>
+
+  <section class="card hidden" id="received">
+    <h2>Received</h2>
+    <div id="receivedList"></div>
+  </section>
+
+  <p class="muted note">Files go straight between the two devices over this Wi-Fi. Nothing is uploaded to the internet.</p>
+</main>
+<script>
+"use strict";
+const base = location.pathname.replace(/\/+$/, "");
+let session = "";
+try { session = sessionStorage.getItem("nudge-session") || ""; } catch (e) {}
+let from = "the other device";
+let source = null;
+let retry = null;
+
+const $ = (id) => document.getElementById(id);
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function size(n) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
+  return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + " " + units[i];
+}
+
+function setStatus(text, on) {
+  $("status").textContent = text;
+  $("dot").classList.toggle("on", !!on);
+}
+
+function connect() {
+  clearTimeout(retry);
+  if (source) source.close();
+  source = new EventSource(base + "/events" + (session ? "?s=" + session : ""));
+  source.addEventListener("hello", (e) => {
+    const d = JSON.parse(e.data);
+    session = d.session;
+    try { sessionStorage.setItem("nudge-session", session); } catch (err) {}
+    from = d.from;
+    document.querySelectorAll(".from").forEach((n) => { n.textContent = from; });
+    setStatus("Connected to " + from + " as " + d.name, true);
+  });
+  source.addEventListener("offer", (e) => showOffer(JSON.parse(e.data)));
+  source.addEventListener("withdrawn", (e) => {
+    const card = $("offer-" + JSON.parse(e.data).batch);
+    if (card) card.remove();
+    updateWaiting();
+  });
+  source.addEventListener("download", (e) => fetchFile(JSON.parse(e.data)));
+  source.onerror = () => {
+    setStatus("Reconnecting…", false);
+    source.close();
+    retry = setTimeout(connect, 2000);
+  };
+}
+
+function updateWaiting() {
+  $("waiting").classList.toggle("hidden", $("offers").children.length > 0);
+}
+
+function showOffer(offer) {
+  if ($("offer-" + offer.batch)) return;
+  const total = offer.files.reduce((sum, f) => sum + f.size, 0);
+  const card = el("section", "card offer");
+  card.id = "offer-" + offer.batch;
+  const count = offer.files.length === 1 ? "a file" : offer.files.length + " files";
+  card.append(el("h2", "", from + " wants to send you " + count));
+  card.append(el("div", "muted", size(total)));
+  const list = el("ul", "files");
+  for (const f of offer.files) {
+    const li = el("li");
+    li.append(el("span", "name", f.name), el("span", "size", size(f.size)));
+    list.append(li);
+  }
+  card.append(list);
+  const actions = el("div", "actions");
+  const decline = el("button", "", "Decline");
+  const accept = el("button", "primary", "Accept");
+  actions.append(decline, accept);
+  card.append(actions);
+  const answer = async (yes) => {
+    decline.disabled = accept.disabled = true;
+    try {
+      await fetch(base + "/answer?s=" + session + "&batch=" + offer.batch + "&accept=" + (yes ? 1 : 0), { method: "POST" });
+    } catch (err) {}
+    card.remove();
+    updateWaiting();
+  };
+  decline.onclick = () => answer(false);
+  accept.onclick = () => answer(true);
+  $("offers").append(card);
+  updateWaiting();
+}
+
+// Each accepted file downloads to the browser's usual place. The other
+// device says which one is next, so they arrive one at a time.
+function fetchFile(file) {
+  const a = el("a");
+  a.href = base + "/f/" + file.id + "?s=" + session;
+  a.download = file.name;
+  a.rel = "noopener";
+  document.body.append(a);
+  a.click();
+  a.remove();
+  $("received").classList.remove("hidden");
+  const row = el("div", "row");
+  row.append(el("span", "name", file.name), el("span", "state ok", "Downloaded"));
+  $("receivedList").prepend(row);
+}
+
+$("pick").addEventListener("change", async (e) => {
+  const files = Array.from(e.target.files || []);
+  e.target.value = "";
+  for (const f of files) await upload(f);
+});
+
+function upload(file) {
+  return new Promise((resolve) => {
+    const row = el("div", "row");
+    const name = el("span", "name", file.name);
+    const state = el("span", "state", "Waiting…");
+    row.append(name, state);
+    const bar = el("progress");
+    bar.max = 1; bar.value = 0;
+    const wrap = el("div");
+    wrap.append(row, bar);
+    $("uploads").prepend(wrap);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", base + "/u?s=" + session + "&name=" + encodeURIComponent(file.name));
+    xhr.upload.onprogress = (ev) => {
+      if (ev.lengthComputable) {
+        bar.value = ev.loaded / ev.total;
+        state.textContent = Math.floor(100 * ev.loaded / ev.total) + "%";
+      }
+    };
+    const done = (ok) => {
+      bar.remove();
+      state.textContent = ok ? "Sent" : "Failed";
+      state.classList.add(ok ? "ok" : "bad");
+      resolve();
+    };
+    xhr.onload = () => done(xhr.status === 200);
+    xhr.onerror = () => done(false);
+    xhr.send(file);
+  });
+}
+
+// Phones pause background tabs; reconnect as soon as this one is back.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && (!source || source.readyState === EventSource.CLOSED)) connect();
+});
+
+connect();
+</script>
+</body>
+</html>

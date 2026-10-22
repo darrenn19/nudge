@@ -129,17 +129,29 @@ Future<void> closeUnsent(List<OutgoingFile> files) async {
 const _activity = MethodChannel('nudge/activity');
 
 /// Calls [onFiles] with files shared to Nudge (share sheet, quick settings
-/// tile), now and whenever more arrive. [onStarting] runs the moment a share
-/// or pick begins, before the files are ready.
+/// tile), now and whenever more arrive; `byQr` is set for files shared with
+/// "Share by QR code", meant for someone without Nudge. [onStarting] runs
+/// the moment a share or pick begins, before the files are ready.
 Future<void> listenForShares(
-  void Function(List<OutgoingFile> files) onFiles, {
+  void Function(List<OutgoingFile> files, {bool byQr}) onFiles, {
   void Function()? onStarting,
 }) async {
   if (!Platform.isAndroid) return;
   Future<void> take() async {
     try {
       final shared = await _activity.invokeListMethod<Map<Object?, Object?>>('takeShared');
-      if (shared != null && shared.isNotEmpty) onFiles(shared.map(OutgoingFile.fromMap).toList());
+      if (shared == null) return;
+      bool byQr(Map<Object?, Object?> m) => m['byQr'] == true;
+      final normal = [
+        for (final m in shared)
+          if (!byQr(m)) OutgoingFile.fromMap(m),
+      ];
+      final qr = [
+        for (final m in shared)
+          if (byQr(m)) OutgoingFile.fromMap(m),
+      ];
+      if (normal.isNotEmpty) onFiles(normal);
+      if (qr.isNotEmpty) onFiles(qr, byQr: true);
     } on MissingPluginException {
       // No window yet; files wait in the activity until it asks again.
     }

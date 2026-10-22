@@ -51,6 +51,8 @@ cd app && flutter_rust_bridge_codegen generate
 2. On the computer, tap the QR icon (**Pair a device**). On the phone, do the same and scan the computer's code.
 3. Tap a paired device to choose files and send. Files arrive in **Downloads** (Windows) or **Download/Nudge** (Android).
 
+**Sharing with someone without Nudge:** tap the globe icon (**Share without the app**) and have them scan the code with their phone camera. They need to be on the same Wi-Fi. A page opens in their browser and they show up as a device: files you send to it wait for them to tap Accept, and they can send files back from the page. It stops after 10 minutes with nobody connected. The page isn't encrypted, so use it on networks you trust. On Android you can also start from another app: share to **Share by QR code** (or pick **Someone without Nudge** in Nudge's device list), and the files go to the first person who opens the page.
+
 Neither device needs Nudge open to receive. On Windows it starts with Windows, hidden in the tray (untick **Start with Windows** in the tray menu to stop that), and shows a toast for each file. On Android it runs in the background with a minimised "Ready to receive" notification, starts at boot, and shows a notification for each file. A phone with its screen off can still receive: the computer sends to where it last saw it.
 
 ## Trying it from the command line

@@ -9,6 +9,11 @@ import 'src/rust/api/nudge.dart';
 
 enum TransferState { running, done, failed }
 
+extension DeviceKind on DeviceInfo {
+  /// Someone using the web page (see `NudgeApp.startWebShare`), not Nudge.
+  bool get isBrowser => platform == 'browser';
+}
+
 class Transfer {
   Transfer({
     required this.id,
@@ -16,6 +21,7 @@ class Transfer {
     required this.incoming,
     required this.fileName,
     required this.size,
+    this.peerName,
   });
 
   final int id;
@@ -23,6 +29,10 @@ class Transfer {
   final bool incoming;
   final String fileName;
   final int size;
+
+  /// The other device's name when the transfer started; a browser tab may
+  /// be gone by the time it's shown.
+  final String? peerName;
 
   TransferState state = TransferState.running;
   int bytes = 0;
@@ -43,20 +53,26 @@ class Transfer {
 
 /// Files waiting for the user to pick a device. [fromOutside] is true when
 /// they came from another app, which Nudge then returns to once sending starts.
+/// [byQr] means they're for someone without Nudge: show the QR code.
 class FilesToSend {
-  const FilesToSend(this.files, {required this.fromOutside});
+  const FilesToSend(this.files, {required this.fromOutside, this.byQr = false});
 
   final List<OutgoingFile> files;
   final bool fromOutside;
+  final bool byQr;
 }
 
 class NudgeController extends ChangeNotifier {
   NudgeController(this.app) {
     _subscription = app.events().listen(_onEvent);
     devices = app.devices();
+    webShareUrl = app.webShareUrl();
   }
 
   final NudgeApp app;
+
+  /// The link people without Nudge open, while sharing with browsers.
+  String? webShareUrl;
   late final StreamSubscription<AppEvent> _subscription;
 
   List<DeviceInfo> devices = const [];
@@ -73,7 +89,25 @@ class NudgeController extends ChangeNotifier {
 
   List<DeviceInfo> get pairedDevices => devices.where((d) => d.paired).toList();
 
-  List<DeviceInfo> get nearbyDevices => devices.where((d) => !d.paired).toList();
+  List<DeviceInfo> get nearbyDevices => devices.where((d) => !d.paired && !d.isBrowser).toList();
+
+  /// Open web pages: people without Nudge.
+  List<DeviceInfo> get browserDevices => devices.where((d) => d.isBrowser).toList();
+
+  /// Start sharing with browsers (or keep sharing): returns the link.
+  Future<String> startWebShare() async {
+    final url = await app.startWebShare();
+    webShareUrl = url;
+    notifyListeners();
+    return url;
+  }
+
+  void stopWebShare() {
+    app.stopWebShare();
+    webShareUrl = null;
+    devices = app.devices();
+    notifyListeners();
+  }
 
   DeviceInfo? deviceById(String id) {
     for (final d in devices) {
@@ -127,10 +161,10 @@ class NudgeController extends ChangeNotifier {
     }
   }
 
-  void offer(List<OutgoingFile> files, {bool fromOutside = true}) {
+  void offer(List<OutgoingFile> files, {bool fromOutside = true, bool byQr = false}) {
     if (files.isEmpty) return;
-    warmUp();
-    final request = FilesToSend(files, fromOutside: fromOutside);
+    if (!byQr) warmUp();
+    final request = FilesToSend(files, fromOutside: fromOutside, byQr: byQr);
     _toSend.hasListener ? _toSend.add(request) : _unclaimed.add(request);
   }
 
@@ -169,7 +203,14 @@ class NudgeController extends ChangeNotifier {
       ):
         transfers.insert(
           0,
-          Transfer(id: id, deviceId: deviceId, incoming: incoming, fileName: fileName, size: size),
+          Transfer(
+            id: id,
+            deviceId: deviceId,
+            incoming: incoming,
+            fileName: fileName,
+            size: size,
+            peerName: deviceById(deviceId)?.name,
+          ),
         );
         if (transfers.length > 50) transfers.removeLast();
       case AppEvent_TransferProgress(:final id, :final bytes, :final bytesPerSec):
@@ -188,6 +229,9 @@ class NudgeController extends ChangeNotifier {
           ..took = Duration(microseconds: (seconds * 1e6).round());
         // Speed over this connection's bytes (a resumed file sends fewer).
         if (seconds > 0) t.bytesPerSec = bytes / seconds;
+      case AppEvent_WebShareStopped():
+        webShareUrl = null;
+        devices = app.devices();
       case AppEvent_TransferFailed(:final id, :final error):
         final t = _transfer(id);
         if (t == null) return;

@@ -42,7 +42,8 @@ pub struct DeviceInfo {
     /// First 8 characters of the fingerprint, to show next to the name.
     pub short_id: String,
     pub name: String,
-    /// "windows", "android", ... or empty if not known yet.
+    /// "windows", "android", ..., "browser" for someone using the web page,
+    /// or empty if not known yet.
     pub platform: String,
     pub paired: bool,
     /// Nearby right now.
@@ -102,6 +103,8 @@ pub enum AppEvent {
         id: i64,
         error: String,
     },
+    /// Sharing with browsers stopped (see `NudgeApp::start_web_share`).
+    WebShareStopped,
 }
 
 impl From<NodeEvent> for AppEvent {
@@ -147,6 +150,7 @@ impl From<NodeEvent> for AppEvent {
                 id: id as i64,
                 error,
             },
+            NodeEvent::WebShareStopped => Self::WebShareStopped,
         }
     }
 }
@@ -270,6 +274,29 @@ impl NudgeApp {
         let _guard = runtime().enter();
         self.node.warm(peer);
         Ok(())
+    }
+
+    /// Share with browsers, for people without Nudge: returns the link for
+    /// the QR code. Tabs that open it appear in `devices` with platform
+    /// "browser" and can be sent to like any device. Already sharing: the
+    /// same link. Stops by itself after ten minutes with nobody connected.
+    pub async fn start_web_share(&self) -> Result<String> {
+        let node = self.node.clone();
+        Ok(runtime()
+            .spawn(async move { node.start_web_share().await })
+            .await
+            .context("Nudge runtime stopped")??)
+    }
+
+    #[frb(sync)]
+    pub fn stop_web_share(&self) {
+        self.node.stop_web_share();
+    }
+
+    /// The link, while sharing with browsers.
+    #[frb(sync)]
+    pub fn web_share_url(&self) -> Option<String> {
+        self.node.web_share_url()
     }
 
     /// Send files to a paired device in the background. Returns one

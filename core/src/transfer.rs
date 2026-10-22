@@ -111,7 +111,7 @@ impl Progress {
         self.0.load(Ordering::Relaxed)
     }
 
-    fn set(&self, pos: u64) {
+    pub(crate) fn set(&self, pos: u64) {
         self.0.store(pos, Ordering::Relaxed);
     }
 }

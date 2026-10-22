@@ -56,6 +56,20 @@
                 <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
+        <!-- A second share sheet entry: send to someone without Nudge, by
+             showing them a QR code. Opens MainActivity, which tells them apart. -->
+        <activity-alias
+            android:name=".ShareByQr"
+            android:exported="true"
+            android:label="Share by QR code"
+            android:targetActivity=".MainActivity">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity-alias>
         <service
             android:name=".NudgeService"
             android:exported="false"

@@ -65,11 +65,22 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// and expires after five minutes (`AppEvent::PairingClosed`).
   String startPairing();
 
+  /// Share with browsers, for people without Nudge: returns the link for
+  /// the QR code. Tabs that open it appear in `devices` with platform
+  /// "browser" and can be sent to like any device. Already sharing: the
+  /// same link. Stops by itself after ten minutes with nobody connected.
+  Future<String> startWebShare();
+
+  void stopWebShare();
+
   void unpair({required String deviceId});
 
   /// Open a connection to a paired, nearby device ahead of a likely send,
   /// so the send starts without a handshake. Safe to call often.
   void warm({required String deviceId});
+
+  /// The link, while sharing with browsers.
+  String? webShareUrl();
 }
 
 @freezed
@@ -106,6 +117,9 @@ sealed class AppEvent with _$AppEvent {
   }) = AppEvent_TransferDone;
   const factory AppEvent.transferFailed({required PlatformInt64 id, required String error}) =
       AppEvent_TransferFailed;
+
+  /// Sharing with browsers stopped (see `NudgeApp::start_web_share`).
+  const factory AppEvent.webShareStopped() = AppEvent_WebShareStopped;
 }
 
 /// A device as the app shows it.
@@ -117,7 +131,8 @@ class DeviceInfo {
   final String shortId;
   final String name;
 
-  /// "windows", "android", ... or empty if not known yet.
+  /// "windows", "android", ..., "browser" for someone using the web page,
+  /// or empty if not known yet.
   final String platform;
   final bool paired;
 

@@ -28,6 +28,9 @@ use crate::transfer::{
 };
 use crate::{DEFAULT_PORT, Error, Result, Tls};
 
+mod web;
+pub use web::WEB_PORT;
+
 /// How long to wait for each address when connecting.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -189,6 +192,9 @@ pub enum NodeEvent {
         id: u64,
         error: String,
     },
+    /// Browser sharing stopped (by `stop_web_share`, or after a long spell
+    /// with no browser connected).
+    WebShareStopped,
 }
 
 /// A running Nudge device. Dropping it stops everything.
@@ -218,6 +224,8 @@ struct Shared {
     state: Mutex<State>,
     next_id: AtomicU64,
     idle_timeout: Duration,
+    /// Address the node listens on; browser sharing listens there too.
+    bind: IpAddr,
 }
 
 #[derive(Default)]
@@ -226,6 +234,8 @@ struct State {
     /// The last sighting of every device seen this session, kept after it
     /// goes quiet: where to try a sleeping phone.
     last_seen: HashMap<Fingerprint, DiscoveredPeer>,
+    /// Sharing with browsers, while it's on.
+    web: Option<web::WebShare>,
     /// The code this device is showing, and when it stops working.
     pairing: Option<(PairingCode, Instant)>,
     active: HashMap<u64, Active>,
@@ -273,6 +283,7 @@ impl Node {
             state: Mutex::default(),
             next_id: AtomicU64::new(1),
             idle_timeout: config.idle_timeout,
+            bind: config.bind,
         });
 
         let mut tasks = vec![
@@ -379,6 +390,16 @@ impl Node {
                     reachable: true,
                 }),
         );
+        if let Some(web) = &state.web {
+            peers.extend(web.browsers.iter().map(|(id, tab)| Peer {
+                fingerprint: *id,
+                device_name: tab.name.clone(),
+                platform: "browser".into(),
+                paired: false,
+                online: tab.connected(),
+                reachable: true,
+            }));
+        }
         peers.sort_by(|a, b| {
             (!a.paired, !a.online, a.device_name.to_lowercase()).cmp(&(
                 !b.paired,
@@ -499,6 +520,25 @@ impl Node {
         self.shared.warm(peer);
     }
 
+    /// Start sharing with browsers, for people without Nudge: returns the
+    /// link to show as a QR code. Anyone on the network who opens it appears
+    /// as a device (platform "browser") while their tab stays open. Files
+    /// sent to them wait for them to accept; files they send are saved
+    /// without asking. Stops after ten minutes with nobody connected
+    /// (`NodeEvent::WebShareStopped`). Already sharing: the same link.
+    pub async fn start_web_share(&self) -> Result<String> {
+        web::start(&self.shared).await
+    }
+
+    pub fn stop_web_share(&self) {
+        web::stop(&self.shared);
+    }
+
+    /// The link, while sharing with browsers.
+    pub fn web_share_url(&self) -> Option<String> {
+        self.shared.state().web.as_ref().map(|w| w.url.clone())
+    }
+
     /// `send_files` for any mix of paths and already-open files.
     pub fn send(&self, peer: Fingerprint, items: Vec<Outgoing>) -> Vec<u64> {
         let jobs: Vec<(u64, Outgoing)> = items
@@ -506,6 +546,10 @@ impl Node {
             .map(|item| (self.shared.next_id.fetch_add(1, Ordering::Relaxed), item))
             .collect();
         let ids = jobs.iter().map(|(id, _)| *id).collect();
+        if web::is_browser(&self.shared, &peer) {
+            web::send(self.shared.clone(), peer, jobs);
+            return ids;
+        }
         let shared = self.shared.clone();
         tokio::spawn(async move {
             let count = jobs.len();
@@ -536,12 +580,21 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         self.tasks.iter().for_each(JoinHandle::abort);
+        // Its tasks hold the node's state; stopping them lets it go.
+        self.shared.state().web = None;
     }
 }
 
 impl Shared {
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn download_dir(&self) -> PathBuf {
+        self.download_dir
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     fn emit(&self, event: NodeEvent) {

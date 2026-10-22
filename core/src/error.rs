@@ -50,6 +50,18 @@ pub enum Error {
     #[error("couldn't reach the other device")]
     Unreachable,
 
+    #[error("they declined")]
+    Declined,
+
+    #[error("no answer")]
+    NoAnswer,
+
+    #[error("the browser page was closed")]
+    BrowserGone,
+
+    #[error("couldn't share with browsers: {0}")]
+    WebShare(String),
+
     #[error("device discovery failed: {0}")]
     Discovery(String),
 }

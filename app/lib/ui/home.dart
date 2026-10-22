@@ -11,6 +11,7 @@ import '../platform.dart';
 import '../src/rust/api/nudge.dart';
 import 'pair.dart';
 import 'send_sheet.dart';
+import 'web_share.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, required this.controller});
@@ -51,6 +52,10 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  Future<void> _openWebShare(BuildContext context) =>
+      Navigator.of(context)
+          .push(MaterialPageRoute<void>(builder: (_) => WebShareScreen(controller: controller)));
+
   Future<void> _send(BuildContext context, DeviceInfo device) async {
     controller.warmUp(device);
     final files = await pickFiles();
@@ -89,6 +94,8 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (context, _) {
         final paired = controller.pairedDevices;
         final nearby = controller.nearbyDevices;
+        final browsers = controller.browserDevices;
+        final sharing = controller.webShareUrl != null;
         final transfers = controller.transfers;
         final empty = paired.isEmpty && nearby.isEmpty;
 
@@ -96,6 +103,11 @@ class _HomeScreenState extends State<HomeScreen> {
           appBar: AppBar(
             title: const Text('Nudge'),
             actions: [
+              IconButton(
+                tooltip: 'Share without the app',
+                icon: const Icon(Icons.public_rounded),
+                onPressed: () => _openWebShare(context),
+              ),
               IconButton(
                 tooltip: 'Pair a device',
                 icon: const Icon(Icons.qr_code_2_rounded),
@@ -126,6 +138,27 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       for (final t in transfers.take(10))
                         _TransferTile(transfer: t, controller: controller),
+                    ],
+                    if (sharing || browsers.isNotEmpty) ...[
+                      _SectionHeader(
+                        'Without the app',
+                        action: TextButton(
+                          onPressed: () => _openWebShare(context),
+                          child: const Text('Show code'),
+                        ),
+                      ),
+                      if (browsers.isEmpty)
+                        Card(
+                          margin: const EdgeInsets.symmetric(vertical: 4),
+                          child: ListTile(
+                            leading: const CircleAvatar(child: Icon(Icons.public_rounded)),
+                            title: const Text('Waiting for someone to scan'),
+                            subtitle: const Text('Tap to show the code'),
+                            onTap: () => _openWebShare(context),
+                          ),
+                        ),
+                      for (final d in browsers)
+                        _DeviceTile(device: d, onTap: () => _send(context, d)),
                     ],
                     if (empty)
                       _EmptyState(onPair: () => _openPairing(context))
@@ -276,6 +309,7 @@ class _SectionHeader extends StatelessWidget {
 IconData _platformIcon(String platform) => switch (platform) {
   'android' || 'ios' => Icons.smartphone_rounded,
   'windows' || 'linux' || 'macos' => Icons.laptop_windows_rounded,
+  'browser' => Icons.public_rounded,
   _ => Icons.devices_other_rounded,
 };
 
@@ -291,7 +325,9 @@ class _DeviceTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final status = device.paired
+    final status = device.isBrowser
+        ? (device.online ? 'In a browser · tap to send' : 'Page in the background')
+        : device.paired
         ? (device.online
               ? 'Nearby · tap to send'
               // Seen earlier: most likely a phone with its screen off.
@@ -304,7 +340,7 @@ class _DeviceTile extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: ListTile(
         contentPadding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
-        enabled: !device.paired || device.reachable,
+        enabled: device.isBrowser || !device.paired || device.reachable,
         onTap: onTap,
         leading: CircleAvatar(
           backgroundColor: device.online ? scheme.primaryContainer : scheme.surfaceContainerHighest,
@@ -328,7 +364,9 @@ class _DeviceTile extends StatelessWidget {
             Flexible(child: Text(status, overflow: TextOverflow.ellipsis)),
           ],
         ),
-        trailing: device.paired
+        trailing: device.isBrowser
+            ? null
+            : device.paired
             ? PopupMenuButton<void>(
                 tooltip: 'More',
                 itemBuilder: (_) => [PopupMenuItem(onTap: onUnpair, child: const Text('Unpair'))],
@@ -350,10 +388,15 @@ class _TransferTile extends StatelessWidget {
     final t = transfer;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final peer = controller.deviceById(t.deviceId)?.name ?? 'device';
+    final device = controller.deviceById(t.deviceId);
+    final peer = t.peerName ?? device?.name ?? 'device';
+    // Sent to a browser: nothing moves until they tap Accept.
+    final waiting = !t.incoming && t.bytes == 0 && (device?.isBrowser ?? false);
 
     final String detail;
     switch (t.state) {
+      case TransferState.running when waiting:
+        detail = 'Waiting for them to accept';
       case TransferState.running:
         final parts = [
           '${formatSize(t.bytes)} of ${formatSize(t.size)}',
