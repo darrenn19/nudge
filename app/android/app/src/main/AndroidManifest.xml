@@ -75,6 +75,9 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
         <receiver
+            android:name=".OfferActionReceiver"
+            android:exported="false" />
+        <receiver
             android:name=".BootReceiver"
             android:exported="false">
             <intent-filter>

@@ -209,8 +209,37 @@ Future<void> hideTransferProgress() async {
   if (Platform.isAndroid) await _channel.invokeMethod('transfersIdle');
 }
 
+/// "Darren's PC wants to send you 3 files", with Accept and Decline, for
+/// when Nudge isn't on screen.
+Future<void> notifyOffer({required int id, required String title, required String text}) async {
+  if (!Platform.isAndroid) return;
+  await _channel.invokeMethod('notifyOffer', {'id': id, 'title': title, 'text': text});
+}
+
+Future<void> cancelOfferNotification(int id) async {
+  if (Platform.isAndroid) await _channel.invokeMethod('cancelOffer', {'id': id});
+}
+
+/// Calls [onAnswer] when Accept or Decline is tapped on an offer
+/// notification.
+void listenForOfferAnswers(void Function(int id, bool accept) onAnswer) {
+  if (!Platform.isAndroid) return;
+  _channel.setMethodCallHandler((call) async {
+    if (call.method != 'offerAnswer') return;
+    final args = (call.arguments as Map).cast<String, Object?>();
+    final id = (args['id'] as num?)?.toInt();
+    if (id != null) onAnswer(id, args['accept'] == true);
+  });
+}
+
 /// "Received photo.jpg from Laptop", with an Open action. Also adds the file
 /// to Android's media index so it shows up in Files and Gallery.
+/// Add a received file to Android's media index (Files, Gallery) without a
+/// notification: for when Nudge is on screen and says so itself.
+Future<void> indexReceived(String path) async {
+  if (Platform.isAndroid) await _channel.invokeMethod('scanFile', {'path': path});
+}
+
 Future<void> notifyReceived({required String path, required String from}) async {
   if (Platform.isAndroid) {
     await _channel.invokeMethod('notifyReceived', {'path': path, 'from': from});

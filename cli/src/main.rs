@@ -188,12 +188,14 @@ async fn start_node(
     identity_dir: PathBuf,
     download_dir: PathBuf,
 ) -> Result<(Node, UnboundedReceiver<NodeEvent>)> {
-    let config = NodeConfig::new(
+    let mut config = NodeConfig::new(
         identity_dir,
         download_dir,
         &device_name(),
         std::env::consts::OS,
     );
+    // No one to ask at a terminal: take whatever paired devices send.
+    config.ask_before_receiving = false;
     let (node, events) = Node::start(config).await?;
     if !node.discovery_running() {
         eprintln!("Warning: device discovery couldn't start on this network.");

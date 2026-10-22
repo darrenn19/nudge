@@ -182,6 +182,7 @@ where
         name: BENCH_FILE_NAME.into(),
         size,
         modified: 0,
+        batch: crate::protocol::Batch::single(size),
     };
     send_from(stream, Pattern::new(size), offer).await
 }

@@ -56,7 +56,7 @@ extension AppEventPatterns on AppEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult Function( AppEvent_Paired value)?  paired,TResult Function( AppEvent_PairingClosed value)?  pairingClosed,TResult Function( AppEvent_TransferStarted value)?  transferStarted,TResult Function( AppEvent_TransferProgress value)?  transferProgress,TResult Function( AppEvent_TransferDone value)?  transferDone,TResult Function( AppEvent_TransferFailed value)?  transferFailed,TResult Function( AppEvent_WebShareStopped value)?  webShareStopped,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult Function( AppEvent_Paired value)?  paired,TResult Function( AppEvent_PairingClosed value)?  pairingClosed,TResult Function( AppEvent_TransferStarted value)?  transferStarted,TResult Function( AppEvent_TransferProgress value)?  transferProgress,TResult Function( AppEvent_TransferDone value)?  transferDone,TResult Function( AppEvent_TransferFailed value)?  transferFailed,TResult Function( AppEvent_WebShareStopped value)?  webShareStopped,TResult Function( AppEvent_OfferReceived value)?  offerReceived,TResult Function( AppEvent_OfferClosed value)?  offerClosed,TResult Function( AppEvent_TransferAccepted value)?  transferAccepted,TResult Function( AppEvent_TransferPending value)?  transferPending,TResult Function( AppEvent_PairAsked value)?  pairAsked,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
@@ -67,7 +67,12 @@ return transferStarted(_that);case AppEvent_TransferProgress() when transferProg
 return transferProgress(_that);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that);case AppEvent_TransferFailed() when transferFailed != null:
 return transferFailed(_that);case AppEvent_WebShareStopped() when webShareStopped != null:
-return webShareStopped(_that);case _:
+return webShareStopped(_that);case AppEvent_OfferReceived() when offerReceived != null:
+return offerReceived(_that);case AppEvent_OfferClosed() when offerClosed != null:
+return offerClosed(_that);case AppEvent_TransferAccepted() when transferAccepted != null:
+return transferAccepted(_that);case AppEvent_TransferPending() when transferPending != null:
+return transferPending(_that);case AppEvent_PairAsked() when pairAsked != null:
+return pairAsked(_that);case _:
   return orElse();
 
 }
@@ -85,7 +90,7 @@ return webShareStopped(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_DevicesChanged value)  devicesChanged,required TResult Function( AppEvent_Paired value)  paired,required TResult Function( AppEvent_PairingClosed value)  pairingClosed,required TResult Function( AppEvent_TransferStarted value)  transferStarted,required TResult Function( AppEvent_TransferProgress value)  transferProgress,required TResult Function( AppEvent_TransferDone value)  transferDone,required TResult Function( AppEvent_TransferFailed value)  transferFailed,required TResult Function( AppEvent_WebShareStopped value)  webShareStopped,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_DevicesChanged value)  devicesChanged,required TResult Function( AppEvent_Paired value)  paired,required TResult Function( AppEvent_PairingClosed value)  pairingClosed,required TResult Function( AppEvent_TransferStarted value)  transferStarted,required TResult Function( AppEvent_TransferProgress value)  transferProgress,required TResult Function( AppEvent_TransferDone value)  transferDone,required TResult Function( AppEvent_TransferFailed value)  transferFailed,required TResult Function( AppEvent_WebShareStopped value)  webShareStopped,required TResult Function( AppEvent_OfferReceived value)  offerReceived,required TResult Function( AppEvent_OfferClosed value)  offerClosed,required TResult Function( AppEvent_TransferAccepted value)  transferAccepted,required TResult Function( AppEvent_TransferPending value)  transferPending,required TResult Function( AppEvent_PairAsked value)  pairAsked,}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged():
@@ -96,7 +101,12 @@ return transferStarted(_that);case AppEvent_TransferProgress():
 return transferProgress(_that);case AppEvent_TransferDone():
 return transferDone(_that);case AppEvent_TransferFailed():
 return transferFailed(_that);case AppEvent_WebShareStopped():
-return webShareStopped(_that);}
+return webShareStopped(_that);case AppEvent_OfferReceived():
+return offerReceived(_that);case AppEvent_OfferClosed():
+return offerClosed(_that);case AppEvent_TransferAccepted():
+return transferAccepted(_that);case AppEvent_TransferPending():
+return transferPending(_that);case AppEvent_PairAsked():
+return pairAsked(_that);}
 }
 /// A variant of `map` that fallback to returning `null`.
 ///
@@ -110,7 +120,7 @@ return webShareStopped(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult? Function( AppEvent_Paired value)?  paired,TResult? Function( AppEvent_PairingClosed value)?  pairingClosed,TResult? Function( AppEvent_TransferStarted value)?  transferStarted,TResult? Function( AppEvent_TransferProgress value)?  transferProgress,TResult? Function( AppEvent_TransferDone value)?  transferDone,TResult? Function( AppEvent_TransferFailed value)?  transferFailed,TResult? Function( AppEvent_WebShareStopped value)?  webShareStopped,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult? Function( AppEvent_Paired value)?  paired,TResult? Function( AppEvent_PairingClosed value)?  pairingClosed,TResult? Function( AppEvent_TransferStarted value)?  transferStarted,TResult? Function( AppEvent_TransferProgress value)?  transferProgress,TResult? Function( AppEvent_TransferDone value)?  transferDone,TResult? Function( AppEvent_TransferFailed value)?  transferFailed,TResult? Function( AppEvent_WebShareStopped value)?  webShareStopped,TResult? Function( AppEvent_OfferReceived value)?  offerReceived,TResult? Function( AppEvent_OfferClosed value)?  offerClosed,TResult? Function( AppEvent_TransferAccepted value)?  transferAccepted,TResult? Function( AppEvent_TransferPending value)?  transferPending,TResult? Function( AppEvent_PairAsked value)?  pairAsked,}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
@@ -121,7 +131,12 @@ return transferStarted(_that);case AppEvent_TransferProgress() when transferProg
 return transferProgress(_that);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that);case AppEvent_TransferFailed() when transferFailed != null:
 return transferFailed(_that);case AppEvent_WebShareStopped() when webShareStopped != null:
-return webShareStopped(_that);case _:
+return webShareStopped(_that);case AppEvent_OfferReceived() when offerReceived != null:
+return offerReceived(_that);case AppEvent_OfferClosed() when offerClosed != null:
+return offerClosed(_that);case AppEvent_TransferAccepted() when transferAccepted != null:
+return transferAccepted(_that);case AppEvent_TransferPending() when transferPending != null:
+return transferPending(_that);case AppEvent_PairAsked() when pairAsked != null:
+return pairAsked(_that);case _:
   return null;
 
 }
@@ -138,7 +153,7 @@ return webShareStopped(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  devicesChanged,TResult Function( DeviceInfo device)?  paired,TResult Function()?  pairingClosed,TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult Function( PlatformInt64 id,  String error)?  transferFailed,TResult Function()?  webShareStopped,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  devicesChanged,TResult Function( DeviceInfo device)?  paired,TResult Function()?  pairingClosed,TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult Function( PlatformInt64 id,  String error)?  transferFailed,TResult Function()?  webShareStopped,TResult Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)?  offerReceived,TResult Function( PlatformInt64 id)?  offerClosed,TResult Function( PlatformInt64 id)?  transferAccepted,TResult Function( PlatformInt64 id)?  transferPending,TResult Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)?  pairAsked,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
 return devicesChanged();case AppEvent_Paired() when paired != null:
@@ -148,7 +163,12 @@ return transferStarted(_that.id,_that.deviceId,_that.incoming,_that.fileName,_th
 return transferProgress(_that.id,_that.bytes,_that.size,_that.bytesPerSec);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that.id,_that.path,_that.bytes,_that.seconds,_that.resumedFrom);case AppEvent_TransferFailed() when transferFailed != null:
 return transferFailed(_that.id,_that.error);case AppEvent_WebShareStopped() when webShareStopped != null:
-return webShareStopped();case _:
+return webShareStopped();case AppEvent_OfferReceived() when offerReceived != null:
+return offerReceived(_that.id,_that.deviceId,_that.fileName,_that.count,_that.size);case AppEvent_OfferClosed() when offerClosed != null:
+return offerClosed(_that.id);case AppEvent_TransferAccepted() when transferAccepted != null:
+return transferAccepted(_that.id);case AppEvent_TransferPending() when transferPending != null:
+return transferPending(_that.id);case AppEvent_PairAsked() when pairAsked != null:
+return pairAsked(_that.id,_that.deviceId,_that.deviceName,_that.code);case _:
   return orElse();
 
 }
@@ -166,7 +186,7 @@ return webShareStopped();case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  devicesChanged,required TResult Function( DeviceInfo device)  paired,required TResult Function()  pairingClosed,required TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)  transferStarted,required TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)  transferProgress,required TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)  transferDone,required TResult Function( PlatformInt64 id,  String error)  transferFailed,required TResult Function()  webShareStopped,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  devicesChanged,required TResult Function( DeviceInfo device)  paired,required TResult Function()  pairingClosed,required TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)  transferStarted,required TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)  transferProgress,required TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)  transferDone,required TResult Function( PlatformInt64 id,  String error)  transferFailed,required TResult Function()  webShareStopped,required TResult Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)  offerReceived,required TResult Function( PlatformInt64 id)  offerClosed,required TResult Function( PlatformInt64 id)  transferAccepted,required TResult Function( PlatformInt64 id)  transferPending,required TResult Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)  pairAsked,}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged():
 return devicesChanged();case AppEvent_Paired():
@@ -176,7 +196,12 @@ return transferStarted(_that.id,_that.deviceId,_that.incoming,_that.fileName,_th
 return transferProgress(_that.id,_that.bytes,_that.size,_that.bytesPerSec);case AppEvent_TransferDone():
 return transferDone(_that.id,_that.path,_that.bytes,_that.seconds,_that.resumedFrom);case AppEvent_TransferFailed():
 return transferFailed(_that.id,_that.error);case AppEvent_WebShareStopped():
-return webShareStopped();}
+return webShareStopped();case AppEvent_OfferReceived():
+return offerReceived(_that.id,_that.deviceId,_that.fileName,_that.count,_that.size);case AppEvent_OfferClosed():
+return offerClosed(_that.id);case AppEvent_TransferAccepted():
+return transferAccepted(_that.id);case AppEvent_TransferPending():
+return transferPending(_that.id);case AppEvent_PairAsked():
+return pairAsked(_that.id,_that.deviceId,_that.deviceName,_that.code);}
 }
 /// A variant of `when` that fallback to returning `null`
 ///
@@ -190,7 +215,7 @@ return webShareStopped();}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  devicesChanged,TResult? Function( DeviceInfo device)?  paired,TResult? Function()?  pairingClosed,TResult? Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult? Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult? Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult? Function( PlatformInt64 id,  String error)?  transferFailed,TResult? Function()?  webShareStopped,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  devicesChanged,TResult? Function( DeviceInfo device)?  paired,TResult? Function()?  pairingClosed,TResult? Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult? Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult? Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult? Function( PlatformInt64 id,  String error)?  transferFailed,TResult? Function()?  webShareStopped,TResult? Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)?  offerReceived,TResult? Function( PlatformInt64 id)?  offerClosed,TResult? Function( PlatformInt64 id)?  transferAccepted,TResult? Function( PlatformInt64 id)?  transferPending,TResult? Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)?  pairAsked,}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
 return devicesChanged();case AppEvent_Paired() when paired != null:
@@ -200,7 +225,12 @@ return transferStarted(_that.id,_that.deviceId,_that.incoming,_that.fileName,_th
 return transferProgress(_that.id,_that.bytes,_that.size,_that.bytesPerSec);case AppEvent_TransferDone() when transferDone != null:
 return transferDone(_that.id,_that.path,_that.bytes,_that.seconds,_that.resumedFrom);case AppEvent_TransferFailed() when transferFailed != null:
 return transferFailed(_that.id,_that.error);case AppEvent_WebShareStopped() when webShareStopped != null:
-return webShareStopped();case _:
+return webShareStopped();case AppEvent_OfferReceived() when offerReceived != null:
+return offerReceived(_that.id,_that.deviceId,_that.fileName,_that.count,_that.size);case AppEvent_OfferClosed() when offerClosed != null:
+return offerClosed(_that.id);case AppEvent_TransferAccepted() when transferAccepted != null:
+return transferAccepted(_that.id);case AppEvent_TransferPending() when transferPending != null:
+return transferPending(_that.id);case AppEvent_PairAsked() when pairAsked != null:
+return pairAsked(_that.id,_that.deviceId,_that.deviceName,_that.code);case _:
   return null;
 
 }
@@ -668,5 +698,360 @@ String toString() {
 
 
 
+
+/// @nodoc
+
+
+class AppEvent_OfferReceived extends AppEvent {
+  const AppEvent_OfferReceived({required this.id, required this.deviceId, required this.fileName, required this.count, required this.size}): super._();
+  
+
+ final  PlatformInt64 id;
+ final  String deviceId;
+/// The first file's name.
+ final  String fileName;
+ final  PlatformInt64 count;
+ final  PlatformInt64 size;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AppEvent_OfferReceivedCopyWith<AppEvent_OfferReceived> get copyWith => _$AppEvent_OfferReceivedCopyWithImpl<AppEvent_OfferReceived>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_OfferReceived&&(identical(other.id, id) || other.id == id)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.count, count) || other.count == count)&&(identical(other.size, size) || other.size == size));
+}
+
+
+@override
+int get hashCode {
+    return Object.hash(runtimeType,id,deviceId,fileName,count,size);
+}
+
+@override
+String toString() {
+    return 'AppEvent.offerReceived(id: $id, deviceId: $deviceId, fileName: $fileName, count: $count, size: $size)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AppEvent_OfferReceivedCopyWith<$Res> implements $AppEventCopyWith<$Res> {
+  factory $AppEvent_OfferReceivedCopyWith(AppEvent_OfferReceived value, $Res Function(AppEvent_OfferReceived) _then) = _$AppEvent_OfferReceivedCopyWithImpl;
+@useResult
+$Res call({
+ PlatformInt64 id, String deviceId, String fileName, PlatformInt64 count, PlatformInt64 size
+});
+
+
+
+
+}
+/// @nodoc
+class _$AppEvent_OfferReceivedCopyWithImpl<$Res>
+    implements $AppEvent_OfferReceivedCopyWith<$Res> {
+  _$AppEvent_OfferReceivedCopyWithImpl(this._self, this._then);
+
+  final AppEvent_OfferReceived _self;
+  final $Res Function(AppEvent_OfferReceived) _then;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? id = null,Object? deviceId = null,Object? fileName = null,Object? count = null,Object? size = null,}) {
+  return _then(AppEvent_OfferReceived(
+id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,deviceId: null == deviceId ? _self.deviceId : deviceId // ignore: cast_nullable_to_non_nullable
+as String,fileName: null == fileName ? _self.fileName : fileName // ignore: cast_nullable_to_non_nullable
+as String,count: null == count ? _self.count : count // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,size: null == size ? _self.size : size // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class AppEvent_OfferClosed extends AppEvent {
+  const AppEvent_OfferClosed({required this.id}): super._();
+  
+
+ final  PlatformInt64 id;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AppEvent_OfferClosedCopyWith<AppEvent_OfferClosed> get copyWith => _$AppEvent_OfferClosedCopyWithImpl<AppEvent_OfferClosed>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_OfferClosed&&(identical(other.id, id) || other.id == id));
+}
+
+
+@override
+int get hashCode {
+    return Object.hash(runtimeType,id);
+}
+
+@override
+String toString() {
+    return 'AppEvent.offerClosed(id: $id)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AppEvent_OfferClosedCopyWith<$Res> implements $AppEventCopyWith<$Res> {
+  factory $AppEvent_OfferClosedCopyWith(AppEvent_OfferClosed value, $Res Function(AppEvent_OfferClosed) _then) = _$AppEvent_OfferClosedCopyWithImpl;
+@useResult
+$Res call({
+ PlatformInt64 id
+});
+
+
+
+
+}
+/// @nodoc
+class _$AppEvent_OfferClosedCopyWithImpl<$Res>
+    implements $AppEvent_OfferClosedCopyWith<$Res> {
+  _$AppEvent_OfferClosedCopyWithImpl(this._self, this._then);
+
+  final AppEvent_OfferClosed _self;
+  final $Res Function(AppEvent_OfferClosed) _then;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? id = null,}) {
+  return _then(AppEvent_OfferClosed(
+id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class AppEvent_TransferAccepted extends AppEvent {
+  const AppEvent_TransferAccepted({required this.id}): super._();
+  
+
+ final  PlatformInt64 id;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AppEvent_TransferAcceptedCopyWith<AppEvent_TransferAccepted> get copyWith => _$AppEvent_TransferAcceptedCopyWithImpl<AppEvent_TransferAccepted>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_TransferAccepted&&(identical(other.id, id) || other.id == id));
+}
+
+
+@override
+int get hashCode {
+    return Object.hash(runtimeType,id);
+}
+
+@override
+String toString() {
+    return 'AppEvent.transferAccepted(id: $id)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AppEvent_TransferAcceptedCopyWith<$Res> implements $AppEventCopyWith<$Res> {
+  factory $AppEvent_TransferAcceptedCopyWith(AppEvent_TransferAccepted value, $Res Function(AppEvent_TransferAccepted) _then) = _$AppEvent_TransferAcceptedCopyWithImpl;
+@useResult
+$Res call({
+ PlatformInt64 id
+});
+
+
+
+
+}
+/// @nodoc
+class _$AppEvent_TransferAcceptedCopyWithImpl<$Res>
+    implements $AppEvent_TransferAcceptedCopyWith<$Res> {
+  _$AppEvent_TransferAcceptedCopyWithImpl(this._self, this._then);
+
+  final AppEvent_TransferAccepted _self;
+  final $Res Function(AppEvent_TransferAccepted) _then;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? id = null,}) {
+  return _then(AppEvent_TransferAccepted(
+id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class AppEvent_TransferPending extends AppEvent {
+  const AppEvent_TransferPending({required this.id}): super._();
+  
+
+ final  PlatformInt64 id;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AppEvent_TransferPendingCopyWith<AppEvent_TransferPending> get copyWith => _$AppEvent_TransferPendingCopyWithImpl<AppEvent_TransferPending>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_TransferPending&&(identical(other.id, id) || other.id == id));
+}
+
+
+@override
+int get hashCode {
+    return Object.hash(runtimeType,id);
+}
+
+@override
+String toString() {
+    return 'AppEvent.transferPending(id: $id)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AppEvent_TransferPendingCopyWith<$Res> implements $AppEventCopyWith<$Res> {
+  factory $AppEvent_TransferPendingCopyWith(AppEvent_TransferPending value, $Res Function(AppEvent_TransferPending) _then) = _$AppEvent_TransferPendingCopyWithImpl;
+@useResult
+$Res call({
+ PlatformInt64 id
+});
+
+
+
+
+}
+/// @nodoc
+class _$AppEvent_TransferPendingCopyWithImpl<$Res>
+    implements $AppEvent_TransferPendingCopyWith<$Res> {
+  _$AppEvent_TransferPendingCopyWithImpl(this._self, this._then);
+
+  final AppEvent_TransferPending _self;
+  final $Res Function(AppEvent_TransferPending) _then;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? id = null,}) {
+  return _then(AppEvent_TransferPending(
+id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class AppEvent_PairAsked extends AppEvent {
+  const AppEvent_PairAsked({required this.id, required this.deviceId, required this.deviceName, required this.code}): super._();
+  
+
+ final  PlatformInt64 id;
+ final  String deviceId;
+ final  String deviceName;
+ final  String code;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AppEvent_PairAskedCopyWith<AppEvent_PairAsked> get copyWith => _$AppEvent_PairAskedCopyWithImpl<AppEvent_PairAsked>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_PairAsked&&(identical(other.id, id) || other.id == id)&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId)&&(identical(other.deviceName, deviceName) || other.deviceName == deviceName)&&(identical(other.code, code) || other.code == code));
+}
+
+
+@override
+int get hashCode {
+    return Object.hash(runtimeType,id,deviceId,deviceName,code);
+}
+
+@override
+String toString() {
+    return 'AppEvent.pairAsked(id: $id, deviceId: $deviceId, deviceName: $deviceName, code: $code)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AppEvent_PairAskedCopyWith<$Res> implements $AppEventCopyWith<$Res> {
+  factory $AppEvent_PairAskedCopyWith(AppEvent_PairAsked value, $Res Function(AppEvent_PairAsked) _then) = _$AppEvent_PairAskedCopyWithImpl;
+@useResult
+$Res call({
+ PlatformInt64 id, String deviceId, String deviceName, String code
+});
+
+
+
+
+}
+/// @nodoc
+class _$AppEvent_PairAskedCopyWithImpl<$Res>
+    implements $AppEvent_PairAskedCopyWith<$Res> {
+  _$AppEvent_PairAskedCopyWithImpl(this._self, this._then);
+
+  final AppEvent_PairAsked _self;
+  final $Res Function(AppEvent_PairAsked) _then;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? id = null,Object? deviceId = null,Object? deviceName = null,Object? code = null,}) {
+  return _then(AppEvent_PairAsked(
+id: null == id ? _self.id : id // ignore: cast_nullable_to_non_nullable
+as PlatformInt64,deviceId: null == deviceId ? _self.deviceId : deviceId // ignore: cast_nullable_to_non_nullable
+as String,deviceName: null == deviceName ? _self.deviceName : deviceName // ignore: cast_nullable_to_non_nullable
+as String,code: null == code ? _self.code : code // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
 
 // dart format on

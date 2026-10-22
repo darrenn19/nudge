@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -47435449;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2136488249;
 
 // Section: executor
 
@@ -48,6 +48,112 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
+fn wire__crate__api__nudge__NudgeApp_answer_offer_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NudgeApp_answer_offer",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>,
+            >>::sse_decode(&mut deserializer);
+            let api_id = <i64>::sse_decode(&mut deserializer);
+            let api_accept = <bool>::sse_decode(&mut deserializer);
+            let api_always = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                (move || {
+                    let mut api_that_guard = None;
+                    let decode_indices_ =
+                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                &api_that, 0, false,
+                            ),
+                        ]);
+                    for i in decode_indices_ {
+                        match i {
+                            0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let api_that_guard = api_that_guard.unwrap();
+                    let output_ok = crate::api::nudge::NudgeApp::answer_offer(
+                        &*api_that_guard,
+                        api_id,
+                        api_accept,
+                        api_always,
+                    )?;
+                    std::result::Result::Ok(output_ok)
+                })(),
+            )
+        },
+    )
+}
+fn wire__crate__api__nudge__NudgeApp_answer_pair_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NudgeApp_answer_pair",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>,
+            >>::sse_decode(&mut deserializer);
+            let api_id = <i64>::sse_decode(&mut deserializer);
+            let api_accept = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, ()>((move || {
+                let mut api_that_guard = None;
+                let decode_indices_ =
+                    flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                        flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                            &api_that, 0, false,
+                        ),
+                    ]);
+                for i in decode_indices_ {
+                    match i {
+                        0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                        _ => unreachable!(),
+                    }
+                }
+                let api_that_guard = api_that_guard.unwrap();
+                let output_ok = Ok::<_, ()>({
+                    crate::api::nudge::NudgeApp::answer_pair(&*api_that_guard, api_id, api_accept);
+                })?;
+                std::result::Result::Ok(output_ok)
+            })())
+        },
+    )
+}
 fn wire__crate__api__nudge__NudgeApp_cancel_pairing_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -444,6 +550,116 @@ fn wire__crate__api__nudge__NudgeApp_pair_impl(
         },
     )
 }
+fn wire__crate__api__nudge__NudgeApp_pair_code_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NudgeApp_pair_code",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>,
+            >>::sse_decode(&mut deserializer);
+            let api_device_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                (move || {
+                    let mut api_that_guard = None;
+                    let decode_indices_ =
+                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                &api_that, 0, false,
+                            ),
+                        ]);
+                    for i in decode_indices_ {
+                        match i {
+                            0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let api_that_guard = api_that_guard.unwrap();
+                    let output_ok =
+                        crate::api::nudge::NudgeApp::pair_code(&*api_that_guard, api_device_id)?;
+                    std::result::Result::Ok(output_ok)
+                })(),
+            )
+        },
+    )
+}
+fn wire__crate__api__nudge__NudgeApp_pair_nearby_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NudgeApp_pair_nearby",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>,
+            >>::sse_decode(&mut deserializer);
+            let api_device_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::api::nudge::NudgeApp::pair_nearby(
+                            &*api_that_guard,
+                            api_device_id,
+                        )
+                        .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__nudge__NudgeApp_refresh_impl(
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
@@ -593,6 +809,60 @@ fn wire__crate__api__nudge__NudgeApp_send_open_files_impl(
                         &*api_that_guard,
                         api_device_id,
                         api_files,
+                    )?;
+                    std::result::Result::Ok(output_ok)
+                })(),
+            )
+        },
+    )
+}
+fn wire__crate__api__nudge__NudgeApp_set_auto_accept_impl(
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_sync::<flutter_rust_bridge::for_generated::SseCodec, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NudgeApp_set_auto_accept",
+            port: None,
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Sync,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>,
+            >>::sse_decode(&mut deserializer);
+            let api_device_id = <String>::sse_decode(&mut deserializer);
+            let api_on = <bool>::sse_decode(&mut deserializer);
+            deserializer.end();
+            transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                (move || {
+                    let mut api_that_guard = None;
+                    let decode_indices_ =
+                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
+                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                &api_that, 0, false,
+                            ),
+                        ]);
+                    for i in decode_indices_ {
+                        match i {
+                            0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
+                            _ => unreachable!(),
+                        }
+                    }
+                    let api_that_guard = api_that_guard.unwrap();
+                    let output_ok = crate::api::nudge::NudgeApp::set_auto_accept(
+                        &*api_that_guard,
+                        api_device_id,
+                        api_on,
                     )?;
                     std::result::Result::Ok(output_ok)
                 })(),
@@ -1147,6 +1417,44 @@ impl SseDecode for crate::api::nudge::AppEvent {
             7 => {
                 return crate::api::nudge::AppEvent::WebShareStopped;
             }
+            8 => {
+                let mut var_id = <i64>::sse_decode(deserializer);
+                let mut var_deviceId = <String>::sse_decode(deserializer);
+                let mut var_fileName = <String>::sse_decode(deserializer);
+                let mut var_count = <i64>::sse_decode(deserializer);
+                let mut var_size = <i64>::sse_decode(deserializer);
+                return crate::api::nudge::AppEvent::OfferReceived {
+                    id: var_id,
+                    device_id: var_deviceId,
+                    file_name: var_fileName,
+                    count: var_count,
+                    size: var_size,
+                };
+            }
+            9 => {
+                let mut var_id = <i64>::sse_decode(deserializer);
+                return crate::api::nudge::AppEvent::OfferClosed { id: var_id };
+            }
+            10 => {
+                let mut var_id = <i64>::sse_decode(deserializer);
+                return crate::api::nudge::AppEvent::TransferAccepted { id: var_id };
+            }
+            11 => {
+                let mut var_id = <i64>::sse_decode(deserializer);
+                return crate::api::nudge::AppEvent::TransferPending { id: var_id };
+            }
+            12 => {
+                let mut var_id = <i64>::sse_decode(deserializer);
+                let mut var_deviceId = <String>::sse_decode(deserializer);
+                let mut var_deviceName = <String>::sse_decode(deserializer);
+                let mut var_code = <String>::sse_decode(deserializer);
+                return crate::api::nudge::AppEvent::PairAsked {
+                    id: var_id,
+                    device_id: var_deviceId,
+                    device_name: var_deviceName,
+                    code: var_code,
+                };
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1171,6 +1479,8 @@ impl SseDecode for crate::api::nudge::DeviceInfo {
         let mut var_paired = <bool>::sse_decode(deserializer);
         let mut var_online = <bool>::sse_decode(deserializer);
         let mut var_reachable = <bool>::sse_decode(deserializer);
+        let mut var_autoAccept = <bool>::sse_decode(deserializer);
+        let mut var_acceptsFromUs = <Option<bool>>::sse_decode(deserializer);
         return crate::api::nudge::DeviceInfo {
             id: var_id,
             short_id: var_shortId,
@@ -1179,6 +1489,8 @@ impl SseDecode for crate::api::nudge::DeviceInfo {
             paired: var_paired,
             online: var_online,
             reachable: var_reachable,
+            auto_accept: var_autoAccept,
+            accepts_from_us: var_acceptsFromUs,
         };
     }
 }
@@ -1287,6 +1599,17 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<bool>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for u8 {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1315,16 +1638,17 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        7 => wire__crate__api__nudge__NudgeApp_events_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__nudge__NudgeApp_pair_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__nudge__NudgeApp_start_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__nudge__NudgeApp_start_web_share_impl(
+        9 => wire__crate__api__nudge__NudgeApp_events_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__nudge__NudgeApp_pair_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__nudge__NudgeApp_pair_nearby_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__nudge__NudgeApp_start_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__nudge__NudgeApp_start_web_share_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        20 => wire__crate__api__nudge__init_app_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__nudge__init_app_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1337,21 +1661,25 @@ fn pde_ffi_dispatcher_sync_impl(
 ) -> flutter_rust_bridge::for_generated::WireSyncRust2DartSse {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__nudge__NudgeApp_cancel_pairing_impl(ptr, rust_vec_len, data_len),
-        2 => wire__crate__api__nudge__NudgeApp_device_id_impl(ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__nudge__NudgeApp_device_name_impl(ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__nudge__NudgeApp_devices_impl(ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__nudge__NudgeApp_discovery_running_impl(ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__nudge__NudgeApp_download_dir_impl(ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__nudge__NudgeApp_refresh_impl(ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__nudge__NudgeApp_send_files_impl(ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__nudge__NudgeApp_send_open_files_impl(ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__nudge__NudgeApp_set_download_dir_impl(ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__nudge__NudgeApp_start_pairing_impl(ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__nudge__NudgeApp_stop_web_share_impl(ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__nudge__NudgeApp_unpair_impl(ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__nudge__NudgeApp_warm_impl(ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__nudge__NudgeApp_web_share_url_impl(ptr, rust_vec_len, data_len),
+        1 => wire__crate__api__nudge__NudgeApp_answer_offer_impl(ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__nudge__NudgeApp_answer_pair_impl(ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__nudge__NudgeApp_cancel_pairing_impl(ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__nudge__NudgeApp_device_id_impl(ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__nudge__NudgeApp_device_name_impl(ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__nudge__NudgeApp_devices_impl(ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__nudge__NudgeApp_discovery_running_impl(ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__nudge__NudgeApp_download_dir_impl(ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__nudge__NudgeApp_pair_code_impl(ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__nudge__NudgeApp_refresh_impl(ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__nudge__NudgeApp_send_files_impl(ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__nudge__NudgeApp_send_open_files_impl(ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__nudge__NudgeApp_set_auto_accept_impl(ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__nudge__NudgeApp_set_download_dir_impl(ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__nudge__NudgeApp_start_pairing_impl(ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__nudge__NudgeApp_stop_web_share_impl(ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__nudge__NudgeApp_unpair_impl(ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__nudge__NudgeApp_warm_impl(ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__nudge__NudgeApp_web_share_url_impl(ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -1432,6 +1760,43 @@ impl flutter_rust_bridge::IntoDart for crate::api::nudge::AppEvent {
             ]
             .into_dart(),
             crate::api::nudge::AppEvent::WebShareStopped => [7.into_dart()].into_dart(),
+            crate::api::nudge::AppEvent::OfferReceived {
+                id,
+                device_id,
+                file_name,
+                count,
+                size,
+            } => [
+                8.into_dart(),
+                id.into_into_dart().into_dart(),
+                device_id.into_into_dart().into_dart(),
+                file_name.into_into_dart().into_dart(),
+                count.into_into_dart().into_dart(),
+                size.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::nudge::AppEvent::OfferClosed { id } => {
+                [9.into_dart(), id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::nudge::AppEvent::TransferAccepted { id } => {
+                [10.into_dart(), id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::nudge::AppEvent::TransferPending { id } => {
+                [11.into_dart(), id.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::nudge::AppEvent::PairAsked {
+                id,
+                device_id,
+                device_name,
+                code,
+            } => [
+                12.into_dart(),
+                id.into_into_dart().into_dart(),
+                device_id.into_into_dart().into_dart(),
+                device_name.into_into_dart().into_dart(),
+                code.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
             _ => {
                 unimplemented!("");
             }
@@ -1457,6 +1822,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::nudge::DeviceInfo {
             self.paired.into_into_dart().into_dart(),
             self.online.into_into_dart().into_dart(),
             self.reachable.into_into_dart().into_dart(),
+            self.auto_accept.into_into_dart().into_dart(),
+            self.accepts_from_us.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -1591,6 +1958,44 @@ impl SseEncode for crate::api::nudge::AppEvent {
             crate::api::nudge::AppEvent::WebShareStopped => {
                 <i32>::sse_encode(7, serializer);
             }
+            crate::api::nudge::AppEvent::OfferReceived {
+                id,
+                device_id,
+                file_name,
+                count,
+                size,
+            } => {
+                <i32>::sse_encode(8, serializer);
+                <i64>::sse_encode(id, serializer);
+                <String>::sse_encode(device_id, serializer);
+                <String>::sse_encode(file_name, serializer);
+                <i64>::sse_encode(count, serializer);
+                <i64>::sse_encode(size, serializer);
+            }
+            crate::api::nudge::AppEvent::OfferClosed { id } => {
+                <i32>::sse_encode(9, serializer);
+                <i64>::sse_encode(id, serializer);
+            }
+            crate::api::nudge::AppEvent::TransferAccepted { id } => {
+                <i32>::sse_encode(10, serializer);
+                <i64>::sse_encode(id, serializer);
+            }
+            crate::api::nudge::AppEvent::TransferPending { id } => {
+                <i32>::sse_encode(11, serializer);
+                <i64>::sse_encode(id, serializer);
+            }
+            crate::api::nudge::AppEvent::PairAsked {
+                id,
+                device_id,
+                device_name,
+                code,
+            } => {
+                <i32>::sse_encode(12, serializer);
+                <i64>::sse_encode(id, serializer);
+                <String>::sse_encode(device_id, serializer);
+                <String>::sse_encode(device_name, serializer);
+                <String>::sse_encode(code, serializer);
+            }
             _ => {
                 unimplemented!("");
             }
@@ -1615,6 +2020,8 @@ impl SseEncode for crate::api::nudge::DeviceInfo {
         <bool>::sse_encode(self.paired, serializer);
         <bool>::sse_encode(self.online, serializer);
         <bool>::sse_encode(self.reachable, serializer);
+        <bool>::sse_encode(self.auto_accept, serializer);
+        <Option<bool>>::sse_encode(self.accepts_from_us, serializer);
     }
 }
 
@@ -1703,6 +2110,16 @@ impl SseEncode for Option<String> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <String>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<bool> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <bool>::sse_encode(value, serializer);
         }
     }
 }

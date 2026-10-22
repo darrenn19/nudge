@@ -6,7 +6,7 @@ Full design rationale: see [docs/DESIGN.md](docs/DESIGN.md). Read it before maki
 
 ## Goals (in priority order)
 1. **Speed** — transfers should be as fast as the hardware allows, for any file size.
-2. **Seamless feel** — one tap to send, no accept prompts between paired devices, no choices the app can make itself.
+2. **Seamless feel** — one tap to send, one quick Accept per send (or none, for devices set to always accept), no choices the app can make itself.
 3. **Clean UI** — minimal, calm, native-feeling on each platform.
 4. **Private** — no cloud, no accounts, no telemetry. Data goes device to device only.
 
@@ -41,7 +41,7 @@ The app never asks the user which path to use.
 
 ## Discovery & pairing
 - mDNS discovery + UDP broadcast fallback.
-- Pair once via QR code (exchanges certificates). Paired devices auto-accept with no prompt.
+- Pair once: tap a nearby device and confirm a matching six-digit code on both screens, or scan a QR code (exchanges certificates). The receiver is asked once per send (Accept / Decline, in the app, a notification or a toast); each paired device can be set to 'always accept', which skips the question. The sender is told Accepted / Declined. Pairing again with a reinstalled device replaces its old entry.
 
 ## UX integration
 - Android: share-sheet target, quick settings tile, "received" notification with an Open action.

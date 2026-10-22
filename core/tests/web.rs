@@ -156,6 +156,7 @@ async fn browser_receives_and_sends() {
     let session = field(&hello, "session");
     assert_eq!(field(&hello, "from"), "Laptop");
     assert_eq!(field(&hello, "name"), "iPhone");
+    assert_eq!(field(&hello, "platform"), "windows");
     let id: Fingerprint = session.parse().unwrap();
     let peer = node
         .peers()
@@ -195,6 +196,11 @@ async fn browser_receives_and_sends() {
         .await;
         assert_eq!(status, 200);
         assert!(body == expected);
+        // The page hears when the whole file has gone.
+        assert_eq!(
+            field(&tab.next("delivered").await, "id"),
+            expected_id.to_string()
+        );
         wait_for(&mut events, |e| match e {
             NodeEvent::TransferDone { id, .. } if id == expected_id => Some(()),
             NodeEvent::TransferFailed { error, .. } => panic!("send failed: {error}"),
@@ -220,8 +226,25 @@ async fn browser_receives_and_sends() {
     .await;
     assert_eq!(error, Error::Declined.to_string());
 
-    // The tab sends a file back; it's saved without asking.
+    // The tab sends a file back. Not without asking first.
     let upload = format!("{path}/u?s={session}&name=from%20phone%2F..%2Fx.txt");
+    assert_eq!(http(&addr, "POST", &upload, b"hello laptop").await.0, 403);
+    // It asks; the user here is asked; once they accept, it goes.
+    let ask_path = format!("{path}/ask?s={session}&count=1&size=12&name=x.txt");
+    let (ask_addr, ask) = (addr.clone(), ask_path.clone());
+    let asking = tokio::spawn(async move { http(&ask_addr, "POST", &ask, b"").await });
+    let (question, count, size) = wait_for(&mut events, |e| match e {
+        NodeEvent::OfferReceived {
+            id, count, size, ..
+        } => Some((*id, *count, *size)),
+        _ => None,
+    })
+    .await;
+    assert_eq!((count, size), (1, 12));
+    node.answer_offer(question, true, false).unwrap();
+    let (status, body) = asking.await.unwrap();
+    assert_eq!(status, 200);
+    assert!(String::from_utf8_lossy(&body).contains("accepted"));
     assert_eq!(http(&addr, "POST", &upload, b"hello laptop").await.0, 200);
     let saved = wait_for(&mut events, |e| match e {
         NodeEvent::TransferDone { path, .. } => Some(path.clone()),
@@ -234,6 +257,19 @@ async fn browser_receives_and_sends() {
         dir.path().join("downloads").join("from phone_.._x.txt")
     );
     assert_eq!(std::fs::read(&saved).unwrap(), b"hello laptop");
+    // One accepted file is one upload.
+    assert_eq!(http(&addr, "POST", &upload, b"again").await.0, 403);
+    // Declined: nothing may be sent.
+    let (ask_addr, ask) = (addr.clone(), ask_path.clone());
+    let asking = tokio::spawn(async move { http(&ask_addr, "POST", &ask, b"").await });
+    let question = wait_for(&mut events, |e| match e {
+        NodeEvent::OfferReceived { id, .. } => Some(*id),
+        _ => None,
+    })
+    .await;
+    node.answer_offer(question, false, false).unwrap();
+    assert!(String::from_utf8_lossy(&asking.await.unwrap().1).contains("declined"));
+    assert_eq!(http(&addr, "POST", &upload, b"x").await.0, 403);
     // Not without a session.
     let stranger = format!("{path}/u?s={}&name=x.txt", "1".repeat(64));
     assert_eq!(http(&addr, "POST", &stranger, b"x").await.0, 404);

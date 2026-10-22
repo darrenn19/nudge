@@ -34,6 +34,8 @@ pub const MAX_DEVICE_NAME_LEN: usize = 255;
 
 const KIND_FILE: u8 = 1;
 const KIND_PAIR: u8 = 2;
+const KIND_PAIR_ASK: u8 = 3;
+const KIND_STATUS: u8 = 4;
 
 /// Header that opens every connection.
 fn put_header(buf: &mut Vec<u8>, kind: u8) {
@@ -96,6 +98,10 @@ pub(crate) fn truncate(s: &str, max: usize) -> &str {
 pub enum Request {
     File(Offer),
     Pair(PairRequest),
+    /// Pair without a code: the other side's user confirms.
+    PairAsk(PairAsk),
+    /// Swap settings between paired devices.
+    Status(Status),
 }
 
 impl Request {
@@ -103,7 +109,94 @@ impl Request {
         match read_header(r).await? {
             KIND_FILE => Ok(Self::File(Offer::read_body(r).await?)),
             KIND_PAIR => Ok(Self::Pair(PairRequest::read_body(r).await?)),
+            KIND_PAIR_ASK => Ok(Self::PairAsk(PairAsk::read_body(r).await?)),
+            KIND_STATUS => Ok(Self::Status(Status::read_body(r).await?)),
             _ => Err(Error::Protocol("unknown request kind")),
+        }
+    }
+}
+
+/// "Can we pair?", from a device that saw this one nearby. No secret: the
+/// user on this side confirms, after checking both screens show the same
+/// code (see `pairing::compare_code`). Answered with a `PairReply`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairAsk {
+    pub device_name: String,
+}
+
+impl PairAsk {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let name = truncate(&self.device_name, MAX_DEVICE_NAME_LEN);
+        let mut buf = Vec::with_capacity(7 + 2 + name.len());
+        put_header(&mut buf, KIND_PAIR_ASK);
+        put_string(&mut buf, name);
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        let device_name = read_string(r, MAX_DEVICE_NAME_LEN, "device name too long").await?;
+        Ok(Self { device_name })
+    }
+}
+
+/// Settings one paired device tells another. Sent both ways: the reply is
+/// the other side's own `Status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Status {
+    /// Files from the device receiving this are accepted without asking.
+    pub auto_accepts_you: bool,
+}
+
+impl Status {
+    /// As a request (with the header).
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let mut buf = Vec::with_capacity(8);
+        put_header(&mut buf, KIND_STATUS);
+        buf.push(u8::from(self.auto_accepts_you));
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    /// As the reply (no header).
+    pub async fn write_reply<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        w.write_u8(u8::from(self.auto_accepts_you)).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    pub async fn read_reply<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        Ok(Self {
+            auto_accepts_you: r.read_u8().await? != 0,
+        })
+    }
+
+    async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        Self::read_reply(r).await
+    }
+}
+
+/// The send a file belongs to: the receiver asks once per batch, and
+/// shows how much is coming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Batch {
+    /// Random per send; 0 = a file sent on its own.
+    pub id: u64,
+    /// Files in the batch.
+    pub count: u32,
+    /// Bytes in the whole batch.
+    pub size: u64,
+}
+
+impl Batch {
+    /// A file sent on its own.
+    pub fn single(size: u64) -> Self {
+        Self {
+            id: 0,
+            count: 1,
+            size,
         }
     }
 }
@@ -116,6 +209,7 @@ pub struct Offer {
     /// Modification time in ns since the Unix epoch; 0 = unknown.
     /// Used with name and size to decide whether a transfer can resume.
     pub modified: u64,
+    pub batch: Batch,
 }
 
 impl Offer {
@@ -123,11 +217,14 @@ impl Offer {
         if self.name.len() > MAX_NAME_LEN {
             return Err(Error::BadFileName(self.name.clone()));
         }
-        let mut buf = Vec::with_capacity(7 + 2 + self.name.len() + 8 + 8);
+        let mut buf = Vec::with_capacity(7 + 2 + self.name.len() + 8 + 8 + 20);
         put_header(&mut buf, KIND_FILE);
         put_string(&mut buf, &self.name);
         buf.extend_from_slice(&self.size.to_be_bytes());
         buf.extend_from_slice(&self.modified.to_be_bytes());
+        buf.extend_from_slice(&self.batch.id.to_be_bytes());
+        buf.extend_from_slice(&self.batch.count.to_be_bytes());
+        buf.extend_from_slice(&self.batch.size.to_be_bytes());
         w.write_all(&buf).await?;
         w.flush().await?;
         Ok(())
@@ -145,10 +242,16 @@ impl Offer {
         let name = read_string(r, MAX_NAME_LEN, "file name too long").await?;
         let size = r.read_u64().await?;
         let modified = r.read_u64().await?;
+        let batch = Batch {
+            id: r.read_u64().await?,
+            count: r.read_u32().await?,
+            size: r.read_u64().await?,
+        };
         Ok(Self {
             name,
             size,
             modified,
+            batch,
         })
     }
 }
@@ -163,11 +266,24 @@ pub enum Response {
     },
     /// Every byte was written and flushed to disk.
     Done,
+    /// The person at the receiver said no.
+    Declined,
+    /// Nobody answered in time.
+    NoAnswer,
+    /// The receiver doesn't have the sender paired (any more).
+    NotPaired,
+    /// Not an answer yet: the receiver is asking its user. The real answer
+    /// follows.
+    Asking,
 }
 
 const TAG_REJECT: u8 = 0;
 const TAG_ACCEPT: u8 = 1;
 const TAG_DONE: u8 = 2;
+const TAG_DECLINED: u8 = 3;
+const TAG_NO_ANSWER: u8 = 4;
+const TAG_NOT_PAIRED: u8 = 5;
+const TAG_ASKING: u8 = 6;
 
 impl Response {
     pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
@@ -180,6 +296,10 @@ impl Response {
                 w.write_all(&buf).await?;
             }
             Self::Done => w.write_u8(TAG_DONE).await?,
+            Self::Declined => w.write_u8(TAG_DECLINED).await?,
+            Self::NoAnswer => w.write_u8(TAG_NO_ANSWER).await?,
+            Self::NotPaired => w.write_u8(TAG_NOT_PAIRED).await?,
+            Self::Asking => w.write_u8(TAG_ASKING).await?,
         }
         w.flush().await?;
         Ok(())
@@ -192,6 +312,10 @@ impl Response {
                 offset: r.read_u64().await?,
             }),
             TAG_DONE => Ok(Self::Done),
+            TAG_DECLINED => Ok(Self::Declined),
+            TAG_NO_ANSWER => Ok(Self::NoAnswer),
+            TAG_NOT_PAIRED => Ok(Self::NotPaired),
+            TAG_ASKING => Ok(Self::Asking),
             _ => Err(Error::Protocol("unknown response tag")),
         }
     }
@@ -272,6 +396,11 @@ mod tests {
             name: "holiday 📷.jpg".into(),
             size: 123_456_789_012,
             modified: 1_760_000_000_123_456_789,
+            batch: Batch {
+                id: 0xDEAD_BEEF,
+                count: 3,
+                size: 123_456_789_999,
+            },
         };
         let mut buf = Vec::new();
         offer.write_to(&mut buf).await.unwrap();
@@ -284,6 +413,10 @@ mod tests {
         for resp in [
             Response::Reject,
             Response::Accept { offset: 42 },
+            Response::Declined,
+            Response::NoAnswer,
+            Response::NotPaired,
+            Response::Asking,
             Response::Done,
         ] {
             let mut buf = Vec::new();
@@ -301,6 +434,7 @@ mod tests {
             name: "a.txt".into(),
             size: 5,
             modified: 0,
+            batch: Batch::single(5),
         };
         let pair = PairRequest {
             proof: [7; 32],

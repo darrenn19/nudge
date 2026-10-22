@@ -51,6 +51,11 @@ pub struct DeviceInfo {
     /// Worth sending to: nearby, or seen earlier this session (a phone with
     /// its screen off goes quiet but can still receive).
     pub reachable: bool,
+    /// Files from it are accepted without asking.
+    pub auto_accept: bool,
+    /// It accepts files from this device without asking; `None` until it
+    /// has said.
+    pub accepts_from_us: Option<bool>,
 }
 
 impl From<Peer> for DeviceInfo {
@@ -63,6 +68,8 @@ impl From<Peer> for DeviceInfo {
             paired: p.paired,
             online: p.online,
             reachable: p.reachable,
+            auto_accept: p.auto_accept,
+            accepts_from_us: p.accepts_from_us,
         }
     }
 }
@@ -105,6 +112,36 @@ pub enum AppEvent {
     },
     /// Sharing with browsers stopped (see `NudgeApp::start_web_share`).
     WebShareStopped,
+    /// A paired device wants to send files: ask, then `answer_offer`
+    /// within a minute.
+    OfferReceived {
+        id: i64,
+        device_id: String,
+        /// The first file's name.
+        file_name: String,
+        count: i64,
+        size: i64,
+    },
+    /// Stop showing that question (answered, or it timed out).
+    OfferClosed {
+        id: i64,
+    },
+    /// The receiver said yes to an outgoing transfer.
+    TransferAccepted {
+        id: i64,
+    },
+    /// The receiver has it and is asking its user: delivered, answer to come.
+    TransferPending {
+        id: i64,
+    },
+    /// A nearby device wants to pair without a QR code: show `code` and
+    /// ask, then `answer_pair`.
+    PairAsked {
+        id: i64,
+        device_id: String,
+        device_name: String,
+        code: String,
+    },
 }
 
 impl From<NodeEvent> for AppEvent {
@@ -151,6 +188,33 @@ impl From<NodeEvent> for AppEvent {
                 error,
             },
             NodeEvent::WebShareStopped => Self::WebShareStopped,
+            NodeEvent::OfferReceived {
+                id,
+                peer,
+                file_name,
+                count,
+                size,
+            } => Self::OfferReceived {
+                id: id as i64,
+                device_id: peer.to_string(),
+                file_name,
+                count: count as i64,
+                size: size as i64,
+            },
+            NodeEvent::OfferClosed { id } => Self::OfferClosed { id: id as i64 },
+            NodeEvent::TransferAccepted { id } => Self::TransferAccepted { id: id as i64 },
+            NodeEvent::TransferPending { id } => Self::TransferPending { id: id as i64 },
+            NodeEvent::PairAsked {
+                id,
+                peer,
+                device_name,
+                code,
+            } => Self::PairAsked {
+                id: id as i64,
+                device_id: peer.to_string(),
+                device_name,
+                code,
+            },
         }
     }
 }
@@ -264,6 +328,47 @@ impl NudgeApp {
     #[frb(sync)]
     pub fn unpair(&self, device_id: String) -> Result<()> {
         Ok(self.node.unpair(&parse_id(&device_id)?)?)
+    }
+
+    /// Answer `AppEvent::OfferReceived`. With `always`, that device's files
+    /// are accepted without asking from now on.
+    #[frb(sync)]
+    pub fn answer_offer(&self, id: i64, accept: bool, always: bool) -> Result<()> {
+        // "Always" tells the other device, in the background.
+        let _guard = runtime().enter();
+        Ok(self.node.answer_offer(id as u64, accept, always)?)
+    }
+
+    /// The code both screens show while pairing with a nearby device.
+    #[frb(sync)]
+    pub fn pair_code(&self, device_id: String) -> Result<String> {
+        Ok(self.node.pair_code(&parse_id(&device_id)?))
+    }
+
+    /// Pair with a nearby device without a QR code: it asks its user.
+    /// Finishes when they answer.
+    pub async fn pair_nearby(&self, device_id: String) -> Result<DeviceInfo> {
+        let peer = parse_id(&device_id)?;
+        let node = self.node.clone();
+        let paired = runtime()
+            .spawn(async move { node.pair_nearby(peer).await })
+            .await
+            .context("Nudge runtime stopped")??;
+        Ok(paired.into())
+    }
+
+    /// Answer `AppEvent::PairAsked`.
+    #[frb(sync)]
+    pub fn answer_pair(&self, id: i64, accept: bool) {
+        self.node.answer_pair(id as u64, accept);
+    }
+
+    /// Accept files from a paired device without asking, or ask again.
+    #[frb(sync)]
+    pub fn set_auto_accept(&self, device_id: String, on: bool) -> Result<()> {
+        // Tells the other device, in the background.
+        let _guard = runtime().enter();
+        Ok(self.node.set_auto_accept(&parse_id(&device_id)?, on)?)
     }
 
     /// Open a connection to a paired, nearby device ahead of a likely send,

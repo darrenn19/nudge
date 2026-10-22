@@ -55,6 +55,19 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 }
                 result.success(null)
             }
+            "notifyOffer" -> {
+                Notifications.offer(
+                    context,
+                    call.argument<Number>("id")?.toLong() ?: 0,
+                    call.argument<String>("title") ?: "",
+                    call.argument<String>("text") ?: "",
+                )
+                result.success(null)
+            }
+            "cancelOffer" -> {
+                call.argument<Number>("id")?.toLong()?.let { Notifications.cancelOffer(context, it) }
+                result.success(null)
+            }
             "closeFiles" -> {
                 // Shared files the user decided not to send.
                 call.argument<List<Int>>("fds")?.forEach { fd ->

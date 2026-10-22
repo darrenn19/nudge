@@ -30,6 +30,7 @@ Future<void> initWindow({bool hidden = false}) async {
       size: Size(480, 720),
       minimumSize: Size(360, 480),
       center: true,
+      backgroundColor: Color(0xFF0A0B13),
     ),
     () async {
       if (hidden) return;
@@ -38,6 +39,8 @@ Future<void> initWindow({bool hidden = false}) async {
     },
   );
   await windowManager.setPreventClose(true);
+  // The title bar is made dark in the runner (win32_window.cpp): this
+  // plugin's setBrightness only goes dark when Windows itself is dark.
   await localNotifier.setup(appName: 'Nudge', shortcutPolicy: ShortcutPolicy.requireCreate);
 }
 
@@ -66,6 +69,43 @@ Future<void> showReceivedToast({required String path, required String from}) asy
   } catch (_) {
     // Toasts are a nicety; the file is saved either way.
   }
+}
+
+/// Whether Nudge's window is in front of the user (so the in-app question
+/// is enough).
+Future<bool> windowInFront() async {
+  if (!_desktop) return false;
+  try {
+    return await windowManager.isVisible() && await windowManager.isFocused();
+  } catch (_) {
+    return false;
+  }
+}
+
+/// "Darren's S24 wants to send you 3 files", with Accept and Decline, for
+/// when the window isn't in front. Returns a way to take it down.
+Future<void Function()> showOfferToast({
+  required String title,
+  required String body,
+  required void Function(bool accept) onAnswer,
+}) async {
+  if (!_desktop) return () {};
+  final toast = LocalNotification(
+    title: title,
+    body: body,
+    actions: [
+      LocalNotificationAction(text: 'Accept'),
+      LocalNotificationAction(text: 'Decline'),
+    ],
+  );
+  toast.onClick = () => unawaited(showWindow());
+  toast.onClickAction = (i) => onAnswer(i == 0);
+  try {
+    await toast.show();
+  } catch (_) {
+    // The in-app question is still there.
+  }
+  return () => unawaited(toast.close());
 }
 
 /// The tray icon and its menu, and hide-on-close.

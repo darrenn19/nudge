@@ -6,7 +6,7 @@ Fast, seamless, private file transfer between phones and computers: an AirDrop-s
 - **Seamless:** one tap to send, no accept prompts between paired devices.
 - **Private:** device to device only. No cloud, no accounts, no telemetry.
 
-> Status: early development. Phases 1–3 are done: the core engine; Android and Windows apps that find each other, pair once by QR code and send with no prompts; and system integration (Android share sheet, quick settings tile and notifications; Windows tray, drag and drop and Explorer's "Send with Nudge"). Next: multi-file packing and folder transfer (Phase 4).
+> Status: early development. Phases 1–3 are done: the core engine; Android and Windows apps that find each other, pair once by QR code and send with one quick Accept (or none, for devices set to always accept); and system integration (Android share sheet, quick settings tile and notifications; Windows tray, drag and drop and Explorer's "Send with Nudge"). Next: multi-file packing and folder transfer (Phase 4).
 
 ## Layout
 | Path | What it is |

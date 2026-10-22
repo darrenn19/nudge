@@ -1,6 +1,6 @@
 # Nudge Wire Protocol
 
-Status: **v4 draft (Phase 2).** This file is the single source of truth for the wire format; change it in the same commit as any code that changes the format. Code: `core/src/protocol.rs`. Discovery and pairing are described below too (`core/src/discovery.rs`, `core/src/pairing.rs`).
+Status: **v5 (`PROTOCOL_VERSION` = 5).** This file is the single source of truth for the wire format; change it in the same commit as any code that changes the format. Code: `core/src/protocol.rs`. Discovery and pairing are described below too (`core/src/discovery.rs`, `core/src/pairing.rs`).
 
 ## Goals
 - One connection per transfer, data streamed continuously (no per-chunk acks).
@@ -13,7 +13,7 @@ TCP, default port 47800, wrapped in **TLS 1.3 only** (rustls with the aws-lc-rs 
 - **Identity:** each device has one self-signed certificate (ECDSA P-256), created on first run and stored as `cert.der` / `key.der` in its identity folder.
 - **Fingerprint:** BLAKE3 of the certificate's DER bytes, shown as 64 hex characters.
 - **Mutual authentication:** both sides present their certificate. Each side accepts the other only if the peer's fingerprint is in its `trusted_peers.txt` (or equals its own). No certificate authority; the TLS server name (`nudge.local`) is not checked.
-- **Pairing window:** while a device shows a pairing code, its listening side also completes handshakes with unknown clients. Such a connection may only send a `PairRequest`; anything else is rejected. Outgoing connections are always strict.
+- **Unknown devices:** the listening side completes handshakes with any client, so nearby devices can pair without a QR code. A connection from an unpaired device may only send a `PairRequest` (with a valid code) or a `PairAsk`; a file offer gets Not paired, anything else is dropped. Outgoing connections are always strict: the client trusts exactly the fingerprint it means to reach.
 - **Trusted list:** `trusted_peers.txt`, one device per line: fingerprint, a space, then the name it gave when pairing. Lines starting with `#` are comments. Filled by QR pairing (below) or by hand with `nudge trust`.
 - **Failures:** the side that rejects reports `UntrustedPeer(fingerprint)`; the rejected side receives a `certificate_unknown` alert and reports `NotTrustedByPeer`.
 
@@ -28,7 +28,7 @@ All integers are big-endian. Every connection starts with a header:
 |---|---|---|
 | magic | 4 bytes | `NUDG` |
 | version | u16 | `PROTOCOL_VERSION`; the receiving side rejects a mismatch |
-| kind | u8 | 1 = file `Offer`, 2 = `PairRequest` |
+| kind | u8 | 1 = file `Offer`, 2 = `PairRequest`, 3 = `PairAsk`, 4 = `Status` |
 
 ### File transfer (kind 1, single file)
 
@@ -40,6 +40,11 @@ All integers are big-endian. Every connection starts with a header:
 | name | UTF-8 | file name only; receiver sanitizes it |
 | size | u64 | total file size in bytes |
 | modified | u64 | sender's modification time, ns since the Unix epoch; 0 = unknown (disables resume) |
+| batch_id | u64 | random per send, the same for every file in it; 0 = a file sent on its own |
+| batch_count | u32 | files in the send |
+| batch_size | u64 | bytes in the whole send |
+
+**Asking first.** Unless the sender is set to auto-accept, the receiver asks its user before answering: once per batch (`NodeEvent::OfferReceived`, with the first file's name, `batch_count` and `batch_size`), and later files of that batch follow the answer for 30 minutes. Meanwhile it replies Asking (tag 6) at once, so the sender can show the send as delivered and pending; the real answer follows on the same connection. With no answer in 5 minutes the receiver replies No answer. The sender stops offering the rest of a batch after Declined or No answer. Devices set to auto-accept (`auto_accept.txt` in the identity folder, one fingerprint per line) are answered Accept at once, as are all paired devices when asking is off (the command-line tool).
 
 **2. Response** (receiver → sender), one tag byte:
 
@@ -48,12 +53,22 @@ All integers are big-endian. Every connection starts with a header:
 | 0 | Reject | none |
 | 1 | Accept | u64 offset to start streaming from (0 = fresh); must be a multiple of `CHUNK_SIZE` |
 | 2 | Done | none |
+| 3 | Declined (the user said no) | none |
+| 4 | No answer (nobody answered in time) | none |
+| 5 | Not paired (the receiver doesn't trust the sender) | none |
+| 6 | Asking (not an answer: the user is being asked; another response follows) | none |
 
 **3. Data** (sender → receiver): the file from `offset` to `size`, in chunks of `CHUNK_SIZE` = 4 MiB (4,194,304 bytes; the last may be shorter). Each chunk is its raw bytes followed by the 32-byte BLAKE3 hash of those bytes. Chunk boundaries are fixed multiples of `CHUNK_SIZE` from the start of the file. An empty file has no chunks.
 
 The receiver hashes each chunk as it arrives. On a mismatch it closes the connection and reports `ChunkMismatch { chunk }` (`chunk` counts from the start of the file); the file is never renamed into place.
 
 **4. Done** (receiver → sender): sent only after every byte is written, synced to disk, and the file renamed into place.
+
+### Pairing without a code (kind 3)
+A device that sees another nearby (by discovery) can ask to pair. The asker connects trusting exactly the fingerprint discovery reported, and sends **PairAsk**: `name_len` (u16, ≤ 255) and its device name. The other side asks its user, showing a six-digit code; the asker shows the same code. The code is `BLAKE3-derive-key("nudge pairing compare code v1", lower fingerprint ‖ higher fingerprint)`, first four bytes as a big-endian u32 mod 1,000,000, so both sides compute it from the fingerprints the handshake proved: a device in the middle would make the codes differ. The answer is a **PairReply** (as for kind 2), after up to 90 s. On Accept both sides trust each other. One question per device at a time.
+
+### Settings between paired devices (kind 4)
+**Status**: one byte, `auto_accepts_you` (1 = files from the receiving device are accepted without asking). The reply is the other side's own Status byte. Sent when a paired device first shows up in discovery, when the setting changes, and inferred from transfers (an Asking reply means "asks").
 
 ### Pairing (kind 2)
 Code: `core/src/pairing.rs`, `core/src/node.rs`.
@@ -146,10 +161,11 @@ Code: `core/src/node/web.rs`, page: `core/src/node/web_page.html`. For people wi
 | Route | Purpose |
 |---|---|
 | `GET /` | The page. |
-| `GET /events[?s=]` | Server-sent events. Opening it makes the tab a device; an unknown or missing `s` starts a new session. Events: `hello` (`session`, `from` = this device's name, `name` = what the tab appears as), `offer` (`batch`, `files[]` of `id`, `name`, `size`), `withdrawn` (`batch`; no answer in 5 minutes), `download` (`id`, `name`: fetch this file now). A `: ping` comment every 15 s. |
+| `GET /events[?s=]` | Server-sent events. Opening it makes the tab a device; an unknown or missing `s` starts a new session. Events: `hello` (`session`, `from` = this device's name, `platform` = its platform tag, `name` = what the tab appears as), `offer` (`batch`, `files[]` of `id`, `name`, `size`), `withdrawn` (`batch`; no answer in 5 minutes), `download` (`id`, `name`: fetch this file now), `delivered` (`id`: that file has been streamed in full). A `: ping` comment every 15 s. |
 | `POST /answer?s=&batch=&accept=1\|0` | Accept or decline an offer. |
 | `GET /f/<id>?s=` | Download an accepted file (`Content-Disposition: attachment`). Only the file the last `download` event named, once. |
-| `POST /u?s=&name=` | Send a file to this device. Needs `Content-Length`; the body is the file. Saved to the download folder without a prompt (the user invited the tab by showing the code); the name is sanitized like an `Offer` name. |
+| `POST /ask?s=&count=&size=&name=` | "Can I send you these?": asks the user here (like a file offer). Replies when they answer: `{"answer":"accepted"|"declined"|"none"}`. Accepting allows `count` uploads. |
+| `POST /u?s=&name=` | Send a file to this device. Needs `Content-Length`; the body is the file. Only as many as accepted through `/ask` (else 403); the name is sanitized like an `Offer` name. |
 
 **Sessions.** A tab is listed while its event stream is open. When the stream drops (phone locked, tab in the background) it keeps its place for 30 s; reconnecting with its `s` within that time restores it, including any unanswered offer and the pending download. Tabs are named after the device type from the User-Agent ("iPhone", "Android phone", ...), with " 2", " 3" for repeats. Apps see them as peers with platform `browser`.
 

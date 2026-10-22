@@ -2,107 +2,245 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light dark">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0a0b13">
 <title>Nudge</title>
 <link rel="icon" href="data:,">
 <style>
   :root {
-    --bg: #f5f6fb; --card: #ffffff; --text: #1a1c23; --muted: #626879;
-    --line: #e2e5ee; --accent: #3d5afe; --on-accent: #ffffff; --ok: #1f9d55; --bad: #c62828;
+    --top: #1d2036; --bottom: #0a0b13;
+    --text: rgba(255,255,255,.95); --muted: rgba(255,255,255,.55); --faint: rgba(255,255,255,.3);
+    --glass: rgba(255,255,255,.08); --line: rgba(255,255,255,.1);
+    --accent: #a5afff; --good: #7be0a6; --bad: #ff8a80; --warn: #ffc46b;
+    --orb: min(68vw, 46vh, 300px);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #111318; --card: #1b1e26; --text: #e6e8ef; --muted: #9aa0b2;
-      --line: #2b2f3b; --accent: #8c9eff; --on-accent: #0b1036; --ok: #5fd38d; --bad: #ff8a80;
-    }
-  }
-  * { box-sizing: border-box; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
   body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    margin: 0; color: var(--text); overflow-x: hidden;
+    background: linear-gradient(var(--top), var(--bottom)) fixed;
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
-  main { max-width: 520px; margin: 0 auto; padding: 24px 16px 48px; }
-  header { margin-bottom: 20px; }
-  h1 { font-size: 24px; margin: 0; }
-  h2 { font-size: 17px; margin: 0 0 4px; }
-  .muted { color: var(--muted); }
-  .status { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
-  .dot.on { background: var(--ok); }
-  .card {
-    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
-    padding: 16px; margin-bottom: 12px;
+  button { font: inherit; color: inherit; }
+
+  /* Slowly drifting light, as in the app. Only moved, never repainted. */
+  .light { position: fixed; border-radius: 50%; pointer-events: none; will-change: transform; z-index: 0; }
+  .l1 { width: 120vmax; height: 120vmax; left: -35vmax; top: -30vmax;
+        background: radial-gradient(closest-side, rgba(90,95,176,.25), transparent); animation: drift 40s ease-in-out infinite; }
+  .l2 { width: 100vmax; height: 100vmax; right: -40vmax; top: 25vh;
+        background: radial-gradient(closest-side, rgba(122,79,138,.19), transparent); animation: drift 46s ease-in-out infinite reverse; }
+  .l3 { width: 90vmax; height: 90vmax; left: -20vmax; bottom: -45vmax;
+        background: radial-gradient(closest-side, rgba(47,106,140,.15), transparent); animation: drift 52s ease-in-out infinite; }
+  @keyframes drift { 0%,100% { transform: translate(0,0); } 33% { transform: translate(5vw,3vh); } 66% { transform: translate(-4vw,-2vh); } }
+
+  main {
+    position: relative; z-index: 1; min-height: 100%;
+    display: flex; flex-direction: column; align-items: center;
+    padding: max(16px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
   }
-  .offer { border-color: var(--accent); }
-  .files { margin: 10px 0 14px; padding: 0; list-style: none; }
-  .files li { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; }
+  header { width: 100%; max-width: 520px; display: flex; justify-content: space-between; align-items: center; }
+  .brand { font-weight: 700; letter-spacing: -.2px; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); transition: background .3s; }
+  .dot.on { background: var(--good); box-shadow: 0 0 10px rgba(123,224,166,.6); }
+
+  .stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 0 8px; width: 100%; }
+
+  /* The orb: the device that shared the link. */
+  .orb {
+    position: relative; width: var(--orb); height: var(--orb); border: 0; padding: 0; background: none;
+    border-radius: 50%; cursor: pointer; display: grid; place-items: center;
+    transition: transform .18s cubic-bezier(.2,.8,.2,1), opacity .4s;
+  }
+  .orb:active { transform: scale(.96); }
+  .orb:focus-visible { outline: 2px solid var(--accent); outline-offset: 6px; }
+  .ring { position: absolute; border-radius: 50%; will-change: transform; animation: breathe 5s ease-in-out infinite; }
+  .r1 { inset: 0; background: rgba(255,255,255,.06); animation-delay: -1.2s; }
+  .r2 { inset: 14%; background: rgba(255,255,255,.09); animation-delay: -.6s; }
+  .r3 { inset: 25%; background: rgba(255,255,255,.2); transition: background .4s; }
+  .busy .ring { animation-duration: 1.6s; }
+  .busy .r3 { box-shadow: 0 0 40px 4px rgba(165,175,255,.35); }
+  .tint-good .r3 { background: rgba(123,224,166,.32); }
+  .tint-bad .r3 { background: rgba(255,138,128,.32); }
+  .dim { opacity: .55; }
+  @keyframes breathe { 0%,100% { transform: scale(1); } 50% { transform: scale(1.03); } }
+  .busy .ring { animation-name: breathe-big; }
+  @keyframes breathe-big { 0%,100% { transform: scale(1); } 50% { transform: scale(1.06); } }
+
+  .core { position: relative; width: 46%; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .core svg { width: calc(var(--orb) * .1); height: calc(var(--orb) * .1); margin-bottom: 4px; }
+  .label { font-weight: 600; font-size: calc(var(--orb) * .068); line-height: 1.15; overflow-wrap: anywhere; }
+  .sub { font-size: calc(var(--orb) * .05); color: var(--muted); font-weight: 500; min-height: 1.2em; transition: color .3s; }
+  .sub.good { color: var(--good); } .sub.bad { color: var(--bad); } .sub.accent { color: var(--accent); } .sub.warn { color: var(--warn); }
+  .progress { position: absolute; inset: 19%; transform: rotate(-90deg); pointer-events: none; opacity: 0; transition: opacity .3s; }
+  .progress.on { opacity: 1; }
+  .progress circle { fill: none; stroke-width: 2.4; }
+  .progress .track { stroke: rgba(255,255,255,.12); }
+  .progress .bar { stroke: var(--text); stroke-linecap: round; transition: stroke-dashoffset .4s cubic-bezier(.2,.8,.2,1); }
+  .pop { animation: pop .45s cubic-bezier(.2,.8,.2,1); }
+  @keyframes pop { 50% { transform: scale(1.08); } }
+  .shake { animation: shake .5s ease-out; }
+  @keyframes shake { 15% { transform: translateX(-10px); } 35% { transform: translateX(9px); } 55% { transform: translateX(-6px); } 75% { transform: translateX(3px); } }
+  .wave { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--good); opacity: 0; pointer-events: none; }
+  .wave.go { animation: wave 1.1s cubic-bezier(.2,.8,.2,1); }
+  @keyframes wave { from { transform: scale(.9); opacity: .6; } to { transform: scale(1.4); opacity: 0; } }
+
+  /* Dots between the two devices while files move. */
+  .flow { position: relative; width: 24px; height: 48px; margin: 14px 0 6px; }
+  .flow i { position: absolute; left: 50%; width: 6px; height: 6px; margin-left: -3px; border-radius: 50%; background: var(--text); opacity: 0; }
+  .flow.up i { animation: up 1.1s linear infinite; }
+  .flow.down i { animation: down 1.1s linear infinite; }
+  .flow i:nth-child(2) { animation-delay: -.37s; } .flow i:nth-child(3) { animation-delay: -.73s; }
+  @keyframes up { from { top: 44px; opacity: 0; } 50% { opacity: .85; } to { top: -2px; opacity: 0; } }
+  @keyframes down { from { top: -2px; opacity: 0; } 50% { opacity: .85; } to { top: 44px; opacity: 0; } }
+
+  /* This browser, small, underneath. */
+  .me { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .bubble {
+    width: 56px; height: 56px; border-radius: 50%; display: grid; place-items: center;
+    background: rgba(255,255,255,.12); border: 1px solid var(--line); transition: background .4s;
+  }
+  .bubble.good { background: rgba(123,224,166,.35); }
+  .bubble svg { width: 22px; height: 22px; }
+  .me span { font-size: 13px; color: var(--muted); }
+
+  .hint { margin: 18px 0 0; max-width: 340px; text-align: center; color: var(--muted); font-size: 14px; }
+  .hint b { color: var(--text); font-weight: 600; }
+
+  /* What's arrived. */
+  .list { width: 100%; max-width: 520px; margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
+  .item {
+    display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-radius: 18px;
+    background: var(--glass); border: 1px solid var(--line); animation: rise .35s cubic-bezier(.2,.8,.2,1);
+  }
+  .item .ic { width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; flex: none; }
+  .item .ic.good { background: rgba(123,224,166,.15); color: var(--good); }
+  .item .ic.bad { background: rgba(255,138,128,.15); color: var(--bad); }
+  .item .ic svg { width: 16px; height: 16px; }
+  .item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .item .what { color: var(--muted); font-size: 13px; white-space: nowrap; }
+  @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
+
+  .fine { margin-top: 28px; font-size: 12px; color: var(--faint); text-align: center; max-width: 360px; }
+
+  /* An offer slides up from the bottom. */
+  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 10; opacity: 0; pointer-events: none; transition: opacity .3s; }
+  .backdrop.on { opacity: 1; pointer-events: auto; }
+  .sheet {
+    position: fixed; left: 8px; right: 8px; bottom: max(8px, env(safe-area-inset-bottom)); z-index: 11;
+    margin: 0 auto; max-width: 520px; padding: 10px 20px 20px; border-radius: 32px;
+    background: rgba(29,32,54,.82); border: 1px solid var(--line);
+    -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
+    transform: translateY(120%); transition: transform .45s cubic-bezier(.2,.9,.2,1);
+  }
+  .sheet.on { transform: none; }
+  .handle { width: 36px; height: 5px; border-radius: 3px; background: var(--faint); margin: 0 auto 16px; }
+  .sheet h2 { margin: 0; font-size: 22px; letter-spacing: -.3px; text-align: center; }
+  .sheet .total { text-align: center; color: var(--muted); font-size: 14px; margin-top: 2px; }
+  .files { list-style: none; margin: 16px 0 18px; padding: 0; max-height: 34vh; overflow: auto; }
+  .files li { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-top: 1px solid var(--line); font-size: 15px; }
+  .files li:first-child { border-top: 0; }
   .files .name { overflow-wrap: anywhere; }
   .files .size { color: var(--muted); white-space: nowrap; }
-  .actions { display: flex; gap: 8px; }
-  button, .button {
-    flex: 1; appearance: none; border: 0; border-radius: 12px; padding: 12px 16px;
-    font: inherit; font-weight: 600; cursor: pointer; text-align: center;
-    background: var(--line); color: var(--text); display: inline-block;
+  .actions { display: flex; gap: 10px; }
+  .btn {
+    flex: 1; border: 1px solid var(--line); border-radius: 28px; padding: 14px 16px; cursor: pointer;
+    background: var(--glass); font-weight: 600; font-size: 16px; transition: transform .15s;
   }
-  .primary { background: var(--accent); color: var(--on-accent); }
-  button:disabled { opacity: .6; cursor: default; }
-  .row { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; }
-  .row + .row { border-top: 1px solid var(--line); }
-  .row .name { overflow-wrap: anywhere; }
-  .state { white-space: nowrap; color: var(--muted); }
-  .state.ok { color: var(--ok); }
-  .state.bad { color: var(--bad); }
-  progress { width: 100%; height: 6px; accent-color: var(--accent); }
-  .hidden { display: none; }
-  .note { font-size: 14px; }
+  .btn:active { transform: scale(.96); }
+  .btn.primary { background: var(--text); color: var(--bottom); border-color: transparent; }
+
+  /* A short message from the top. */
+  .toast {
+    position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; z-index: 20;
+    transform: translate(-50%, -150%); transition: transform .45s cubic-bezier(.2,.9,.2,1);
+    padding: 12px 18px; border-radius: 22px; max-width: calc(100% - 24px);
+    background: rgba(29,32,54,.9); border: 1px solid var(--line); font-size: 14px;
+    -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
+  }
+  .toast.on { transform: translate(-50%, 0); }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+  }
 </style>
 </head>
 <body>
+<div class="light l1"></div><div class="light l2"></div><div class="light l3"></div>
+
 <main>
   <header>
-    <h1>Nudge</h1>
-    <div class="status"><span class="dot" id="dot"></span><span class="muted" id="status">Connecting…</span></div>
+    <span class="brand">Nudge</span>
+    <span class="status"><span class="dot" id="dot"></span><span id="status">Connecting…</span></span>
   </header>
 
-  <div id="offers"></div>
+  <section class="stage">
+    <button class="orb dim" id="orb" aria-label="Send files">
+      <span class="wave" id="wave"></span>
+      <span class="ring r1"></span><span class="ring r2"></span><span class="ring r3"></span>
+      <svg class="progress" id="progress" viewBox="0 0 100 100" aria-hidden="true">
+        <circle class="track" cx="50" cy="50" r="48"></circle>
+        <circle class="bar" id="bar" cx="50" cy="50" r="48" stroke-dasharray="301.6" stroke-dashoffset="301.6"></circle>
+      </svg>
+      <span class="core">
+        <span id="orbIcon"></span>
+        <span class="label" id="orbLabel">Connecting…</span>
+        <span class="sub" id="orbSub"></span>
+      </span>
+    </button>
 
-  <section class="card" id="waiting">
-    <h2>Keep this page open</h2>
-    <div class="muted">Files <span class="from">the other device</span> sends will appear here for you to accept.</div>
+    <div class="flow" id="flow"><i></i><i></i><i></i></div>
+
+    <div class="me">
+      <div class="bubble" id="bubble"></div>
+      <span id="meName">This device</span>
+    </div>
+
+    <p class="hint" id="hint">Opening a connection…</p>
   </section>
 
-  <section class="card">
-    <h2>Send files to <span class="from">the other device</span></h2>
-    <p class="muted note" style="margin:0 0 12px">They're saved straight to its Downloads.</p>
-    <label class="button primary" style="display:block">Choose files<input type="file" id="pick" multiple class="hidden"></label>
-    <div id="uploads"></div>
-  </section>
+  <section class="list" id="list" hidden></section>
 
-  <section class="card hidden" id="received">
-    <h2>Received</h2>
-    <div id="receivedList"></div>
-  </section>
-
-  <p class="muted note">Files go straight between the two devices over this Wi-Fi. Nothing is uploaded to the internet.</p>
+  <p class="fine">Files go straight between the two devices over this Wi-Fi. Nothing is uploaded to the internet.</p>
 </main>
+
+<div class="backdrop" id="backdrop"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" aria-labelledby="offerTitle">
+  <div class="handle"></div>
+  <h2 id="offerTitle"></h2>
+  <div class="total" id="offerTotal"></div>
+  <ul class="files" id="offerFiles"></ul>
+  <div class="actions">
+    <button class="btn" id="decline">Decline</button>
+    <button class="btn primary" id="accept">Accept</button>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status"></div>
+<input type="file" id="pick" multiple hidden>
+
 <script>
 "use strict";
+const $ = (id) => document.getElementById(id);
 const base = location.pathname.replace(/\/+$/, "");
+const ICONS = {
+  laptop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="11" rx="1.5"/><path d="M2 19h20"/></svg>',
+  phone: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="7" y="2.5" width="10" height="19" rx="2.5"/><path d="M11 18.5h2"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  cross: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>',
+  up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>',
+};
+
 let session = "";
 try { session = sessionStorage.getItem("nudge-session") || ""; } catch (e) {}
-let from = "the other device";
-let source = null;
-let retry = null;
-
-const $ = (id) => document.getElementById(id);
-
-function el(tag, cls, text) {
-  const e = document.createElement(tag);
-  if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
-  return e;
-}
+const state = { connected: false, from: "the other device", offers: [], pending: 0, uploading: false, asking: false, flash: null };
+let source = null, retry = null, flashTimer = null;
+const isPhone = /iPhone|iPad|Android|Mobile/.test(navigator.userAgent);
+const tap = isPhone ? "Tap" : "Click";
+let dragging = false;
+$("bubble").innerHTML = isPhone ? ICONS.phone : ICONS.laptop;
 
 function size(n) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -110,12 +248,93 @@ function size(n) {
   while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
   return (i === 0 ? n : n.toFixed(n < 10 ? 1 : 0)) + " " + units[i];
 }
-
-function setStatus(text, on) {
-  $("status").textContent = text;
-  $("dot").classList.toggle("on", !!on);
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+function toast(text) {
+  const t = $("toast");
+  t.textContent = text;
+  t.classList.add("on");
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => t.classList.remove("on"), 3200);
+}
+function replay(node, cls) {
+  node.classList.remove(cls);
+  void node.offsetWidth; // restart the animation
+  node.classList.add(cls);
 }
 
+/* One place decides what the orb, the dots and the hint say. */
+function render(progress) {
+  const orb = $("orb"), sub = $("orbSub"), flow = $("flow"), bar = $("bar");
+  let label = state.from, text = "", tone = "", busy = false, dir = "";
+  if (!state.connected) {
+    label = "Connecting…"; text = "";
+  } else if (state.asking) {
+    text = "Waiting for them to accept"; tone = "warn";
+  } else if (state.uploading) {
+    busy = true; dir = "up"; text = "Sending" + (progress != null ? " " + Math.floor(progress * 100) + "%" : "…");
+  } else if (state.pending > 0) {
+    busy = true; dir = "down"; text = "Receiving…";
+  } else if (dragging) {
+    busy = true; text = "Drop to send"; tone = "accent";
+  } else if (state.flash) {
+    text = state.flash.text; tone = state.flash.tone;
+  } else {
+    text = tap + " to send files"; tone = "accent";
+  }
+  $("orbLabel").textContent = label;
+  sub.textContent = text;
+  sub.className = "sub" + (tone ? " " + tone : "");
+  orb.classList.toggle("busy", busy);
+  orb.classList.toggle("dim", !state.connected);
+  orb.classList.toggle("tint-good", !busy && state.flash && state.flash.tone === "good");
+  orb.classList.toggle("tint-bad", !busy && state.flash && state.flash.tone === "bad");
+  flow.className = "flow" + (dir ? " " + dir : "");
+  const showBar = state.uploading && progress != null;
+  $("progress").classList.toggle("on", showBar);
+  bar.setAttribute("stroke-dashoffset", String(301.6 * (1 - (showBar ? progress : 0))));
+  $("hint").innerHTML = !state.connected
+    ? "Opening a connection…"
+    : state.asking
+    ? "Sent. <b></b> will accept or decline."
+    : state.uploading || state.pending > 0
+    ? "Keep this page open until it's done."
+    : "Keep this page open: files from <b></b> appear here.<br>" + tap + " the circle" +
+      (isPhone ? "" : " or drop files here") + " to send files to it.";
+  const b = $("hint").querySelector("b");
+  if (b) b.textContent = state.from;
+}
+
+function flash(text, tone) {
+  state.flash = { text, tone };
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => { state.flash = null; render(); }, 2600);
+  replay($("orb"), tone === "bad" ? "shake" : "pop");
+  render();
+}
+
+function setStatus(connected, text) {
+  state.connected = connected;
+  $("status").textContent = text;
+  $("dot").classList.toggle("on", connected);
+  render();
+}
+
+function addItem(name, what, ok) {
+  const list = $("list");
+  list.hidden = false;
+  const row = el("div", "item");
+  const ic = el("span", "ic " + (ok ? "good" : "bad"));
+  ic.innerHTML = ok ? ICONS.check : ICONS.cross;
+  row.append(ic, el("span", "name", name), el("span", "what", what));
+  list.prepend(row);
+}
+
+/* The connection. */
 function connect() {
   clearTimeout(retry);
   if (source) source.close();
@@ -124,65 +343,83 @@ function connect() {
     const d = JSON.parse(e.data);
     session = d.session;
     try { sessionStorage.setItem("nudge-session", session); } catch (err) {}
-    from = d.from;
-    document.querySelectorAll(".from").forEach((n) => { n.textContent = from; });
-    setStatus("Connected to " + from + " as " + d.name, true);
+    state.from = d.from;
+    const phoneHost = d.platform === "android" || d.platform === "ios";
+    $("orbIcon").innerHTML = phoneHost ? ICONS.phone : ICONS.laptop;
+    $("orb").setAttribute("aria-label", "Send files to " + d.from);
+    $("meName").textContent = "You · " + d.name;
+    setStatus(true, "Connected");
   });
-  source.addEventListener("offer", (e) => showOffer(JSON.parse(e.data)));
+  source.addEventListener("offer", (e) => queueOffer(JSON.parse(e.data)));
   source.addEventListener("withdrawn", (e) => {
-    const card = $("offer-" + JSON.parse(e.data).batch);
-    if (card) card.remove();
-    updateWaiting();
+    const batch = JSON.parse(e.data).batch;
+    state.offers = state.offers.filter((o) => o.batch !== batch);
+    showNextOffer();
   });
   source.addEventListener("download", (e) => fetchFile(JSON.parse(e.data)));
+  source.addEventListener("delivered", (e) => delivered(JSON.parse(e.data).id));
   source.onerror = () => {
-    setStatus("Reconnecting…", false);
+    setStatus(false, "Reconnecting…");
     source.close();
     retry = setTimeout(connect, 2000);
   };
 }
 
-function updateWaiting() {
-  $("waiting").classList.toggle("hidden", $("offers").children.length > 0);
+/* Offers: one at a time, in a sheet. */
+let shown = null;
+const names = new Map();
+function queueOffer(offer) {
+  if (state.offers.some((o) => o.batch === offer.batch)) return;
+  state.offers.push(offer);
+  showNextOffer();
 }
-
-function showOffer(offer) {
-  if ($("offer-" + offer.batch)) return;
-  const total = offer.files.reduce((sum, f) => sum + f.size, 0);
-  const card = el("section", "card offer");
-  card.id = "offer-" + offer.batch;
-  const count = offer.files.length === 1 ? "a file" : offer.files.length + " files";
-  card.append(el("h2", "", from + " wants to send you " + count));
-  card.append(el("div", "muted", size(total)));
-  const list = el("ul", "files");
-  for (const f of offer.files) {
+function showNextOffer() {
+  const next = state.offers[0];
+  if (shown && (!next || next.batch !== shown.batch)) closeSheet();
+  if (!next || shown) return;
+  shown = next;
+  const total = next.files.reduce((s, f) => s + f.size, 0);
+  const count = next.files.length === 1 ? "a file" : next.files.length + " files";
+  $("offerTitle").textContent = state.from + " wants to send you " + count;
+  $("offerTotal").textContent = size(total);
+  const list = $("offerFiles");
+  list.textContent = "";
+  for (const f of next.files) {
+    names.set(f.id, f.name);
     const li = el("li");
     li.append(el("span", "name", f.name), el("span", "size", size(f.size)));
     list.append(li);
   }
-  card.append(list);
-  const actions = el("div", "actions");
-  const decline = el("button", "", "Decline");
-  const accept = el("button", "primary", "Accept");
-  actions.append(decline, accept);
-  card.append(actions);
-  const answer = async (yes) => {
-    decline.disabled = accept.disabled = true;
-    try {
-      await fetch(base + "/answer?s=" + session + "&batch=" + offer.batch + "&accept=" + (yes ? 1 : 0), { method: "POST" });
-    } catch (err) {}
-    card.remove();
-    updateWaiting();
-  };
-  decline.onclick = () => answer(false);
-  accept.onclick = () => answer(true);
-  $("offers").append(card);
-  updateWaiting();
+  $("accept").disabled = $("decline").disabled = false;
+  $("backdrop").classList.add("on");
+  $("sheet").classList.add("on");
+  replay($("orb"), "pop");
+  $("accept").focus({ preventScroll: true });
 }
+function closeSheet() {
+  $("backdrop").classList.remove("on");
+  $("sheet").classList.remove("on");
+  shown = null;
+}
+async function answer(yes) {
+  const offer = shown;
+  if (!offer) return;
+  $("accept").disabled = $("decline").disabled = true;
+  try {
+    await fetch(base + "/answer?s=" + session + "&batch=" + offer.batch + "&accept=" + (yes ? 1 : 0), { method: "POST" });
+  } catch (err) {}
+  state.offers = state.offers.filter((o) => o.batch !== offer.batch);
+  closeSheet();
+  if (yes) { state.pending += offer.files.length; render(); }
+  setTimeout(showNextOffer, 350);
+}
+$("accept").onclick = () => answer(true);
+$("decline").onclick = () => answer(false);
 
-// Each accepted file downloads to the browser's usual place. The other
-// device says which one is next, so they arrive one at a time.
+/* Each accepted file downloads to the browser's usual place, one at a
+   time: the other device says which is next, then when it's all gone. */
 function fetchFile(file) {
+  names.set(file.id, file.name);
   const a = el("a");
   a.href = base + "/f/" + file.id + "?s=" + session;
   a.download = file.name;
@@ -190,45 +427,81 @@ function fetchFile(file) {
   document.body.append(a);
   a.click();
   a.remove();
-  $("received").classList.remove("hidden");
-  const row = el("div", "row");
-  row.append(el("span", "name", file.name), el("span", "state ok", "Downloaded"));
-  $("receivedList").prepend(row);
+}
+function delivered(id) {
+  state.pending = Math.max(0, state.pending - 1);
+  addItem(names.get(id) || "File", "Saved to downloads", true);
+  replay($("bubble"), "pop");
+  $("bubble").classList.add("good");
+  setTimeout(() => $("bubble").classList.remove("good"), 900);
+  replay($("wave"), "go");
+  if (state.pending === 0) flash("Received", "good"); else render();
 }
 
-$("pick").addEventListener("change", async (e) => {
+/* Sending back: tap the orb, pick files, they go one after another. */
+$("orb").onclick = () => {
+  if (!state.connected) return;
+  if (state.uploading || state.asking) { toast("Still sending: one batch at a time"); return; }
+  $("pick").click();
+};
+$("pick").addEventListener("change", (e) => {
   const files = Array.from(e.target.files || []);
   e.target.value = "";
-  for (const f of files) await upload(f);
+  sendFiles(files);
 });
 
-function upload(file) {
+// Desktop: drop files anywhere on the page.
+let depth = 0;
+const setDragging = (on) => { if (dragging !== on) { dragging = on; render(); } };
+addEventListener("dragenter", (e) => { e.preventDefault(); depth++; if (state.connected && !state.uploading) setDragging(true); });
+addEventListener("dragleave", () => { if (--depth <= 0) { depth = 0; setDragging(false); } });
+addEventListener("dragover", (e) => e.preventDefault());
+addEventListener("drop", (e) => {
+  e.preventDefault();
+  depth = 0;
+  setDragging(false);
+  if (!state.connected || state.uploading) return;
+  sendFiles(Array.from(e.dataTransfer.files || []).filter((f) => f.size > 0 || f.type));
+});
+
+async function sendFiles(files) {
+  if (!files.length || state.asking) return;
+  const total = files.reduce((s, f) => s + f.size, 0) || 1;
+  // Ask first: the person on the other device accepts or declines.
+  state.asking = true;
+  replay($("orb"), "pop");
+  render();
+  let answer = "none";
+  try {
+    const q = "?s=" + session + "&count=" + files.length + "&size=" + total + "&name=" + encodeURIComponent(files[0].name);
+    const res = await fetch(base + "/ask" + q, { method: "POST" });
+    answer = (await res.json()).answer;
+  } catch (err) {}
+  state.asking = false;
+  if (answer !== "accepted") {
+    for (const f of files) addItem(f.name, answer === "declined" ? "Declined" : "No answer", false);
+    flash(answer === "declined" ? "Declined" : "No answer", "bad");
+    return;
+  }
+  let done = 0, failed = 0;
+  state.uploading = true;
+  render(0);
+  for (const f of files) {
+    const ok = await upload(f, (loaded) => render((done + loaded) / total));
+    done += f.size;
+    if (ok) addItem(f.name, "Sent", true); else { failed++; addItem(f.name, "Didn't send", false); }
+  }
+  state.uploading = false;
+  if (failed) flash(failed === files.length ? "Failed" : failed + " didn't send", "bad");
+  else flash("Sent", "good");
+}
+function upload(file, onProgress) {
   return new Promise((resolve) => {
-    const row = el("div", "row");
-    const name = el("span", "name", file.name);
-    const state = el("span", "state", "Waiting…");
-    row.append(name, state);
-    const bar = el("progress");
-    bar.max = 1; bar.value = 0;
-    const wrap = el("div");
-    wrap.append(row, bar);
-    $("uploads").prepend(wrap);
     const xhr = new XMLHttpRequest();
     xhr.open("POST", base + "/u?s=" + session + "&name=" + encodeURIComponent(file.name));
-    xhr.upload.onprogress = (ev) => {
-      if (ev.lengthComputable) {
-        bar.value = ev.loaded / ev.total;
-        state.textContent = Math.floor(100 * ev.loaded / ev.total) + "%";
-      }
-    };
-    const done = (ok) => {
-      bar.remove();
-      state.textContent = ok ? "Sent" : "Failed";
-      state.classList.add(ok ? "ok" : "bad");
-      resolve();
-    };
-    xhr.onload = () => done(xhr.status === 200);
-    xhr.onerror = () => done(false);
+    xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress(ev.loaded); };
+    xhr.onload = () => resolve(xhr.status === 200);
+    xhr.onerror = () => resolve(false);
     xhr.send(file);
   });
 }
@@ -238,6 +511,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden && (!source || source.readyState === EventSource.CLOSED)) connect();
 });
 
+render();
 connect();
 </script>
 </body>

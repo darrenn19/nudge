@@ -1,6 +1,8 @@
 // App state: the device list and transfers, kept current from core events.
 
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 
@@ -41,6 +43,38 @@ class Transfer {
   String? error;
   Duration? took;
 
+  /// When it finished (done or failed), for brief "sent" / "failed" effects.
+  DateTime? finishedAt;
+
+  /// Outgoing: the receiver said yes.
+  bool accepted = false;
+
+  /// Outgoing: delivered, and the receiver is asking its user. A browser
+  /// tab asks too, until it accepts.
+  bool pending = false;
+
+  /// Outgoing, delivered, and waiting for the receiver's answer. Nothing is
+  /// moving, so it isn't shown as busy.
+  bool get awaitingAnswer => !incoming && pending && !accepted && state == TransferState.running;
+
+  /// Something is actually happening: bytes moving or about to.
+  bool get active => state == TransferState.running && !awaitingAnswer;
+
+  /// What happened, in a word or two, from this side.
+  String get outcome {
+    if (state == TransferState.failed) {
+      return switch (error) {
+        'they declined' => 'Declined',
+        'no answer' => 'No answer',
+        _ => error ?? 'Failed',
+      };
+    }
+    if (incoming) return state == TransferState.done ? 'Received' : 'Receiving';
+    if (awaitingAnswer) return 'Pending';
+    if (state == TransferState.done) return pending ? 'Accepted · delivered' : 'Delivered';
+    return pending ? 'Accepted · sending' : 'Sending';
+  }
+
   double get fraction => size == 0 ? 1 : (bytes / size).clamp(0, 1);
 
   /// Time left at the recent speed, or null while there's no speed yet.
@@ -62,14 +96,155 @@ class FilesToSend {
   final bool byQr;
 }
 
+/// A paired device asking to send files; answer with
+/// [NudgeController.answerOffer].
+class IncomingOffer {
+  const IncomingOffer({
+    required this.id,
+    required this.deviceId,
+    required this.deviceName,
+    required this.fileName,
+    required this.count,
+    required this.size,
+  });
+
+  final int id;
+  final String deviceId;
+  final String deviceName;
+  final String fileName;
+  final int count;
+  final int size;
+
+  /// "photo.jpg" or "3 files".
+  String get what => count == 1 ? fileName : '$count files';
+}
+
+/// A nearby device asking to pair; answer with [NudgeController.answerPair].
+class PairAsk {
+  const PairAsk({
+    required this.id,
+    required this.deviceId,
+    required this.deviceName,
+    required this.code,
+  });
+
+  final int id;
+  final String deviceId;
+  final String deviceName;
+  final String code;
+}
+
+/// What the sender hears back: the receiver's answer.
+enum Answer { accepted, declined, noAnswer }
+
 class NudgeController extends ChangeNotifier {
-  NudgeController(this.app) {
+  NudgeController(this.app, {String? dataDir})
+    : _orderFile = dataDir == null ? null : File('$dataDir${Platform.pathSeparator}order.json') {
     _subscription = app.events().listen(_onEvent);
     devices = app.devices();
     webShareUrl = app.webShareUrl();
+    _loadOrder();
   }
 
   final NudgeApp app;
+
+  /// Questions waiting for the user, oldest first.
+  final List<IncomingOffer> offers = [];
+
+  /// Pairing requests waiting for the user, oldest first.
+  final List<PairAsk> pairAsks = [];
+
+  void answerPair(PairAsk ask, {required bool accept}) {
+    app.answerPair(id: ask.id, accept: accept);
+    _closeOffer(ask.id);
+    notifyListeners();
+  }
+
+  /// The code both screens show while pairing with [device].
+  String pairCode(DeviceInfo device) => app.pairCode(deviceId: device.id);
+
+  /// Pair with a nearby device without a QR code; finishes when its user
+  /// answers. Throws if they decline or don't answer.
+  Future<DeviceInfo> pairNearby(DeviceInfo device) async {
+    final paired = await app.pairNearby(deviceId: device.id);
+    devices = app.devices();
+    notifyListeners();
+    return paired;
+  }
+
+  final _answers = StreamController<(DeviceInfo?, String, Answer)>.broadcast();
+
+  /// Answers to this device's sends: (device, its name, answer). Once per
+  /// send, not per file.
+  Stream<(DeviceInfo?, String, Answer)> get answers => _answers.stream;
+
+  final _offerChanges = StreamController<void>.broadcast();
+
+  /// Fires whenever [offers] changes.
+  Stream<void> get offerChanges => _offerChanges.stream;
+
+  void answerOffer(IncomingOffer offer, {required bool accept, bool always = false}) {
+    app.answerOffer(id: offer.id, accept: accept, always: always);
+    _closeOffer(offer.id);
+    if (always) devices = app.devices();
+    notifyListeners();
+  }
+
+  void setAutoAccept(DeviceInfo device, bool on) {
+    try {
+      app.setAutoAccept(deviceId: device.id, on_: on);
+    } finally {
+      // Whatever happened, show what's actually set.
+      devices = app.devices();
+      notifyListeners();
+    }
+  }
+
+  void _closeOffer(int id) {
+    final before = offers.length + pairAsks.length;
+    offers.removeWhere((o) => o.id == id);
+    pairAsks.removeWhere((a) => a.id == id);
+    if (offers.length + pairAsks.length != before) _offerChanges.add(null);
+  }
+
+  // The order the user put their devices in (device IDs), kept beside the
+  // identity. Devices not in it follow, in the core's order.
+  final File? _orderFile;
+  List<String> order = [];
+
+  void _loadOrder() {
+    try {
+      final saved = jsonDecode(_orderFile?.readAsStringSync() ?? '[]');
+      order = [for (final id in saved as List) id as String];
+    } catch (_) {
+      order = [];
+    }
+  }
+
+  void setOrder(List<String> ids) {
+    order = List.of(ids);
+    try {
+      _orderFile?.writeAsStringSync(jsonEncode(order));
+    } catch (_) {
+      // Only an arrangement; it just won't stick.
+    }
+    notifyListeners();
+  }
+
+  /// [list] in the user's order.
+  List<DeviceInfo> ordered(List<DeviceInfo> list) {
+    int rank(DeviceInfo d) {
+      final i = order.indexOf(d.id);
+      return i < 0 ? order.length : i;
+    }
+
+    final indexed = list.indexed.toList()
+      ..sort((a, b) {
+        final byRank = rank(a.$2).compareTo(rank(b.$2));
+        return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
+      });
+    return [for (final (_, d) in indexed) d];
+  }
 
   /// The link people without Nudge open, while sharing with browsers.
   String? webShareUrl;
@@ -87,7 +262,7 @@ class NudgeController extends ChangeNotifier {
 
   String get deviceName => app.deviceName();
 
-  List<DeviceInfo> get pairedDevices => devices.where((d) => d.paired).toList();
+  List<DeviceInfo> get pairedDevices => ordered(devices.where((d) => d.paired).toList());
 
   List<DeviceInfo> get nearbyDevices => devices.where((d) => !d.paired && !d.isBrowser).toList();
 
@@ -172,6 +347,13 @@ class NudgeController extends ChangeNotifier {
     app.unpair(deviceId: device.id);
   }
 
+  /// Take one finished transfer off the list.
+  void removeTransfer(Transfer t) {
+    if (t.state == TransferState.running) return;
+    transfers.remove(t);
+    notifyListeners();
+  }
+
   void clearFinished() {
     transfers.removeWhere((t) => t.state != TransferState.running);
     notifyListeners();
@@ -224,6 +406,7 @@ class NudgeController extends ChangeNotifier {
         if (t == null) return;
         t
           ..state = TransferState.done
+          ..finishedAt = DateTime.now()
           ..bytes = t.size
           ..path = path
           ..took = Duration(microseconds: (seconds * 1e6).round());
@@ -232,19 +415,71 @@ class NudgeController extends ChangeNotifier {
       case AppEvent_WebShareStopped():
         webShareUrl = null;
         devices = app.devices();
+      case AppEvent_OfferReceived(
+        :final id,
+        :final deviceId,
+        :final fileName,
+        :final count,
+        :final size,
+      ):
+        offers.add(
+          IncomingOffer(
+            id: id,
+            deviceId: deviceId,
+            deviceName: deviceById(deviceId)?.name ?? 'A paired device',
+            fileName: fileName,
+            count: count,
+            size: size,
+          ),
+        );
+        _offerChanges.add(null);
+      case AppEvent_OfferClosed(:final id):
+        _closeOffer(id);
+      case AppEvent_TransferPending(:final id):
+        final t = _transfer(id);
+        if (t == null) return;
+        t.pending = true;
+      case AppEvent_PairAsked(:final id, :final deviceId, :final deviceName, :final code):
+        pairAsks.add(PairAsk(id: id, deviceId: deviceId, deviceName: deviceName, code: code));
+        _offerChanges.add(null);
+      case AppEvent_TransferAccepted(:final id):
+        final t = _transfer(id);
+        if (t == null) return;
+        t.accepted = true;
+        _tellAnswer(t, Answer.accepted);
       case AppEvent_TransferFailed(:final id, :final error):
         final t = _transfer(id);
         if (t == null) return;
         t
           ..state = TransferState.failed
+          ..finishedAt = DateTime.now()
           ..error = error;
+        if (!t.incoming && !t.accepted) {
+          if (error == 'they declined') _tellAnswer(t, Answer.declined);
+          if (error == 'no answer') _tellAnswer(t, Answer.noAnswer);
+        }
     }
     notifyListeners();
+  }
+
+  /// Devices (and when) an answer was last passed on, so a batch of files
+  /// gives one alert, not one per file.
+  final _told = <String, DateTime>{};
+
+  void _tellAnswer(Transfer t, Answer answer) {
+    final key = '${t.deviceId}/${answer.name}';
+    final last = _told[key];
+    final now = DateTime.now();
+    _told[key] = now;
+    if (last != null && now.difference(last) < const Duration(seconds: 5)) return;
+    _answers.add((deviceById(t.deviceId), t.peerName ?? 'They', answer));
   }
 
   @override
   void dispose() {
     _subscription.cancel();
+    _answers.close();
+    _offerChanges.close();
     _pairing.close();
     _toSend.close();
     super.dispose();

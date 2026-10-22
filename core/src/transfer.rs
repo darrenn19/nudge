@@ -21,7 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::identity::Fingerprint;
-use crate::protocol::{HASH_LEN, Offer, Response};
+use crate::protocol::{Batch, HASH_LEN, Offer, Response};
 use crate::resume::{self, MetaWriter, TransferKey, with_suffix};
 use crate::{Error, Result};
 
@@ -98,7 +98,14 @@ impl Sink for File {
 /// Live position of a transfer, readable from any thread while it runs.
 /// Updating it is one relaxed atomic store per buffer, so it costs nothing.
 #[derive(Clone, Debug, Default)]
-pub struct Progress(Arc<AtomicU64>);
+pub struct Progress(Arc<ProgressInner>);
+
+#[derive(Debug, Default)]
+struct ProgressInner {
+    position: AtomicU64,
+    accepted: std::sync::atomic::AtomicBool,
+    pending: std::sync::atomic::AtomicBool,
+}
 
 impl Progress {
     pub fn new() -> Self {
@@ -108,11 +115,29 @@ impl Progress {
     /// Bytes of the file that have crossed the network so far, counted from
     /// the start of the file (a resumed transfer starts at its offset).
     pub fn position(&self) -> u64 {
-        self.0.load(Ordering::Relaxed)
+        self.0.position.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set(&self, pos: u64) {
-        self.0.store(pos, Ordering::Relaxed);
+        self.0.position.store(pos, Ordering::Relaxed);
+    }
+
+    /// The receiver said yes (sending side).
+    pub fn accepted(&self) -> bool {
+        self.0.accepted.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_accepted(&self) {
+        self.0.accepted.store(true, Ordering::Relaxed);
+    }
+
+    /// The receiver is asking its user (sending side). An answer follows.
+    pub fn pending(&self) -> bool {
+        self.0.pending.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_pending(&self) {
+        self.0.pending.store(true, Ordering::Relaxed);
     }
 }
 
@@ -121,13 +146,14 @@ pub async fn send_file<S>(stream: &mut S, path: &Path) -> Result<TransferStats>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    send_file_tracked(stream, path, &Progress::new()).await
+    send_file_tracked(stream, path, None, &Progress::new()).await
 }
 
 /// `send_file`, reporting its position through `progress`.
 pub async fn send_file_tracked<S>(
     stream: &mut S,
     path: &Path,
+    batch: Option<Batch>,
     progress: &Progress,
 ) -> Result<TransferStats>
 where
@@ -138,7 +164,7 @@ where
         .and_then(|n| n.to_str())
         .ok_or_else(|| Error::BadFileName(path.display().to_string()))?
         .to_owned();
-    send_open_file_tracked(stream, File::open(path)?, name, progress).await
+    send_open_file_tracked(stream, File::open(path)?, name, batch, progress).await
 }
 
 /// Send a file that is already open, under `name`. Android shares files as
@@ -147,6 +173,7 @@ pub async fn send_open_file_tracked<S>(
     stream: &mut S,
     file: File,
     name: String,
+    batch: Option<Batch>,
     progress: &Progress,
 ) -> Result<TransferStats>
 where
@@ -164,6 +191,7 @@ where
         name,
         size: metadata.len(),
         modified: modified_time(&metadata),
+        batch: batch.unwrap_or(Batch::single(metadata.len())),
     };
     send_from_tracked(stream, file, offer, progress).await
 }
@@ -192,12 +220,22 @@ where
     let start = Instant::now();
     let size = offer.size;
     offer.write_to(stream).await?;
-    let offset = match Response::read_from(stream).await? {
-        Response::Accept { offset } if offset <= size && offset % CHUNK_SIZE == 0 => offset,
-        Response::Accept { .. } => return Err(Error::Protocol("invalid resume offset")),
-        Response::Reject => return Err(Error::Rejected),
-        Response::Done => return Err(Error::Protocol("unexpected Done before data")),
+    let offset = loop {
+        match Response::read_from(stream).await? {
+            // The receiver is asking its user; the answer comes next.
+            Response::Asking => progress.mark_pending(),
+            Response::Accept { offset } if offset <= size && offset % CHUNK_SIZE == 0 => {
+                break offset;
+            }
+            Response::Accept { .. } => return Err(Error::Protocol("invalid resume offset")),
+            Response::Reject => return Err(Error::Rejected),
+            Response::Declined => return Err(Error::Declined),
+            Response::NoAnswer => return Err(Error::NoAnswer),
+            Response::NotPaired => return Err(Error::NotTrustedByPeer),
+            Response::Done => return Err(Error::Protocol("unexpected Done before data")),
+        }
     };
+    progress.mark_accepted();
 
     let (tx, mut rx) = mpsc::channel(PIPELINE_DEPTH);
     let reader = tokio::task::spawn_blocking(move || read_pieces(source, offset, size, tx));

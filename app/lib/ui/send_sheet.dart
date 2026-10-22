@@ -1,11 +1,14 @@
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 import '../controller.dart';
 import '../format.dart';
 import '../platform.dart';
 import '../src/rust/api/nudge.dart';
+import 'home.dart' show deviceIcon;
+import 'style.dart';
 import 'web_share.dart';
 
 /// Send [request]'s files, asking which device only when there's a choice:
@@ -29,11 +32,9 @@ Future<void> chooseAndSend(
       ? nearby.single
       : nearby.isEmpty && reachable.length == 1
       ? reachable.single
-      : await showModalBottomSheet<Object>(
-          context: context,
-          showDragHandle: true,
-          isScrollControlled: true,
-          builder: (_) => _DevicePicker(controller: controller, files: files),
+      : await showGlassSheet<Object>(
+          context,
+          (_) => _DevicePicker(controller: controller, files: files),
         );
   if (choice == _someoneWithoutNudge && context.mounted) {
     return _shareByQr(context, controller, files);
@@ -45,8 +46,11 @@ Future<void> chooseAndSend(
   }
   controller.send(device, files);
   if (context.mounted) {
-    ScaffoldMessenger.of(context)
-        .showSnackBar(SnackBar(content: Text('Sending ${describeFiles(files)} to ${device.name}')));
+    showToast(
+      context,
+      'Sending ${describeFiles(files)} to ${device.name}',
+      icon: CupertinoIcons.arrow_up_circle,
+    );
   }
   // Shared from another app: go back to it. The notification shows progress
   // and keeps Android from stopping the transfer.
@@ -65,17 +69,15 @@ Future<void> _shareByQr(
   NudgeController controller,
   List<OutgoingFile> files,
 ) async {
-  await Navigator.of(context).push(
-    MaterialPageRoute<void>(
-      builder: (_) => WebShareScreen(controller: controller, files: files),
-    ),
-  );
+  await Navigator.of(context)
+      .push(nudgeRoute<void>((_) => WebShareScreen(controller: controller, files: files)));
 }
 
 /// "photo.jpg" or "3 files".
 String describeFiles(List<OutgoingFile> files) =>
     files.length == 1 ? files.single.name : '${files.length} files';
 
+/// Where to send: your devices as bubbles, like AirDrop.
 class _DevicePicker extends StatelessWidget {
   const _DevicePicker({required this.controller, required this.files});
 
@@ -84,81 +86,95 @@ class _DevicePicker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final muted = theme.colorScheme.onSurfaceVariant;
     final size = files.fold<int>(0, (sum, f) => sum + f.size);
-    return SafeArea(
-      child: ListenableBuilder(
-        listenable: controller,
-        builder: (context, _) {
-          final paired = controller.pairedDevices;
-          final browsers = controller.browserDevices;
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text('Send ${describeFiles(files)}', style: theme.textTheme.titleLarge),
-                const SizedBox(height: 2),
-                Text(formatSize(size), style: theme.textTheme.bodyMedium?.copyWith(color: muted)),
-                const SizedBox(height: 16),
-                if (paired.isEmpty && browsers.isEmpty)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 24),
-                    child: Text(
-                      'No paired devices yet. Pair one from the Nudge home screen first.',
-                      textAlign: TextAlign.center,
-                      style: theme.textTheme.bodyMedium?.copyWith(color: muted),
+    return ListenableBuilder(
+      listenable: controller,
+      builder: (context, _) {
+        final devices = [...controller.pairedDevices, ...controller.browserDevices];
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                describeFiles(files),
+                style: Fonts.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 4),
+              Text(formatSize(size), style: Fonts.small),
+              const SizedBox(height: 24),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 8,
+                runSpacing: 16,
+                children: [
+                  for (final d in devices)
+                    _Choice(
+                      icon: deviceIcon(d),
+                      label: d.name,
+                      dim: !d.reachable,
+                      onTap: d.reachable ? () => Navigator.of(context).pop(d) : null,
                     ),
-                  ),
-                for (final d in [...paired, ...browsers])
-                  Card(
-                    margin: const EdgeInsets.symmetric(vertical: 4),
-                    child: ListTile(
-                      enabled: d.reachable,
-                      leading: Icon(
-                        d.isBrowser
-                            ? Icons.public_rounded
-                            : d.platform == 'android' || d.platform == 'ios'
-                            ? Icons.smartphone_rounded
-                            : Icons.laptop_windows_rounded,
-                      ),
-                      title: Text(d.name, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(
-                        d.isBrowser
-                            ? 'In a browser · they accept first'
-                            : d.online
-                            ? 'Nearby'
-                            : d.reachable
-                            ? 'Not seen just now · tap to try'
-                            : 'Not nearby',
-                      ),
-                      onTap: () => Navigator.of(context).pop(d),
-                    ),
-                  ),
-                Card(
-                  margin: const EdgeInsets.symmetric(vertical: 4),
-                  child: ListTile(
-                    leading: const Icon(Icons.qr_code_2_rounded),
-                    title: const Text('Someone without Nudge'),
-                    subtitle: const Text('Show a code to scan with their camera'),
+                  _Choice(
+                    icon: CupertinoIcons.qrcode,
+                    label: 'Without app',
                     onTap: () => Navigator.of(context).pop(_someoneWithoutNudge),
                   ),
-                ),
-                if (paired.isNotEmpty && browsers.isEmpty && !paired.any((d) => d.reachable))
-                  Padding(
-                    padding: const EdgeInsets.only(top: 12),
-                    child: Text(
-                      'Waiting for one of your devices to come nearby…',
-                      textAlign: TextAlign.center,
-                      style: theme.textTheme.bodySmall?.copyWith(color: muted),
-                    ),
-                  ),
+                ],
+              ),
+              if (devices.isNotEmpty && !devices.any((d) => d.reachable)) ...[
+                const SizedBox(height: 20),
+                const Text('Waiting for your devices to come nearby…', style: Fonts.small),
               ],
-            ),
-          );
-        },
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _Choice extends StatelessWidget {
+  const _Choice({required this.icon, required this.label, this.onTap, this.dim = false});
+
+  final IconData icon;
+  final String label;
+  final VoidCallback? onTap;
+  final bool dim;
+
+  @override
+  Widget build(BuildContext context) {
+    return Pressable(
+      onTap: onTap,
+      child: Opacity(
+        opacity: dim ? 0.4 : 1,
+        child: SizedBox(
+          width: 88,
+          child: Column(
+            children: [
+              Container(
+                width: 60,
+                height: 60,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withValues(alpha: 0.12),
+                  border: Border.all(color: Palette.glassBorder),
+                ),
+                child: Icon(icon, color: Palette.text, size: 24),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: Fonts.label,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

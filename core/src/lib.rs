@@ -21,7 +21,7 @@ pub use tls::Tls;
 pub use transfer::{ReceivedFile, TransferStats, receive_file, send_file};
 
 /// Protocol version spoken by this build. Bumped on any wire-format change.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Crate version, for logs and the `--version` output of tools.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

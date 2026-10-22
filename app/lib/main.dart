@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'controller.dart';
 import 'desktop.dart';
@@ -12,6 +14,7 @@ import 'platform.dart';
 import 'src/rust/api/nudge.dart';
 import 'src/rust/frb_generated.dart';
 import 'ui/home.dart';
+import 'ui/style.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -20,6 +23,19 @@ Future<void> main(List<String> args) async {
     // Another Nudge is running: give it our files and exit.
     instance = await SingleInstance.claim(await dataDir(), args);
     if (instance == null) exit(0);
+  }
+  if (Platform.isAndroid) {
+    // Draw behind the status and navigation bars, with light icons on the
+    // dark background.
+    await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        systemNavigationBarColor: Colors.transparent,
+        statusBarIconBrightness: Brightness.light,
+        systemNavigationBarIconBrightness: Brightness.light,
+      ),
+    );
   }
   await RustLib.init();
   await initWindow(hidden: args.contains(backgroundFlag));
@@ -39,7 +55,7 @@ Future<NudgeController> _start(SingleInstance? instance, List<String> files) asy
     deviceName: await deviceName(),
     platform: platformTag,
   );
-  final controller = NudgeController(app);
+  final controller = NudgeController(app, dataDir: dir);
   TransferNotifier(controller);
   // Android: files shared to Nudge (share sheet, quick settings tile).
   unawaited(listenForShares(controller.offer, onStarting: controller.warmUp));
@@ -70,41 +86,75 @@ class NudgeRoot extends StatelessWidget {
     return MaterialApp(
       title: 'Nudge',
       debugShowCheckedModeBanner: false,
-      theme: _theme(Brightness.light),
-      darkTheme: _theme(Brightness.dark),
+      // Frame-time graphs, for checking smoothness:
+      // flutter run --profile --dart-define=NUDGE_PERF=true
+      showPerformanceOverlay: const bool.fromEnvironment('NUDGE_PERF'),
+      theme: _theme(),
+      // One background behind every screen: moving between screens only
+      // moves their content, never repaints the backdrop.
+      builder: (context, child) => NudgeBackground(child: child ?? const SizedBox()),
       home: FutureBuilder<NudgeController>(
         future: starting,
         builder: (context, snapshot) {
-          if (snapshot.hasError) return _StartError(error: '${snapshot.error}');
-          final controller = snapshot.data;
-          if (controller == null) {
-            return const Scaffold(body: Center(child: CircularProgressIndicator()));
+          final Widget page;
+          if (snapshot.hasError) {
+            page = _StartError(error: '${snapshot.error}');
+          } else if (snapshot.data case final controller?) {
+            page = HomeScreen(controller: controller);
+          } else {
+            page = const _Starting();
           }
-          return HomeScreen(controller: controller);
+          return AnimatedSwitcher(duration: const Duration(milliseconds: 500), child: page);
         },
       ),
     );
   }
 }
 
-ThemeData _theme(Brightness brightness) {
-  final scheme = ColorScheme.fromSeed(seedColor: const Color(0xFF3D5AFE), brightness: brightness);
+/// Always dark, with iOS-style motion on every platform, so the phone and
+/// the desktop look and feel the same.
+ThemeData _theme() {
+  const transitions = CupertinoPageTransitionsBuilder();
   return ThemeData(
-    colorScheme: scheme,
-    scaffoldBackgroundColor: scheme.surface,
-    appBarTheme: AppBarTheme(
-      backgroundColor: scheme.surface,
-      surfaceTintColor: Colors.transparent,
-      titleTextStyle: TextStyle(fontSize: 22, fontWeight: FontWeight.w600, color: scheme.onSurface),
+    brightness: Brightness.dark,
+    colorScheme: ColorScheme.fromSeed(
+      seedColor: Palette.accent,
+      brightness: Brightness.dark,
+      surface: Palette.bottom,
     ),
-    cardTheme: CardThemeData(
-      elevation: 0,
-      color: scheme.surfaceContainerLow,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      clipBehavior: Clip.antiAlias,
+    scaffoldBackgroundColor: Palette.bottom,
+    splashFactory: NoSplash.splashFactory,
+    highlightColor: Colors.transparent,
+    textSelectionTheme: const TextSelectionThemeData(cursorColor: Palette.accent),
+    tooltipTheme: TooltipThemeData(
+      decoration: BoxDecoration(
+        color: Palette.top.withValues(alpha: 0.95),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      textStyle: const TextStyle(color: Palette.text, fontSize: 12),
     ),
-    snackBarTheme: const SnackBarThemeData(behavior: SnackBarBehavior.floating),
+    pageTransitionsTheme: const PageTransitionsTheme(
+      builders: {
+        TargetPlatform.android: transitions,
+        TargetPlatform.windows: transitions,
+        TargetPlatform.linux: transitions,
+        TargetPlatform.macOS: transitions,
+        TargetPlatform.iOS: transitions,
+      },
+    ),
   );
+}
+
+class _Starting extends StatelessWidget {
+  const _Starting();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Scaffold(
+      backgroundColor: Colors.transparent,
+      body: Center(child: Orb(size: 200)),
+    );
+  }
 }
 
 class _StartError extends StatelessWidget {
@@ -114,20 +164,22 @@ class _StartError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.error_outline_rounded, size: 48, color: theme.colorScheme.error),
-              const SizedBox(height: 16),
-              Text("Nudge couldn't start", style: theme.textTheme.titleLarge),
-              const SizedBox(height: 8),
-              SelectableText(error, textAlign: TextAlign.center),
-            ],
+      backgroundColor: Colors.transparent,
+      body: RepaintBoundary(
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(CupertinoIcons.exclamationmark_circle, size: 48, color: Palette.bad),
+                const SizedBox(height: 16),
+                const Text("Nudge couldn't start", style: Fonts.title),
+                const SizedBox(height: 8),
+                SelectableText(error, textAlign: TextAlign.center, style: Fonts.body),
+              ],
+            ),
           ),
         ),
       ),

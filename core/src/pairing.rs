@@ -128,6 +128,23 @@ pub fn verify(
     blake3::Hash::from_bytes(proof(secret, client, server)) == blake3::Hash::from_bytes(*received)
 }
 
+/// The six digits two devices show while pairing without a QR code. Both
+/// compute it from the two fingerprints the TLS handshake proved, so if
+/// someone sat in the middle, the screens would show different codes.
+pub fn compare_code(a: &Fingerprint, b: &Fingerprint) -> String {
+    let (lo, hi) = if a.as_bytes() <= b.as_bytes() {
+        (a, b)
+    } else {
+        (b, a)
+    };
+    let mut hasher = blake3::Hasher::new_derive_key("nudge pairing compare code v1");
+    hasher.update(lo.as_bytes());
+    hasher.update(hi.as_bytes());
+    let bytes = hasher.finalize();
+    let n = u32::from_be_bytes(bytes.as_bytes()[..4].try_into().expect("4 bytes")) % 1_000_000;
+    format!("{:03} {:03}", n / 1000, n % 1000)
+}
+
 /// Cryptographically secure random bytes from the TLS provider.
 pub(crate) fn random_bytes<const N: usize>() -> [u8; N] {
     let mut out = [0u8; N];
@@ -200,6 +217,16 @@ mod tests {
 
     fn fp() -> Fingerprint {
         Identity::generate().unwrap().fingerprint()
+    }
+
+    #[test]
+    fn compare_code_is_symmetric() {
+        let a = Fingerprint::from_bytes([1; 32]);
+        let b = Fingerprint::from_bytes([2; 32]);
+        let code = compare_code(&a, &b);
+        assert_eq!(code, compare_code(&b, &a));
+        assert_eq!(code.len(), 7);
+        assert_ne!(code, compare_code(&a, &Fingerprint::from_bytes([3; 32])));
     }
 
     #[test]

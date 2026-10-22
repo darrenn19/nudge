@@ -131,6 +131,7 @@ async fn plain_tcp_client_is_rejected() {
         name: "x".into(),
         size: 1,
         modified: 0,
+        batch: nudge_core::protocol::Batch::single(1),
     };
     let _ = offer.write_to(&mut tcp).await;
     assert!(receiver.await.unwrap().is_err());

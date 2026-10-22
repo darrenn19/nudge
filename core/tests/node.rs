@@ -62,6 +62,9 @@ async fn start_with(
         udp_port,
         extra_targets: vec![SocketAddr::from((Ipv4Addr::LOCALHOST, other_udp))],
     };
+    // Most tests are about moving files: take them without asking. The
+    // asking has its own test.
+    config.ask_before_receiving = false;
     tweak(&mut config);
     let (node, events) = Node::start(config).await.unwrap();
     assert!(
@@ -323,4 +326,246 @@ async fn stale_warmed_connection_is_retried() {
         std::fs::read(laptop.downloads.join("late.bin")).unwrap(),
         std::fs::read(&src).unwrap()
     );
+}
+
+/// The next "do you want these files?" question. (A file received
+/// without asking would mean no question, and this would time out.)
+async fn question(
+    events: &mut UnboundedReceiver<NodeEvent>,
+) -> (u64, nudge_core::Fingerprint, String, u32, u64) {
+    wait_for(events, |e| match e {
+        NodeEvent::OfferReceived {
+            id,
+            peer,
+            file_name,
+            count,
+            size,
+        } => Some((*id, *peer, file_name.clone(), *count, *size)),
+        _ => None,
+    })
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn receiver_is_asked_once_per_send() {
+    let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+    let mut laptop = start_with("Laptop", udp_a, udp_b, |c| c.ask_before_receiving = true).await;
+    let mut phone = start("Phone", udp_b, udp_a).await;
+    wait_until_seen(&mut phone, &laptop).await;
+    wait_until_seen(&mut laptop, &phone).await;
+    phone.node.pair(&laptop.node.start_pairing()).await.unwrap();
+    let to = laptop.node.fingerprint();
+    let from = phone.node.fingerprint();
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, len: usize| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, vec![1u8; len]).unwrap();
+        path
+    };
+
+    // Two files: one question, covering both.
+    let ids = phone
+        .node
+        .send_files(to, vec![file("a.txt", 1000), file("b.txt", 500)]);
+    let (q, peer, first, count, size) = question(&mut laptop.events).await;
+    assert_eq!(
+        (peer, first.as_str(), count, size),
+        (from, "a.txt", 2, 1500)
+    );
+    laptop.node.answer_offer(q, true, false).unwrap();
+    wait_for(&mut phone.events, |e| match e {
+        NodeEvent::TransferAccepted { id } if *id == ids[0] => Some(()),
+        _ => None,
+    })
+    .await;
+    wait_sent(&mut phone.events, &ids).await;
+    assert!(laptop.downloads.join("a.txt").exists() && laptop.downloads.join("b.txt").exists());
+
+    // A new send asks again; declining turns down the whole batch.
+    let ids = phone
+        .node
+        .send_files(to, vec![file("c.txt", 10), file("d.txt", 10)]);
+    let (q, ..) = question(&mut laptop.events).await;
+    laptop.node.answer_offer(q, false, false).unwrap();
+    for id in ids {
+        let error = wait_for(&mut phone.events, |e| match e {
+            NodeEvent::TransferFailed { id: failed, error } if *failed == id => Some(error.clone()),
+            NodeEvent::TransferDone { id: done, .. } if *done == id => panic!("declined file sent"),
+            _ => None,
+        })
+        .await;
+        assert_eq!(error, Error::Declined.to_string());
+    }
+    assert!(!laptop.downloads.join("c.txt").exists());
+
+    // "Always accept": this time, and from then on without asking.
+    let ids = phone.node.send_files(to, vec![file("e.txt", 10)]);
+    let (q, ..) = question(&mut laptop.events).await;
+    laptop.node.answer_offer(q, true, true).unwrap();
+    wait_sent(&mut phone.events, &ids).await;
+    assert!(
+        laptop
+            .node
+            .peers()
+            .iter()
+            .any(|p| p.fingerprint == from && p.auto_accept)
+    );
+    let ids = phone.node.send_files(to, vec![file("f.txt", 10)]);
+    wait_sent(&mut phone.events, &ids).await;
+    assert!(laptop.downloads.join("f.txt").exists());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn pairing_again_replaces_the_old_entry() {
+    let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+    let mut laptop = start("Laptop", udp_a, udp_b).await;
+    // The phone as it was before a reinstall: paired, then gone.
+    {
+        let mut old_phone = start("Phone", udp_b, udp_a).await;
+        wait_until_seen(&mut old_phone, &laptop).await;
+        old_phone
+            .node
+            .pair(&laptop.node.start_pairing())
+            .await
+            .unwrap();
+        wait_for(&mut laptop.events, |e| {
+            matches!(e, NodeEvent::Paired { .. }).then_some(())
+        })
+        .await;
+    }
+    // Wait until the laptop has noticed it's gone (goodbye beacon).
+    while laptop.node.peers().iter().any(|p| p.online) {
+        wait_for(&mut laptop.events, |e| {
+            matches!(e, NodeEvent::PeersChanged).then_some(())
+        })
+        .await;
+    }
+    // Reinstalled: a new identity with the same name pairs again.
+    let mut new_phone = start("Phone", udp_b, udp_a).await;
+    wait_until_seen(&mut new_phone, &laptop).await;
+    new_phone
+        .node
+        .pair(&laptop.node.start_pairing())
+        .await
+        .unwrap();
+    let paired: Vec<_> = laptop
+        .node
+        .peers()
+        .into_iter()
+        .filter(|p| p.paired)
+        .collect();
+    assert_eq!(paired.len(), 1, "{paired:?}");
+    assert_eq!(paired[0].fingerprint, new_phone.node.fingerprint());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn nearby_devices_pair_without_a_code() {
+    let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+    let mut laptop = start("Laptop", udp_a, udp_b).await;
+    let mut phone = start("Phone", udp_b, udp_a).await;
+    wait_until_seen(&mut phone, &laptop).await;
+    wait_until_seen(&mut laptop, &phone).await;
+    let to = laptop.node.fingerprint();
+
+    // Both screens show the same code.
+    let code = phone.node.pair_code(&to);
+    assert_eq!(code, laptop.node.pair_code(&phone.node.fingerprint()));
+
+    // Declined: not paired.
+    let asking = {
+        let node = &phone.node;
+        node.pair_nearby(to)
+    };
+    let (asked, answer) = tokio::join!(asking, async {
+        let (id, name, shown) = wait_for(&mut laptop.events, |e| match e {
+            NodeEvent::PairAsked {
+                id,
+                device_name,
+                code,
+                ..
+            } => Some((*id, device_name.clone(), code.clone())),
+            _ => None,
+        })
+        .await;
+        assert_eq!(name, "Phone");
+        assert_eq!(shown, code);
+        laptop.node.answer_pair(id, false);
+    });
+    let () = answer;
+    assert!(matches!(asked, Err(Error::PairingRejected)), "{asked:?}");
+    assert!(laptop.node.peers().iter().all(|p| !p.paired));
+
+    // Accepted: paired on both sides, and files flow.
+    let (asked, ()) = tokio::join!(phone.node.pair_nearby(to), async {
+        let id = wait_for(&mut laptop.events, |e| match e {
+            NodeEvent::PairAsked { id, .. } => Some(*id),
+            _ => None,
+        })
+        .await;
+        laptop.node.answer_pair(id, true);
+    });
+    assert_eq!(asked.unwrap().device_name, "Laptop");
+    assert!(
+        laptop
+            .node
+            .peers()
+            .iter()
+            .any(|p| p.paired && p.device_name == "Phone")
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hi.txt");
+    std::fs::write(&src, b"hi").unwrap();
+    let ids = phone.node.send_files(to, vec![src]);
+    wait_sent(&mut phone.events, &ids).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sender_sees_pending_and_the_other_sides_setting() {
+    let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+    let mut laptop = start_with("Laptop", udp_a, udp_b, |c| c.ask_before_receiving = true).await;
+    let mut phone = start("Phone", udp_b, udp_a).await;
+    wait_until_seen(&mut phone, &laptop).await;
+    wait_until_seen(&mut laptop, &phone).await;
+    phone.node.pair(&laptop.node.start_pairing()).await.unwrap();
+    let to = laptop.node.fingerprint();
+    let from = phone.node.fingerprint();
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("p.txt");
+    std::fs::write(&src, b"pending").unwrap();
+
+    // The laptop asks: the phone hears "pending" first, then "accepted".
+    let ids = phone.node.send_files(to, vec![src.clone()]);
+    let (q, ..) = question(&mut laptop.events).await;
+    wait_for(&mut phone.events, |e| match e {
+        NodeEvent::TransferPending { id } if *id == ids[0] => Some(()),
+        NodeEvent::TransferAccepted { .. } => panic!("accepted before the user answered"),
+        _ => None,
+    })
+    .await;
+    laptop.node.answer_offer(q, true, false).unwrap();
+    wait_for(&mut phone.events, |e| match e {
+        NodeEvent::TransferAccepted { id } if *id == ids[0] => Some(()),
+        _ => None,
+    })
+    .await;
+    wait_sent(&mut phone.events, &ids).await;
+    // And now the phone knows the laptop asks before accepting its files.
+    let seen = |node: &nudge_core::Node, fp| {
+        node.peers()
+            .into_iter()
+            .find(|p| p.fingerprint == fp)
+            .and_then(|p| p.accepts_from_us)
+    };
+    assert_eq!(seen(&phone.node, to), Some(false));
+
+    // The laptop switches to always accepting the phone: the phone hears.
+    laptop.node.set_auto_accept(&from, true).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while seen(&phone.node, to) != Some(true) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("phone never heard about auto-accept");
 }

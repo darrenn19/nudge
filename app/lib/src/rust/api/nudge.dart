@@ -14,6 +14,17 @@ part 'nudge.freezed.dart';
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>>
 abstract class NudgeApp implements RustOpaqueInterface {
+  /// Answer `AppEvent::OfferReceived`. With `always`, that device's files
+  /// are accepted without asking from now on.
+  void answerOffer({
+    required PlatformInt64 id,
+    required bool accept,
+    required bool always,
+  });
+
+  /// Answer `AppEvent::PairAsked`.
+  void answerPair({required PlatformInt64 id, required bool accept});
+
   void cancelPairing();
 
   String deviceId();
@@ -33,6 +44,13 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Pair with the device showing `code` (scanned or pasted).
   Future<DeviceInfo> pair({required String code});
 
+  /// The code both screens show while pairing with a nearby device.
+  String pairCode({required String deviceId});
+
+  /// Pair with a nearby device without a QR code: it asks its user.
+  /// Finishes when they answer.
+  Future<DeviceInfo> pairNearby({required String deviceId});
+
   /// Ask nearby devices to announce themselves now.
   void refresh();
 
@@ -43,7 +61,13 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Send files the platform has already opened (Android shares arrive
   /// as open descriptors, not paths). Takes ownership of each descriptor
   /// and closes it when its transfer ends. Unix only.
-  Int64List sendOpenFiles({required String deviceId, required List<OpenFile> files});
+  Int64List sendOpenFiles({
+    required String deviceId,
+    required List<OpenFile> files,
+  });
+
+  /// Accept files from a paired device without asking, or ask again.
+  void setAutoAccept({required String deviceId, required bool on_});
 
   void setDownloadDir({required String dir});
 
@@ -115,11 +139,46 @@ sealed class AppEvent with _$AppEvent {
     required double seconds,
     required PlatformInt64 resumedFrom,
   }) = AppEvent_TransferDone;
-  const factory AppEvent.transferFailed({required PlatformInt64 id, required String error}) =
-      AppEvent_TransferFailed;
+  const factory AppEvent.transferFailed({
+    required PlatformInt64 id,
+    required String error,
+  }) = AppEvent_TransferFailed;
 
   /// Sharing with browsers stopped (see `NudgeApp::start_web_share`).
   const factory AppEvent.webShareStopped() = AppEvent_WebShareStopped;
+
+  /// A paired device wants to send files: ask, then `answer_offer`
+  /// within a minute.
+  const factory AppEvent.offerReceived({
+    required PlatformInt64 id,
+    required String deviceId,
+
+    /// The first file's name.
+    required String fileName,
+    required PlatformInt64 count,
+    required PlatformInt64 size,
+  }) = AppEvent_OfferReceived;
+
+  /// Stop showing that question (answered, or it timed out).
+  const factory AppEvent.offerClosed({required PlatformInt64 id}) =
+      AppEvent_OfferClosed;
+
+  /// The receiver said yes to an outgoing transfer.
+  const factory AppEvent.transferAccepted({required PlatformInt64 id}) =
+      AppEvent_TransferAccepted;
+
+  /// The receiver has it and is asking its user: delivered, answer to come.
+  const factory AppEvent.transferPending({required PlatformInt64 id}) =
+      AppEvent_TransferPending;
+
+  /// A nearby device wants to pair without a QR code: show `code` and
+  /// ask, then `answer_pair`.
+  const factory AppEvent.pairAsked({
+    required PlatformInt64 id,
+    required String deviceId,
+    required String deviceName,
+    required String code,
+  }) = AppEvent_PairAsked;
 }
 
 /// A device as the app shows it.
@@ -143,6 +202,13 @@ class DeviceInfo {
   /// its screen off goes quiet but can still receive).
   final bool reachable;
 
+  /// Files from it are accepted without asking.
+  final bool autoAccept;
+
+  /// It accepts files from this device without asking; `None` until it
+  /// has said.
+  final bool? acceptsFromUs;
+
   const DeviceInfo({
     required this.id,
     required this.shortId,
@@ -151,6 +217,8 @@ class DeviceInfo {
     required this.paired,
     required this.online,
     required this.reachable,
+    required this.autoAccept,
+    this.acceptsFromUs,
   });
 
   @override
@@ -161,7 +229,9 @@ class DeviceInfo {
       platform.hashCode ^
       paired.hashCode ^
       online.hashCode ^
-      reachable.hashCode;
+      reachable.hashCode ^
+      autoAccept.hashCode ^
+      acceptsFromUs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -174,7 +244,9 @@ class DeviceInfo {
           platform == other.platform &&
           paired == other.paired &&
           online == other.online &&
-          reachable == other.reachable;
+          reachable == other.reachable &&
+          autoAccept == other.autoAccept &&
+          acceptsFromUs == other.acceptsFromUs;
 }
 
 /// A file the platform opened for us: its descriptor and display name.
@@ -190,5 +262,8 @@ class OpenFile {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is OpenFile && runtimeType == other.runtimeType && fd == other.fd && name == other.name;
+      other is OpenFile &&
+          runtimeType == other.runtimeType &&
+          fd == other.fd &&
+          name == other.name;
 }

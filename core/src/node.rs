@@ -7,7 +7,7 @@
 //!
 //! Must be started inside a tokio runtime.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,7 +22,7 @@ use tokio::task::JoinHandle;
 use crate::discovery::{Announcement, DiscoveredPeer, Discovery, DiscoveryConfig, DiscoveryEvent};
 use crate::identity::{Fingerprint, Identity, TrustedPeers, clean_name};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
-use crate::protocol::{PairReply, PairRequest, Request, Response};
+use crate::protocol::{Batch, PairAsk, PairReply, PairRequest, Request, Response, Status};
 use crate::transfer::{
     Progress, TransferStats, receive_offered, send_file_tracked, send_open_file_tracked,
 };
@@ -44,6 +44,16 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a connection opened by `Node::warm` is kept for a send. Shorter
 /// than the other side's `IDLE_TIMEOUT`, so it's still open when used.
 const WARM_LIFETIME: Duration = Duration::from_secs(45);
+
+/// How long a "do you want these files?" question waits for an answer.
+/// The sender shows "pending" meanwhile, so this can be generous.
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// How long a "can we pair?" question waits.
+const PAIR_ASK_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// How long an answer covers the rest of its batch.
+const ANSWER_LIFETIME: Duration = Duration::from_secs(30 * 60);
 
 /// How often progress events are sent for running transfers.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -67,6 +77,10 @@ pub struct NodeConfig {
     /// How long a paired device may hold a connection open before saying
     /// what it wants (see `Node::warm`).
     pub idle_timeout: Duration,
+    /// Ask before receiving from a paired device (`NodeEvent::OfferReceived`)
+    /// unless it's set to auto-accept. Off: everything from a paired
+    /// device is accepted (the command-line tool).
+    pub ask_before_receiving: bool,
 }
 
 impl NodeConfig {
@@ -85,6 +99,7 @@ impl NodeConfig {
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             discovery: DiscoveryConfig::default(),
             idle_timeout: IDLE_TIMEOUT,
+            ask_before_receiving: true,
         }
     }
 }
@@ -104,6 +119,11 @@ pub struct Peer {
     /// try. A phone with its screen off stops announcing itself but can
     /// still receive, so a paired device stays reachable after it goes quiet.
     pub reachable: bool,
+    /// Files from it are accepted without asking.
+    pub auto_accept: bool,
+    /// It accepts files from this device without asking. `None` until
+    /// it's said.
+    pub accepts_from_us: Option<bool>,
 }
 
 /// A file to send.
@@ -195,6 +215,39 @@ pub enum NodeEvent {
     /// Browser sharing stopped (by `stop_web_share`, or after a long spell
     /// with no browser connected).
     WebShareStopped,
+    /// A paired device wants to send files: answer with `Node::answer_offer`
+    /// within a minute, or it's turned down. One question per send, however
+    /// many files.
+    OfferReceived {
+        id: u64,
+        peer: Fingerprint,
+        /// The first file's name.
+        file_name: String,
+        count: u32,
+        size: u64,
+    },
+    /// That question was answered or timed out: stop showing it.
+    OfferClosed {
+        id: u64,
+    },
+    /// The receiver said yes to an outgoing transfer.
+    TransferAccepted {
+        id: u64,
+    },
+    /// The receiver has the offer and is asking its user: the send is
+    /// delivered, the answer to come.
+    TransferPending {
+        id: u64,
+    },
+    /// A nearby device wants to pair without a QR code. Check both screens
+    /// show `code`, then answer with `Node::answer_pair` (closed with
+    /// `OfferClosed` if it times out).
+    PairAsked {
+        id: u64,
+        peer: Fingerprint,
+        device_name: String,
+        code: String,
+    },
 }
 
 /// A running Nudge device. Dropping it stops everything.
@@ -226,6 +279,11 @@ struct Shared {
     idle_timeout: Duration,
     /// Address the node listens on; browser sharing listens there too.
     bind: IpAddr,
+    /// "windows", "android", ...: tells the web page which icon to show.
+    platform: String,
+    ask: bool,
+    /// Paired devices whose files are accepted without asking.
+    auto_accept: Mutex<HashSet<Fingerprint>>,
 }
 
 #[derive(Default)]
@@ -239,6 +297,17 @@ struct State {
     /// The code this device is showing, and when it stops working.
     pairing: Option<(PairingCode, Instant)>,
     active: HashMap<u64, Active>,
+    /// Questions waiting for the user, by ID, with the batch they're about.
+    questions: HashMap<u64, (BatchKey, tokio::sync::watch::Sender<Option<bool>>)>,
+    /// The answer to each batch asked about, so the rest of its files
+    /// follow it; `None` while still waiting.
+    answers: HashMap<BatchKey, (tokio::sync::watch::Receiver<Option<bool>>, Instant)>,
+    /// "Can we pair?" questions waiting for the user, by ID.
+    pair_asks: HashMap<u64, (Fingerprint, tokio::sync::oneshot::Sender<bool>)>,
+    /// Whether each paired device accepts our files without asking, as it
+    /// last said; and the ones we've asked this session.
+    remote_auto: HashMap<Fingerprint, bool>,
+    status_asked: HashSet<Fingerprint>,
     /// Connections opened ahead of a send, one per device at most.
     warm: HashMap<Fingerprint, WarmSlot>,
 }
@@ -248,6 +317,20 @@ struct Active {
     progress: Progress,
     size: u64,
     last: (u64, Instant),
+    /// `TransferAccepted` / `TransferPending` sent.
+    told_accepted: bool,
+    told_pending: bool,
+}
+
+/// A batch from a peer. Single files (batch ID 0) get one of their own.
+type BatchKey = (Fingerprint, u64);
+
+/// Where a decision to take files stands.
+enum Asking {
+    /// Decided (`None`: nobody answered in time).
+    Now(Option<bool>),
+    /// The user is being asked.
+    Wait(BatchKey, tokio::sync::watch::Receiver<Option<bool>>),
 }
 
 impl Node {
@@ -257,6 +340,10 @@ impl Node {
         let identity = Identity::load_or_create(&config.data_dir)?;
         let trusted = TrustedPeers::load(&config.data_dir)?;
         let tls = Tls::new(&identity, trusted.clone())?;
+        // Any device may connect, but an unpaired one can only ask to pair
+        // (`serve` checks every request), so nearby devices can pair
+        // without a QR code.
+        tls.set_pairing_open(true);
         let fingerprint = identity.fingerprint();
 
         let listener = match config.port {
@@ -268,6 +355,7 @@ impl Node {
         };
         let port = listener.local_addr()?.port();
 
+        let auto_accept = load_auto_accept(&config.data_dir);
         let device_name = clean_name(&config.device_name);
         let (events, events_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -284,6 +372,9 @@ impl Node {
             next_id: AtomicU64::new(1),
             idle_timeout: config.idle_timeout,
             bind: config.bind,
+            platform: config.platform.clone(),
+            ask: config.ask_before_receiving,
+            auto_accept: Mutex::new(auto_accept),
         });
 
         let mut tasks = vec![
@@ -373,6 +464,8 @@ impl Node {
                     paired: true,
                     online: state.nearby.contains_key(&fp),
                     reachable: seen.is_some(),
+                    auto_accept: self.shared.auto_accepts(&fp),
+                    accepts_from_us: state.remote_auto.get(&fp).copied(),
                 }
             })
             .collect();
@@ -388,6 +481,8 @@ impl Node {
                     paired: false,
                     online: true,
                     reachable: true,
+                    auto_accept: false,
+                    accepts_from_us: None,
                 }),
         );
         if let Some(web) = &state.web {
@@ -398,6 +493,8 @@ impl Node {
                 paired: false,
                 online: tab.connected(),
                 reachable: true,
+                auto_accept: false,
+                accepts_from_us: None,
             }));
         }
         peers.sort_by(|a, b| {
@@ -497,7 +594,78 @@ impl Node {
     pub fn unpair(&self, peer: &Fingerprint) -> Result<()> {
         if self.shared.trusted.remove(peer) {
             self.shared.trusted.save(&self.shared.data_dir)?;
+            self.shared.set_auto_accept(peer, false)?;
             self.shared.emit(NodeEvent::PeersChanged);
+        }
+        Ok(())
+    }
+
+    /// Accept files from a paired device without asking (or ask again).
+    /// Tells that device, so it can show it.
+    pub fn set_auto_accept(&self, peer: &Fingerprint, on: bool) -> Result<()> {
+        self.shared.set_auto_accept(peer, on)?;
+        self.shared.exchange_status(*peer);
+        self.shared.emit(NodeEvent::PeersChanged);
+        Ok(())
+    }
+
+    /// The code both screens show while pairing with `peer` without a QR
+    /// code.
+    pub fn pair_code(&self, peer: &Fingerprint) -> String {
+        pairing::compare_code(&self.shared.fingerprint, peer)
+    }
+
+    /// Pair with a device that's nearby, without a QR code: it asks its
+    /// user, who checks both screens show `pair_code`. Waits for the answer.
+    pub async fn pair_nearby(&self, peer: Fingerprint) -> Result<Peer> {
+        let shared = &self.shared;
+        // Trust exactly that device, for this one connection.
+        let tls = Tls::new(&shared.identity, TrustedPeers::new([peer]))?;
+        let mut stream = connect_any(&tls, &shared.addrs_of(&peer), peer).await?;
+        PairAsk {
+            device_name: shared.device_name.clone(),
+        }
+        .write_to(&mut stream)
+        .await?;
+        let reply = tokio::time::timeout(
+            PAIR_ASK_TIMEOUT + Duration::from_secs(5),
+            PairReply::read_from(&mut stream),
+        )
+        .await
+        .map_err(|_| Error::PairingRejected)??;
+        let name = match reply {
+            PairReply::Accept { device_name } => clean_name(&device_name),
+            PairReply::Reject => return Err(Error::PairingRejected),
+        };
+        let _ = stream.shutdown().await;
+        shared.trust(peer, &name)?;
+        Ok(shared.peer(peer))
+    }
+
+    /// Answer `NodeEvent::PairAsked`.
+    pub fn answer_pair(&self, id: u64, accept: bool) {
+        if let Some((_, answer)) = self.shared.state().pair_asks.remove(&id) {
+            let _ = answer.send(accept);
+        }
+        self.shared.emit(NodeEvent::OfferClosed { id });
+    }
+
+    /// Answer `NodeEvent::OfferReceived`. With `always`, files from that
+    /// device are accepted without asking from now on.
+    pub fn answer_offer(&self, id: u64, accept: bool, always: bool) -> Result<()> {
+        let question = self.shared.state().questions.remove(&id);
+        let Some(((peer, _), answer)) = question else {
+            return Ok(()); // already answered, or timed out
+        };
+        let _ = answer.send(Some(accept));
+        self.shared.emit(NodeEvent::OfferClosed { id });
+        if accept && always {
+            if web::is_browser(&self.shared, &peer) {
+                // A browser tab: for as long as it's open.
+                web::always_accept(&self.shared, &peer);
+            } else {
+                self.set_auto_accept(&peer, true)?;
+            }
         }
         Ok(())
     }
@@ -553,6 +721,13 @@ impl Node {
         let shared = self.shared.clone();
         tokio::spawn(async move {
             let count = jobs.len();
+            let batch = Batch {
+                id: u64::from_be_bytes(pairing::random_bytes()).max(1),
+                count: count as u32,
+                size: jobs.iter().map(|(_, item)| item.size()).sum(),
+            };
+            // Once they decline (or don't answer), the rest isn't offered.
+            let mut refused: Option<fn() -> Error> = None;
             for (index, (id, item)) in jobs.into_iter().enumerate() {
                 let more = index + 1 < count;
                 let name = item.name();
@@ -569,7 +744,20 @@ impl Node {
                     Outgoing::Path(path) => path.clone(),
                     Outgoing::Open { .. } => PathBuf::from(&name),
                 };
-                let result = shared.send_one(peer, item, &progress, more).await;
+                if let Some(error) = refused {
+                    shared.finish(id, Err(error()));
+                    continue;
+                }
+                let result = shared.send_one(peer, item, batch, &progress, more).await;
+                match &result {
+                    Err(Error::Declined) => refused = Some(|| Error::Declined),
+                    Err(Error::NoAnswer) => refused = Some(|| Error::NoAnswer),
+                    _ => {}
+                }
+                // Whether they asked tells us their setting for this device.
+                if progress.accepted() || progress.pending() {
+                    shared.record_remote_auto(peer, !progress.pending());
+                }
                 shared.finish(id, result.map(|stats| (source, stats)));
             }
         });
@@ -590,6 +778,113 @@ impl Shared {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn auto_accepts(&self, peer: &Fingerprint) -> bool {
+        self.auto_accept
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(peer)
+    }
+
+    fn set_auto_accept(&self, peer: &Fingerprint, on: bool) -> Result<()> {
+        let list = {
+            let mut set = self.auto_accept.lock().unwrap_or_else(|e| e.into_inner());
+            let changed = if on {
+                set.insert(*peer)
+            } else {
+                set.remove(peer)
+            };
+            if !changed {
+                return Ok(());
+            }
+            set.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        let mut text = String::from("# Paired devices whose files are accepted without asking.\n");
+        for fp in list {
+            text.push_str(&fp);
+            text.push('\n');
+        }
+        std::fs::write(self.data_dir.join(AUTO_ACCEPT_FILE), text)?;
+        Ok(())
+    }
+
+    /// Start deciding whether to take files: at once for auto-accepted
+    /// devices or a batch already answered; otherwise the user is asked
+    /// (once per batch) and the answer is waited for with `wait_answer`.
+    fn start_asking(
+        &self,
+        peer: Fingerprint,
+        batch: u64,
+        first_name: &str,
+        count: u32,
+        size: u64,
+    ) -> Asking {
+        if !self.ask || self.auto_accepts(&peer) || web::always_accepts(self, &peer) {
+            return Asking::Now(Some(true));
+        }
+        let key = match batch {
+            0 => (peer, u64::from_be_bytes(pairing::random_bytes()).max(1)),
+            id => (peer, id),
+        };
+        let answer = {
+            let mut state = self.state();
+            state
+                .answers
+                .retain(|_, (_, at)| at.elapsed() < ANSWER_LIFETIME);
+            match state.answers.get(&key) {
+                Some((answer, _)) => answer.clone(),
+                None => {
+                    let (tx, rx) = tokio::sync::watch::channel(None);
+                    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                    state.questions.insert(id, (key, tx));
+                    state.answers.insert(key, (rx.clone(), Instant::now()));
+                    drop(state);
+                    self.emit(NodeEvent::OfferReceived {
+                        id,
+                        peer,
+                        file_name: first_name.to_owned(),
+                        count: count.max(1),
+                        size,
+                    });
+                    rx
+                }
+            }
+        };
+        let known = *answer.borrow();
+        match known {
+            Some(value) => Asking::Now(Some(value)),
+            None => Asking::Wait(key, answer),
+        }
+    }
+
+    /// Wait for the user's answer. `None`: nobody answered in time.
+    async fn wait_answer(
+        &self,
+        key: BatchKey,
+        mut answer: tokio::sync::watch::Receiver<Option<bool>>,
+    ) -> Option<bool> {
+        let waited = tokio::time::timeout(ANSWER_TIMEOUT, answer.wait_for(Option::is_some)).await;
+        match waited {
+            Ok(Ok(value)) => *value,
+            _ => {
+                // Nobody answered: close the question and forget the batch,
+                // so a later send asks again.
+                let mut state = self.state();
+                state.answers.remove(&key);
+                let id = state
+                    .questions
+                    .iter()
+                    .find(|(_, (k, _))| *k == key)
+                    .map(|(id, _)| *id);
+                if let Some(id) = id {
+                    state.questions.remove(&id);
+                    drop(state);
+                    self.emit(NodeEvent::OfferClosed { id });
+                }
+                None
+            }
+        }
+    }
+
     fn download_dir(&self) -> PathBuf {
         self.download_dir
             .lock()
@@ -602,13 +897,35 @@ impl Shared {
     }
 
     fn close_pairing(&self) {
-        self.tls.set_pairing_open(false);
         self.emit(NodeEvent::PairingClosed);
     }
 
     fn trust(&self, fp: Fingerprint, name: &str) -> Result<()> {
+        // The same device paired again after a reinstall has a new identity
+        // but the same name: drop the old entry rather than keep a stale twin.
+        // Only ones not seen right now, so two live devices that share a
+        // name both stay.
+        let stale: Vec<Fingerprint> = {
+            let state = self.state();
+            self.trusted
+                .list()
+                .into_iter()
+                .filter(|(old, old_name)| {
+                    *old != fp
+                        && !name.is_empty()
+                        && old_name.eq_ignore_ascii_case(name)
+                        && !state.nearby.contains_key(old)
+                })
+                .map(|(old, _)| old)
+                .collect()
+        };
+        for old in &stale {
+            self.trusted.remove(old);
+            let _ = self.set_auto_accept(old, false);
+        }
         self.trusted.add_named(fp, name);
         self.trusted.save(&self.data_dir)?;
+        self.state().remote_auto.remove(&fp);
         self.emit(NodeEvent::Paired {
             peer: self.peer(fp),
         });
@@ -631,6 +948,8 @@ impl Shared {
             paired: self.trusted.contains(&fp),
             online: state.nearby.contains_key(&fp),
             reachable: nearby.is_some(),
+            auto_accept: self.auto_accepts(&fp),
+            accepts_from_us: state.remote_auto.get(&fp).copied(),
         }
     }
 
@@ -659,13 +978,24 @@ impl Shared {
                 progress: progress.clone(),
                 size,
                 last: (0, Instant::now()),
+                told_accepted: false,
+                told_pending: false,
             },
         );
         progress
     }
 
     fn finish(&self, id: u64, result: Result<(PathBuf, TransferStats)>) {
-        self.state().active.remove(&id);
+        let active = self.state().active.remove(&id);
+        // Finished before the progress tick noticed.
+        if let Some(a) = active {
+            if a.progress.pending() && !a.told_pending {
+                self.emit(NodeEvent::TransferPending { id });
+            }
+            if a.progress.accepted() && !a.told_accepted {
+                self.emit(NodeEvent::TransferAccepted { id });
+            }
+        }
         self.emit(match result {
             Ok((path, stats)) => NodeEvent::TransferDone { id, path, stats },
             Err(e) => NodeEvent::TransferFailed {
@@ -734,6 +1064,7 @@ impl Shared {
         self: &Arc<Self>,
         peer: Fingerprint,
         item: Outgoing,
+        batch: Batch,
         progress: &Progress,
         more: bool,
     ) -> Result<TransferStats> {
@@ -756,10 +1087,10 @@ impl Shared {
         if more {
             self.warm(peer);
         }
-        match (send_over(&mut stream, item, progress).await, spare) {
+        match (send_over(&mut stream, item, batch, progress).await, spare) {
             (Err(Error::Io(_)), Some(spare)) => {
                 let mut stream = connect_any(&self.tls, &self.addrs_of(&peer), peer).await?;
-                send_over(&mut stream, spare, progress).await
+                send_over(&mut stream, spare, batch, progress).await
             }
             (result, _) => result,
         }
@@ -784,6 +1115,31 @@ impl Shared {
             .map_err(|_| Error::Protocol("no request in time"))??;
         match request {
             Request::File(offer) if trusted => {
+                let decision = match self.start_asking(
+                    peer,
+                    offer.batch.id,
+                    &offer.name,
+                    offer.batch.count,
+                    offer.batch.size.max(offer.size),
+                ) {
+                    Asking::Now(answer) => answer,
+                    Asking::Wait(key, answer) => {
+                        // Let the sender know it's delivered and waiting.
+                        let _ = Response::Asking.write_to(&mut stream).await;
+                        self.wait_answer(key, answer).await
+                    }
+                };
+                match decision {
+                    Some(true) => {}
+                    Some(false) => {
+                        let _ = Response::Declined.write_to(&mut stream).await;
+                        return Ok(());
+                    }
+                    None => {
+                        let _ = Response::NoAnswer.write_to(&mut stream).await;
+                        return Ok(());
+                    }
+                }
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
                 self.emit(NodeEvent::TransferStarted {
                     id,
@@ -815,11 +1171,114 @@ impl Shared {
                 Ok(())
             }
             Request::File(_) => {
-                let _ = Response::Reject.write_to(&mut stream).await;
+                let _ = Response::NotPaired.write_to(&mut stream).await;
                 Err(Error::UntrustedPeer(peer))
             }
             Request::Pair(request) => self.answer_pairing(stream, peer, request).await,
+            Request::PairAsk(ask) => self.answer_pair_ask(stream, peer, ask).await,
+            Request::Status(theirs) if trusted => {
+                self.record_remote_auto(peer, theirs.auto_accepts_you);
+                Status {
+                    auto_accepts_you: self.auto_accepts(&peer),
+                }
+                .write_reply(&mut stream)
+                .await?;
+                let _ = stream.shutdown().await;
+                Ok(())
+            }
+            Request::Status(_) => Err(Error::UntrustedPeer(peer)),
         }
+    }
+
+    /// "Can we pair?" from a nearby device: ask the user, who compares the
+    /// codes on both screens.
+    async fn answer_pair_ask<S>(&self, mut stream: S, peer: Fingerprint, ask: PairAsk) -> Result<()>
+    where
+        S: AsyncWrite + Unpin,
+    {
+        let reject = |mut s: S| async move {
+            let _ = PairReply::Reject.write_to(&mut s).await;
+            Err(Error::PairingRejected)
+        };
+        if peer == self.fingerprint {
+            return reject(stream).await;
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        // One question per device at a time.
+        let id = {
+            let mut state = self.state();
+            if state.pair_asks.values().any(|(p, _)| *p == peer) {
+                None
+            } else {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                state.pair_asks.insert(id, (peer, tx));
+                Some(id)
+            }
+        };
+        let Some(id) = id else {
+            return reject(stream).await;
+        };
+        let name = clean_name(&ask.device_name);
+        self.emit(NodeEvent::PairAsked {
+            id,
+            peer,
+            device_name: name.clone(),
+            code: pairing::compare_code(&self.fingerprint, &peer),
+        });
+        let yes = matches!(
+            tokio::time::timeout(PAIR_ASK_TIMEOUT, rx).await,
+            Ok(Ok(true))
+        );
+        if self.state().pair_asks.remove(&id).is_some() {
+            self.emit(NodeEvent::OfferClosed { id });
+        }
+        if !yes {
+            return reject(stream).await;
+        }
+        PairReply::Accept {
+            device_name: self.device_name.clone(),
+        }
+        .write_to(&mut stream)
+        .await?;
+        let _ = stream.shutdown().await;
+        self.trust(peer, &name)
+    }
+
+    /// What a paired device said about accepting our files.
+    fn record_remote_auto(&self, peer: Fingerprint, on: bool) {
+        let changed = self.state().remote_auto.insert(peer, on) != Some(on);
+        if changed {
+            self.emit(NodeEvent::PeersChanged);
+        }
+    }
+
+    /// Swap settings with a paired device in the background: tells it
+    /// whether we auto-accept it, and learns the same about it.
+    fn exchange_status(self: &Arc<Self>, peer: Fingerprint) {
+        // Called from outside the runtime, it can't run; the next time the
+        // device shows up, the settings are swapped anyway.
+        if !self.trusted.contains(&peer) || tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let shared = self.clone();
+        tokio::spawn(async move {
+            let addrs = shared.addrs_of(&peer);
+            let Ok(mut stream) = connect_any(&shared.tls, &addrs, peer).await else {
+                return;
+            };
+            let mine = Status {
+                auto_accepts_you: shared.auto_accepts(&peer),
+            };
+            if mine.write_to(&mut stream).await.is_err() {
+                return;
+            }
+            if let Ok(Ok(theirs)) =
+                tokio::time::timeout(REQUEST_TIMEOUT, Status::read_reply(&mut stream)).await
+            {
+                shared.record_remote_auto(peer, theirs.auto_accepts_you);
+            }
+            let _ = stream.shutdown().await;
+        });
     }
 
     async fn answer_pairing<S>(
@@ -897,6 +1356,11 @@ async fn discovery_loop(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Dis
                             .add_named(peer.fingerprint, &peer.device_name);
                         let _ = shared.trusted.save(&shared.data_dir);
                     }
+                    if shared.trusted.contains(&peer.fingerprint)
+                        && state.status_asked.insert(peer.fingerprint)
+                    {
+                        shared.exchange_status(peer.fingerprint);
+                    }
                     state.last_seen.insert(peer.fingerprint, peer.clone());
                     state.nearby.insert(peer.fingerprint, peer);
                 }
@@ -918,36 +1382,64 @@ async fn progress_loop(shared: Arc<Shared>) {
             .state()
             .active
             .iter_mut()
-            .filter_map(|(id, active)| {
-                let bytes = active.progress.position();
-                let (last_bytes, last_time) = active.last;
-                if bytes == last_bytes {
-                    return None;
-                }
-                let secs = now.duration_since(last_time).as_secs_f64().max(1e-3);
-                active.last = (bytes, now);
-                Some(NodeEvent::TransferProgress {
-                    id: *id,
-                    bytes,
-                    size: active.size,
-                    bytes_per_sec: bytes.saturating_sub(last_bytes) as f64 / secs,
-                })
+            .flat_map(|(id, active)| {
+                let pending = (!active.told_pending && active.progress.pending()).then(|| {
+                    active.told_pending = true;
+                    NodeEvent::TransferPending { id: *id }
+                });
+                let accepted = (!active.told_accepted && active.progress.accepted()).then(|| {
+                    active.told_accepted = true;
+                    NodeEvent::TransferAccepted { id: *id }
+                });
+                pending
+                    .into_iter()
+                    .chain(accepted)
+                    .chain(progress_update(*id, active, now))
             })
             .collect();
         updates.into_iter().for_each(|e| shared.emit(e));
     }
 }
 
+/// A progress event for `active`, if it moved since the last one.
+fn progress_update(id: u64, active: &mut Active, now: Instant) -> Option<NodeEvent> {
+    let bytes = active.progress.position();
+    let (last_bytes, last_time) = active.last;
+    if bytes == last_bytes {
+        return None;
+    }
+    let secs = now.duration_since(last_time).as_secs_f64().max(1e-3);
+    active.last = (bytes, now);
+    Some(NodeEvent::TransferProgress {
+        id,
+        bytes,
+        size: active.size,
+        bytes_per_sec: bytes.saturating_sub(last_bytes) as f64 / secs,
+    })
+}
+
+const AUTO_ACCEPT_FILE: &str = "auto_accept.txt";
+
+fn load_auto_accept(dir: &std::path::Path) -> HashSet<Fingerprint> {
+    std::fs::read_to_string(dir.join(AUTO_ACCEPT_FILE))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .filter_map(|l| l.trim().parse().ok())
+        .collect()
+}
+
 /// Send one file over an open connection, then close it.
 async fn send_over(
     stream: &mut Conn,
     item: Outgoing,
+    batch: Batch,
     progress: &Progress,
 ) -> Result<TransferStats> {
     let stats = match item {
-        Outgoing::Path(path) => send_file_tracked(stream, &path, progress).await?,
+        Outgoing::Path(path) => send_file_tracked(stream, &path, Some(batch), progress).await?,
         Outgoing::Open { file, name } => {
-            send_open_file_tracked(stream, file, name, progress).await?
+            send_open_file_tracked(stream, file, name, Some(batch), progress).await?
         }
     };
     let _ = stream.shutdown().await;
@@ -1014,6 +1506,7 @@ mod tests {
             "android",
         );
         config.port = Some(0);
+        config.ask_before_receiving = false;
         config.bind = Ipv4Addr::LOCALHOST.into();
         config.discovery = DiscoveryConfig {
             mdns: false,

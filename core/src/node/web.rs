@@ -82,6 +82,11 @@ pub(super) struct Browser {
     /// Accepted files, downloaded one at a time in this order.
     queue: VecDeque<Download>,
     current: Option<Download>,
+    /// Files this tab may still send: granted when the user accepts its
+    /// "can I send you these?" question.
+    allowance: u32,
+    /// The user chose "always accept" for this tab.
+    always: bool,
 }
 
 impl Browser {
@@ -183,6 +188,27 @@ pub(super) fn stop(shared: &Shared) {
     }
 }
 
+/// "Always accept" for a tab: for as long as it's open.
+pub(super) fn always_accept(shared: &Shared, id: &Fingerprint) {
+    if let Some(tab) = shared
+        .state()
+        .web
+        .as_mut()
+        .and_then(|w| w.browsers.get_mut(id))
+    {
+        tab.always = true;
+    }
+}
+
+pub(super) fn always_accepts(shared: &Shared, id: &Fingerprint) -> bool {
+    shared
+        .state()
+        .web
+        .as_ref()
+        .and_then(|w| w.browsers.get(id))
+        .is_some_and(|tab| tab.always)
+}
+
 pub(super) fn is_browser(shared: &Shared, id: &Fingerprint) -> bool {
     shared
         .state()
@@ -236,6 +262,10 @@ pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Ou
             tab.push("offer", &event);
             tab.offers.insert(batch, Offer { event, answer });
         }
+        // Delivered to the page; now it's up to them.
+        for (id, _, _) in &files {
+            shared.emit(NodeEvent::TransferPending { id: *id });
+        }
 
         let result = tokio::time::timeout(ANSWER_TIMEOUT, answered).await;
         let mut state = shared.state();
@@ -245,6 +275,9 @@ pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Ou
             .and_then(|w| w.browsers.get_mut(&browser));
         match (result, tab) {
             (Ok(Ok(true)), Some(tab)) => {
+                for (id, _, _) in &files {
+                    shared.emit(NodeEvent::TransferAccepted { id: *id });
+                }
                 let mut items = jobs.into_iter().map(|(_, item)| item);
                 for (id, name, _) in &files {
                     tab.queue.push_back(Download {
@@ -424,12 +457,62 @@ async fn handle(shared: &Arc<Shared>, token: &str, mut tcp: TcpStream) -> std::i
             (Some(s), Ok(id)) => download(shared, &mut tcp, s, id).await,
             _ => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
         },
+        ("POST", ["ask"]) => match session {
+            Some(s) => ask(shared, &mut tcp, s, &req.query).await,
+            None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
+        },
         ("POST", ["u"]) => match session {
             Some(s) => upload(shared, &mut tcp, s, req).await,
             None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
         },
         _ => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
     }
+}
+
+/// "Can I send you these?" from a tab: the user here accepts or declines
+/// (or it's accepted at once, for a tab set to always accept). The reply,
+/// `{"answer":"accepted"|"declined"|"none"}`, comes when they do.
+async fn ask(
+    shared: &Arc<Shared>,
+    tcp: &mut TcpStream,
+    session: Fingerprint,
+    query: &HashMap<String, String>,
+) -> std::io::Result<()> {
+    if !is_browser(shared, &session) {
+        return respond(tcp, "404 Not Found", "text/plain", b"Not found").await;
+    }
+    let count: u32 = query
+        .get("count")
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(1)
+        .clamp(1, 10_000);
+    let size: u64 = query.get("size").and_then(|c| c.parse().ok()).unwrap_or(0);
+    let name = query.get("name").cloned().unwrap_or_default();
+    let answer = match shared.start_asking(session, 0, &name, count, size) {
+        super::Asking::Now(answer) => answer,
+        super::Asking::Wait(key, rx) => shared.wait_answer(key, rx).await,
+    };
+    if answer == Some(true)
+        && let Some(tab) = shared
+            .state()
+            .web
+            .as_mut()
+            .and_then(|w| w.browsers.get_mut(&session))
+    {
+        tab.allowance = tab.allowance.saturating_add(count);
+    }
+    let word = match answer {
+        Some(true) => "accepted",
+        Some(false) => "declined",
+        None => "none",
+    };
+    respond(
+        tcp,
+        "200 OK",
+        "application/json",
+        format!("{{\"answer\":\"{word}\"}}").as_bytes(),
+    )
+    .await
 }
 
 async fn page(tcp: &mut TcpStream) -> std::io::Result<()> {
@@ -440,7 +523,7 @@ async fn page(tcp: &mut TcpStream) -> std::io::Result<()> {
          Cache-Control: no-store\r\n\
          Referrer-Policy: no-referrer\r\n\
          X-Content-Type-Options: nosniff\r\n\
-         Content-Security-Policy: default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\n\
+         Content-Security-Policy: default-src 'self'; img-src data:; script-src 'unsafe-inline'; style-src 'unsafe-inline'\r\n\
          Connection: close\r\n\r\n",
         PAGE.len()
     );
@@ -478,6 +561,8 @@ async fn events(
                         offers: HashMap::new(),
                         queue: VecDeque::new(),
                         current: None,
+                        allowance: 0,
+                        always: false,
                     },
                 );
                 id
@@ -491,8 +576,9 @@ async fn events(
         tab.push(
             "hello",
             &format!(
-                "{{\"session\":\"{id}\",\"from\":{},\"name\":{}}}",
+                "{{\"session\":\"{id}\",\"from\":{},\"platform\":{},\"name\":{}}}",
                 json_str(&shared.device_name),
+                json_str(&shared.platform),
                 json_str(&tab.name)
             ),
         );
@@ -581,6 +667,7 @@ async fn download(
 
     let start = Instant::now();
     let result = stream_file(shared, tcp, id, item, &name).await;
+    let delivered = result.is_ok();
     shared.finish(
         id,
         result.map(|bytes| {
@@ -602,6 +689,9 @@ async fn download(
         .and_then(|w| w.browsers.get_mut(&session))
         && tab.current.as_ref().is_some_and(|d| d.id == id)
     {
+        if delivered {
+            tab.push("delivered", &format!("{{\"id\":{id}}}"));
+        }
         tab.current = None;
         tab.advance();
     }
@@ -658,8 +748,7 @@ async fn stream_file(
     Ok(sent)
 }
 
-/// Save a file the tab sends. Accepted without asking: the user invited
-/// this tab by showing the code.
+/// Save a file the tab sends, once the user here has accepted it (`ask`).
 async fn upload(
     shared: &Arc<Shared>,
     tcp: &mut TcpStream,
@@ -668,6 +757,24 @@ async fn upload(
 ) -> std::io::Result<()> {
     if !is_browser(shared, &session) {
         return respond(tcp, "404 Not Found", "text/plain", b"Not found").await;
+    }
+    // Only what the user here accepted (see `ask`).
+    let allowed = {
+        let mut state = shared.state();
+        match state
+            .web
+            .as_mut()
+            .and_then(|w| w.browsers.get_mut(&session))
+        {
+            Some(tab) if tab.allowance > 0 => {
+                tab.allowance -= 1;
+                true
+            }
+            _ => false,
+        }
+    };
+    if !allowed {
+        return respond(tcp, "403 Forbidden", "text/plain", b"Not accepted").await;
     }
     let Some(size) = req.content_length else {
         return respond(tcp, "411 Length Required", "text/plain", b"Length required").await;

@@ -1,11 +1,13 @@
+import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 
 import '../controller.dart';
 import '../platform.dart';
 import '../src/rust/api/nudge.dart';
 import 'send_sheet.dart' show describeFiles;
+import 'style.dart';
 
 /// Share with someone who doesn't have Nudge: they scan a code, a page opens
 /// in their browser, and while it's open they're a device you can send to.
@@ -25,7 +27,12 @@ class WebShareScreen extends StatefulWidget {
 
 class _WebShareScreenState extends State<WebShareScreen> {
   NudgeController get controller => widget.controller;
-  late Future<String> _starting = controller.startWebShare();
+  // Usually already started (see HomeScreen._openWebShare), so the screen
+  // opens with its content rather than swapping it in mid-transition.
+  late Future<String> _starting = switch (controller.webShareUrl) {
+    final url? => SynchronousFuture(url),
+    null => controller.startWebShare(),
+  };
 
   /// Waiting for someone to open the page, then sent to them.
   late List<OutgoingFile>? _waiting = widget.files;
@@ -73,42 +80,48 @@ class _WebShareScreenState extends State<WebShareScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('Share without the app')),
-      body: FutureBuilder<String>(
+    return NudgePage(
+      title: 'Without the app',
+      child: FutureBuilder<String>(
         future: _starting,
         builder: (context, snapshot) {
           if (snapshot.hasError) {
             return _Message(
-              icon: Icons.wifi_off_rounded,
+              icon: CupertinoIcons.wifi_slash,
               title: "Couldn't start sharing",
               text: '${snapshot.error}',
-              action: FilledButton(onPressed: _restart, child: const Text('Try again')),
+              action: PillButton(label: 'Try again', filled: true, onTap: _restart),
             );
           }
-          if (!snapshot.hasData) return const Center(child: CircularProgressIndicator());
+          if (!snapshot.hasData) {
+            return const Center(child: CupertinoActivityIndicator(color: Palette.text));
+          }
           return ListenableBuilder(
             listenable: controller,
             builder: (context, _) {
               final url = controller.webShareUrl;
-              if (url == null) {
-                return _Message(
-                  icon: Icons.public_off_rounded,
-                  title: 'Sharing stopped',
-                  text: 'It stops by itself after 10 minutes with nobody connected.',
-                  action: FilledButton(onPressed: _restart, child: const Text('Share again')),
-                );
-              }
-              return _Sharing(
-                url: url,
-                waiting: _waiting,
-                sentTo: _sentTo,
-                browsers: controller.browserDevices,
-                onSend: _send,
-                onStop: () {
-                  controller.stopWebShare();
-                  Navigator.of(context).pop();
-                },
+              return AnimatedSwitcher(
+                duration: const Duration(milliseconds: 350),
+                child: url == null
+                    ? _Message(
+                        key: const ValueKey('stopped'),
+                        icon: CupertinoIcons.pause_circle,
+                        title: 'Sharing stopped',
+                        text: 'It stops by itself after 10 minutes with nobody connected.',
+                        action: PillButton(label: 'Share again', filled: true, onTap: _restart),
+                      )
+                    : _Sharing(
+                        key: const ValueKey('sharing'),
+                        url: url,
+                        waiting: _waiting,
+                        sentTo: _sentTo,
+                        browsers: controller.browserDevices,
+                        onSend: _send,
+                        onStop: () {
+                          controller.stopWebShare();
+                          Navigator.of(context).pop();
+                        },
+                      ),
               );
             },
           );
@@ -120,6 +133,7 @@ class _WebShareScreenState extends State<WebShareScreen> {
 
 class _Sharing extends StatelessWidget {
   const _Sharing({
+    super.key,
     required this.url,
     required this.waiting,
     required this.sentTo,
@@ -137,117 +151,123 @@ class _Sharing extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final muted = theme.colorScheme.onSurfaceVariant;
+    final files = waiting;
     return Center(
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 480),
+        constraints: const BoxConstraints(maxWidth: 440),
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 16, 24, 32),
+          physics: const BouncingScrollPhysics(),
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
           children: [
-            if (waiting != null || sentTo != null)
-              Card(
-                margin: const EdgeInsets.only(bottom: 20),
-                color: theme.colorScheme.secondaryContainer,
-                child: ListTile(
-                  leading: Icon(
-                    sentTo == null ? Icons.hourglass_top_rounded : Icons.check_circle_rounded,
-                    color: theme.colorScheme.onSecondaryContainer,
-                  ),
-                  title: Text(
-                    sentTo == null ? '${describeFiles(waiting!)} ready to send' : 'Sent to $sentTo',
-                  ),
-                  subtitle: Text(
-                    sentTo == null
-                        ? 'They go to the first person who opens the page.'
-                        : 'They tap Accept on their phone to download.',
-                  ),
-                ),
-              ),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 300),
+              child: files == null && sentTo == null
+                  ? const SizedBox(width: double.infinity)
+                  : Padding(
+                      padding: const EdgeInsets.only(bottom: 24),
+                      child: Glass(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                        child: Row(
+                          children: [
+                            Icon(
+                              sentTo == null
+                                  ? CupertinoIcons.hourglass
+                                  : CupertinoIcons.checkmark_circle_fill,
+                              color: sentTo == null ? Palette.text : Palette.good,
+                              size: 22,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                sentTo == null
+                                    ? '${describeFiles(files!)} for whoever scans'
+                                    : 'Sent to $sentTo · they accept on their phone',
+                                style: const TextStyle(color: Palette.text, fontSize: 14),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+            ),
             Center(
-              child: Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  // QR codes need dark-on-light to scan, whatever the theme.
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(24),
-                ),
-                child: QrImageView(
-                  data: url,
-                  size: 220,
-                  backgroundColor: Colors.white,
-                  errorCorrectionLevel: QrErrorCorrectLevel.M,
-                  eyeStyle: const QrEyeStyle(eyeShape: QrEyeShape.square, color: Color(0xFF111318)),
-                  dataModuleStyle: const QrDataModuleStyle(
-                    dataModuleShape: QrDataModuleShape.square,
-                    color: Color(0xFF111318),
-                  ),
-                ),
-              ),
+              child: QrCard(child: CodeQr(data: url)),
             ),
-            const SizedBox(height: 20),
-            Text(
-              'Scan with any phone camera',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.titleMedium,
-            ),
+            const SizedBox(height: 28),
+            const Text('Scan with any camera', textAlign: TextAlign.center, style: Fonts.title),
             const SizedBox(height: 6),
-            Text(
-              'They need to be on the same Wi-Fi. Nothing to install: a page opens in '
-              'their browser, they accept what you send, and they can send files back.',
+            const Text(
+              'Same Wi-Fi · nothing to install',
               textAlign: TextAlign.center,
-              style: theme.textTheme.bodyMedium?.copyWith(color: muted),
+              style: Fonts.small,
             ),
-            const SizedBox(height: 8),
-            Center(
-              child: TextButton.icon(
-                onPressed: () async {
-                  await Clipboard.setData(ClipboardData(text: url));
-                  if (context.mounted) {
-                    ScaffoldMessenger.of(context)
-                        .showSnackBar(const SnackBar(content: Text('Link copied')));
-                  }
-                },
-                icon: const Icon(Icons.copy_rounded, size: 18),
-                label: const Text('Copy link'),
-              ),
+            const SizedBox(height: 28),
+            AnimatedSize(
+              duration: const Duration(milliseconds: 300),
+              child: browsers.isEmpty
+                  ? const SizedBox(width: double.infinity)
+                  : Padding(
+                      padding: const EdgeInsets.only(bottom: 28),
+                      child: Wrap(
+                        alignment: WrapAlignment.center,
+                        spacing: 8,
+                        runSpacing: 12,
+                        children: [
+                          for (final b in browsers)
+                            Pressable(
+                              key: ValueKey(b.id),
+                              onTap: () => onSend(b),
+                              child: SizedBox(
+                                width: 88,
+                                child: Column(
+                                  children: [
+                                    Container(
+                                      width: 56,
+                                      height: 56,
+                                      decoration: BoxDecoration(
+                                        shape: BoxShape.circle,
+                                        color: Colors.white.withValues(
+                                          alpha: b.online ? 0.14 : 0.06,
+                                        ),
+                                        border: Border.all(color: Palette.glassBorder),
+                                      ),
+                                      child: const Icon(CupertinoIcons.globe, color: Palette.text),
+                                    ),
+                                    const SizedBox(height: 6),
+                                    Text(
+                                      b.name,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: Fonts.label,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
             ),
-            const SizedBox(height: 16),
-            Text(
-              'Connected',
-              style: theme.textTheme.titleSmall?.copyWith(
-                color: muted,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 6),
-            if (browsers.isEmpty)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                child: Text(
-                  'Nobody yet. They appear here once the page opens.',
-                  style: theme.textTheme.bodyMedium?.copyWith(color: muted),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                PillButton(
+                  label: 'Copy link',
+                  icon: CupertinoIcons.link,
+                  onTap: () async {
+                    await Clipboard.setData(ClipboardData(text: url));
+                    if (context.mounted) showToast(context, 'Link copied');
+                  },
                 ),
-              ),
-            for (final b in browsers)
-              Card(
-                margin: const EdgeInsets.symmetric(vertical: 4),
-                child: ListTile(
-                  leading: const CircleAvatar(child: Icon(Icons.public_rounded)),
-                  title: Text(b.name),
-                  subtitle: Text(b.online ? 'Tap to send files' : 'Page in the background'),
-                  trailing: const Icon(Icons.send_rounded),
-                  onTap: () => onSend(b),
-                ),
-              ),
-            const SizedBox(height: 20),
-            FilledButton.tonal(onPressed: onStop, child: const Text('Stop sharing')),
-            const SizedBox(height: 12),
-            Text(
-              'Stops by itself after 10 minutes with nobody connected. The page '
-              "isn't encrypted, so use it on networks you trust.",
+                const SizedBox(width: 10),
+                PillButton(label: 'Stop', icon: CupertinoIcons.stop_fill, onTap: onStop),
+              ],
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              "Stops after 10 minutes with nobody connected. Not encrypted, so use it on Wi-Fi you trust.",
               textAlign: TextAlign.center,
-              style: theme.textTheme.bodySmall?.copyWith(color: muted),
+              style: TextStyle(color: Palette.faint, fontSize: 12, height: 1.4),
             ),
           ],
         ),
@@ -258,6 +278,7 @@ class _Sharing extends StatelessWidget {
 
 class _Message extends StatelessWidget {
   const _Message({
+    super.key,
     required this.icon,
     required this.title,
     required this.text,
@@ -271,19 +292,18 @@ class _Message extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 48, color: theme.colorScheme.onSurfaceVariant),
+            Icon(icon, size: 48, color: Palette.muted),
             const SizedBox(height: 16),
-            Text(title, style: theme.textTheme.titleLarge),
+            Text(title, style: Fonts.title, textAlign: TextAlign.center),
             const SizedBox(height: 8),
-            Text(text, textAlign: TextAlign.center),
-            const SizedBox(height: 20),
+            Text(text, textAlign: TextAlign.center, style: Fonts.body),
+            const SizedBox(height: 24),
             action,
           ],
         ),

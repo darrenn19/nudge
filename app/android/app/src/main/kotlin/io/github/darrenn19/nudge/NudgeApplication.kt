@@ -18,8 +18,8 @@ class NudgeApplication : Application() {
         // Copies left by the last run; nothing can be sending them now.
         SharedFiles.clearCopies(this)
         val engine = FlutterEngine(this)
-        MethodChannel(engine.dartExecutor.binaryMessenger, PlatformChannel.NAME)
-            .setMethodCallHandler(PlatformChannel(this))
+        platform = MethodChannel(engine.dartExecutor.binaryMessenger, PlatformChannel.NAME)
+            .apply { setMethodCallHandler(PlatformChannel(this@NudgeApplication)) }
         engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
         FlutterEngineCache.getInstance().put(ENGINE_ID, engine)
         NudgeService.start(this)
@@ -27,5 +27,9 @@ class NudgeApplication : Application() {
 
     companion object {
         const val ENGINE_ID = "nudge"
+
+        /** For telling Dart things that happen outside it (a notification's buttons). */
+        var platform: MethodChannel? = null
+            private set
     }
 }

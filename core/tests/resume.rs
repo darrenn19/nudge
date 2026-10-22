@@ -54,6 +54,7 @@ async fn interrupted_send(
         name: src.file_name().unwrap().to_str().unwrap().into(),
         size: data.len() as u64,
         modified: modified_time(&std::fs::metadata(src).unwrap()),
+        batch: nudge_core::protocol::Batch::single(data.len() as u64),
     }
     .write_to(&mut stream)
     .await
