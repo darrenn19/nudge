@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -23,7 +23,9 @@ use crate::discovery::{Announcement, DiscoveredPeer, Discovery, DiscoveryConfig,
 use crate::identity::{Fingerprint, Identity, TrustedPeers, clean_name};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
 use crate::protocol::{PairReply, PairRequest, Request, Response};
-use crate::transfer::{Progress, TransferStats, receive_offered, send_file_tracked};
+use crate::transfer::{
+    Progress, TransferStats, receive_offered, send_file_tracked, send_open_file_tracked,
+};
 use crate::{DEFAULT_PORT, Error, Result, Tls};
 
 /// How long to wait for each address when connecting.
@@ -83,6 +85,38 @@ pub struct Peer {
     pub paired: bool,
     /// Seen on the network right now.
     pub online: bool,
+}
+
+/// A file to send.
+#[derive(Debug)]
+pub enum Outgoing {
+    Path(PathBuf),
+    /// Already open, sent under `name`. Android shares files this way: the
+    /// app gets an open descriptor, not a path, and reading it directly
+    /// avoids copying the file first.
+    Open {
+        file: std::fs::File,
+        name: String,
+    },
+}
+
+impl Outgoing {
+    fn name(&self) -> String {
+        match self {
+            Self::Path(path) => path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            Self::Open { name, .. } => name.clone(),
+        }
+    }
+
+    fn size(&self) -> u64 {
+        match self {
+            Self::Path(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            Self::Open { file, .. } => file.metadata().map(|m| m.len()).unwrap_or(0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,29 +442,35 @@ impl Node {
     /// background. Returns the transfer IDs (one per file, in order) that
     /// progress events will use.
     pub fn send_files(&self, peer: Fingerprint, paths: Vec<PathBuf>) -> Vec<u64> {
-        let jobs: Vec<(u64, PathBuf)> = paths
+        self.send(peer, paths.into_iter().map(Outgoing::Path).collect())
+    }
+
+    /// `send_files` for any mix of paths and already-open files.
+    pub fn send(&self, peer: Fingerprint, items: Vec<Outgoing>) -> Vec<u64> {
+        let jobs: Vec<(u64, Outgoing)> = items
             .into_iter()
-            .map(|p| (self.shared.next_id.fetch_add(1, Ordering::Relaxed), p))
+            .map(|item| (self.shared.next_id.fetch_add(1, Ordering::Relaxed), item))
             .collect();
         let ids = jobs.iter().map(|(id, _)| *id).collect();
         let shared = self.shared.clone();
         tokio::spawn(async move {
-            for (id, path) in jobs {
-                let name = path
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            for (id, item) in jobs {
+                let name = item.name();
+                let size = item.size();
                 shared.emit(NodeEvent::TransferStarted {
                     id,
                     peer,
                     direction: Direction::Outgoing,
-                    file_name: name,
+                    file_name: name.clone(),
                     size,
                 });
                 let progress = shared.track(id, size);
-                let result = shared.send_one(peer, &path, &progress).await;
-                shared.finish(id, result.map(|stats| (path, stats)));
+                let source = match &item {
+                    Outgoing::Path(path) => path.clone(),
+                    Outgoing::Open { .. } => PathBuf::from(&name),
+                };
+                let result = shared.send_one(peer, item, &progress).await;
+                shared.finish(id, result.map(|stats| (source, stats)));
             }
         });
         ids
@@ -524,7 +564,7 @@ impl Shared {
     async fn send_one(
         &self,
         peer: Fingerprint,
-        path: &Path,
+        item: Outgoing,
         progress: &Progress,
     ) -> Result<TransferStats> {
         if !self.trusted.contains(&peer) {
@@ -532,7 +572,12 @@ impl Shared {
         }
         let addrs = self.nearby_addrs(&peer);
         let mut stream = connect_any(&self.tls, &addrs, peer).await?;
-        let stats = send_file_tracked(&mut stream, path, progress).await?;
+        let stats = match item {
+            Outgoing::Path(path) => send_file_tracked(&mut stream, &path, progress).await?,
+            Outgoing::Open { file, name } => {
+                send_open_file_tracked(&mut stream, file, name, progress).await?
+            }
+        };
         let _ = stream.shutdown().await;
         Ok(stats)
     }

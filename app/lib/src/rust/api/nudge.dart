@@ -9,8 +9,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'nudge.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `parse_id`, `runtime`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `fmt`, `fmt`, `from`, `from`
+// These functions are ignored because they are not marked as `pub`: `into_outgoing`, `parse_id`, `runtime`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>>
 abstract class NudgeApp implements RustOpaqueInterface {
@@ -39,6 +39,14 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Send files to a paired device in the background. Returns one
   /// transfer ID per file; progress arrives as events.
   Int64List sendFiles({required String deviceId, required List<String> paths});
+
+  /// Send files the platform has already opened (Android shares arrive
+  /// as open descriptors, not paths). Takes ownership of each descriptor
+  /// and closes it when its transfer ends. Unix only.
+  Int64List sendOpenFiles({
+    required String deviceId,
+    required List<OpenFile> files,
+  });
 
   void setDownloadDir({required String dir});
 
@@ -144,4 +152,23 @@ class DeviceInfo {
           platform == other.platform &&
           paired == other.paired &&
           online == other.online;
+}
+
+/// A file the platform opened for us: its descriptor and display name.
+class OpenFile {
+  final int fd;
+  final String name;
+
+  const OpenFile({required this.fd, required this.name});
+
+  @override
+  int get hashCode => fd.hashCode ^ name.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OpenFile &&
+          runtimeType == other.runtimeType &&
+          fd == other.fd &&
+          name == other.name;
 }

@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use nudge_core::discovery::DiscoveryConfig;
-use nudge_core::{Direction, Error, Node, NodeConfig, NodeEvent};
+use nudge_core::{Direction, Error, Node, NodeConfig, NodeEvent, Outgoing};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 struct TestNode {
@@ -149,6 +149,31 @@ async fn discover_pair_and_send() {
     })
     .await;
     assert_eq!(path, laptop.downloads.join("photo.jpg"));
+    assert!(std::fs::read(&path).unwrap() == data);
+    wait_for(&mut phone.events, |e| match e {
+        NodeEvent::TransferDone { id, .. } if *id == ids[0] => Some(()),
+        NodeEvent::TransferFailed { error, .. } => panic!("send failed: {error}"),
+        _ => None,
+    })
+    .await;
+
+    // An already-open file goes out under the name it's given (how Android
+    // shares work: an open descriptor, no path).
+    let open = std::fs::File::open(&src).unwrap();
+    let ids = phone.node.send(
+        laptop.node.fingerprint(),
+        vec![Outgoing::Open {
+            file: open,
+            name: "shared.jpg".into(),
+        }],
+    );
+    let path = wait_for(&mut laptop.events, |e| match e {
+        NodeEvent::TransferDone { path, .. } => Some(path.clone()),
+        NodeEvent::TransferFailed { error, .. } => panic!("receive failed: {error}"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(path, laptop.downloads.join("shared.jpg"));
     assert!(std::fs::read(&path).unwrap() == data);
     wait_for(&mut phone.events, |e| match e {
         NodeEvent::TransferDone { id, .. } if *id == ids[0] => Some(()),

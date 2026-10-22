@@ -16,7 +16,7 @@ pub mod transfer;
 
 pub use error::{Error, Result};
 pub use identity::{Fingerprint, Identity, TrustedPeers};
-pub use node::{Direction, Node, NodeConfig, NodeEvent, Peer};
+pub use node::{Direction, Node, NodeConfig, NodeEvent, Outgoing, Peer};
 pub use tls::Tls;
 pub use transfer::{ReceivedFile, TransferStats, receive_file, send_file};
 

@@ -41,6 +41,15 @@ class Transfer {
   }
 }
 
+/// Files waiting for the user to pick a device. [fromOutside] is true when
+/// they came from another app, which Nudge then returns to once sending starts.
+class FilesToSend {
+  const FilesToSend(this.files, {required this.fromOutside});
+
+  final List<OutgoingFile> files;
+  final bool fromOutside;
+}
+
 class NudgeController extends ChangeNotifier {
   NudgeController(this.app) {
     _subscription = app.events().listen(_onEvent);
@@ -79,9 +88,33 @@ class NudgeController extends ChangeNotifier {
     notifyListeners();
   }
 
-  void send(DeviceInfo device, List<String> paths) {
-    if (paths.isEmpty) return;
-    app.sendFiles(deviceId: device.id, paths: paths);
+  void send(DeviceInfo device, List<OutgoingFile> files) {
+    final paths = [for (final f in files) ?f.path];
+    final open = [
+      for (final f in files)
+        if (f.fd case final fd?) OpenFile(fd: fd, name: f.name),
+    ];
+    if (paths.isNotEmpty) app.sendFiles(deviceId: device.id, paths: paths);
+    if (open.isNotEmpty) app.sendOpenFiles(deviceId: device.id, files: open);
+  }
+
+  // Offers made before the home screen is listening wait here.
+  final _unclaimed = <FilesToSend>[];
+  late final StreamController<FilesToSend> _toSend = StreamController.broadcast(
+    onListen: () => scheduleMicrotask(() {
+      _unclaimed.forEach(_toSend.add);
+      _unclaimed.clear();
+    }),
+  );
+
+  /// Files handed to Nudge from outside (share sheet, tile, Explorer, a drop)
+  /// that need a device chosen. The home screen listens.
+  Stream<FilesToSend> get filesToSend => _toSend.stream;
+
+  void offer(List<OutgoingFile> files, {bool fromOutside = true}) {
+    if (files.isEmpty) return;
+    final request = FilesToSend(files, fromOutside: fromOutside);
+    _toSend.hasListener ? _toSend.add(request) : _unclaimed.add(request);
   }
 
   void unpair(DeviceInfo device) {
@@ -138,7 +171,6 @@ class NudgeController extends ChangeNotifier {
           ..took = Duration(microseconds: (seconds * 1e6).round());
         // Speed over this connection's bytes (a resumed file sends fewer).
         if (seconds > 0) t.bytesPerSec = bytes / seconds;
-        if (t.incoming) unawaited(announceReceivedFile(path));
       case AppEvent_TransferFailed(:final id, :final error):
         final t = _transfer(id);
         if (t == null) return;
@@ -153,6 +185,7 @@ class NudgeController extends ChangeNotifier {
   void dispose() {
     _subscription.cancel();
     _pairing.close();
+    _toSend.close();
     super.dispose();
   }
 }

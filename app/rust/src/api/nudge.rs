@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use flutter_rust_bridge::frb;
-use nudge_core::{Direction, Fingerprint, Node, NodeConfig, NodeEvent, Peer};
+use nudge_core::{Direction, Fingerprint, Node, NodeConfig, NodeEvent, Outgoing, Peer};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -265,6 +265,47 @@ impl NudgeApp {
         let paths = paths.into_iter().map(PathBuf::from).collect();
         let ids = self.node.send_files(parse_id(&device_id)?, paths);
         Ok(ids.into_iter().map(|id| id as i64).collect())
+    }
+
+    /// Send files the platform has already opened (Android shares arrive
+    /// as open descriptors, not paths). Takes ownership of each descriptor
+    /// and closes it when its transfer ends. Unix only.
+    #[frb(sync)]
+    pub fn send_open_files(&self, device_id: String, files: Vec<OpenFile>) -> Result<Vec<i64>> {
+        let peer = parse_id(&device_id)?;
+        let items = files
+            .into_iter()
+            .map(OpenFile::into_outgoing)
+            .collect::<Result<Vec<_>>>()?;
+        let _guard = runtime().enter();
+        let ids = self.node.send(peer, items);
+        Ok(ids.into_iter().map(|id| id as i64).collect())
+    }
+}
+
+/// A file the platform opened for us: its descriptor and display name.
+#[derive(Debug, Clone)]
+pub struct OpenFile {
+    pub fd: i32,
+    pub name: String,
+}
+
+impl OpenFile {
+    #[cfg(unix)]
+    fn into_outgoing(self) -> Result<Outgoing> {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        anyhow::ensure!(self.fd >= 0, "invalid file descriptor for {}", self.name);
+        // SAFETY: the caller hands over an open descriptor it no longer uses.
+        let fd = unsafe { OwnedFd::from_raw_fd(self.fd) };
+        Ok(Outgoing::Open {
+            file: fd.into(),
+            name: self.name,
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn into_outgoing(self) -> Result<Outgoing> {
+        anyhow::bail!("sending open files isn't supported on this platform")
     }
 }
 

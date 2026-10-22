@@ -1,3 +1,7 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 
@@ -6,11 +10,34 @@ import '../format.dart';
 import '../platform.dart';
 import '../src/rust/api/nudge.dart';
 import 'pair.dart';
+import 'send_sheet.dart';
 
-class HomeScreen extends StatelessWidget {
+class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, required this.controller});
 
   final NudgeController controller;
+
+  @override
+  State<HomeScreen> createState() => _HomeScreenState();
+}
+
+class _HomeScreenState extends State<HomeScreen> {
+  NudgeController get controller => widget.controller;
+  late final StreamSubscription<FilesToSend> _incoming;
+
+  @override
+  void initState() {
+    super.initState();
+    _incoming = controller.filesToSend.listen((request) {
+      if (mounted) chooseAndSend(context, controller, request);
+    });
+  }
+
+  @override
+  void dispose() {
+    _incoming.cancel();
+    super.dispose();
+  }
 
   Future<void> _openPairing(BuildContext context) async {
     final device = await Navigator.of(context)
@@ -22,12 +49,34 @@ class HomeScreen extends StatelessWidget {
   }
 
   Future<void> _send(BuildContext context, DeviceInfo device) async {
-    final paths = await pickFiles();
-    controller.send(device, paths);
+    final files = await pickFiles();
+    controller.send(device, files);
+  }
+
+  bool _dragging = false;
+
+  /// Windows: files dropped on the window. Folders wait for folder transfer.
+  void _onDrop(DropDoneDetails details) {
+    setState(() => _dragging = false);
+    final files = [
+      for (final item in details.files)
+        if (FileSystemEntity.isFileSync(item.path)) OutgoingFile.fromPath(item.path),
+    ];
+    controller.offer(files, fromOutside: false);
   }
 
   @override
   Widget build(BuildContext context) {
+    return DropTarget(
+      enable: Platform.isWindows,
+      onDragEntered: (_) => setState(() => _dragging = true),
+      onDragExited: (_) => setState(() => _dragging = false),
+      onDragDone: _onDrop,
+      child: Stack(children: [_buildHome(context), if (_dragging) const _DropHint()]),
+    );
+  }
+
+  Widget _buildHome(BuildContext context) {
     return ListenableBuilder(
       listenable: controller,
       builder: (context, _) {
@@ -114,6 +163,42 @@ class HomeScreen extends StatelessWidget {
       ),
     );
     if (ok == true) controller.unpair(device);
+  }
+}
+
+/// Shown while files are dragged over the window.
+class _DropHint extends StatelessWidget {
+  const _DropHint();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Container(
+          margin: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: scheme.primaryContainer.withValues(alpha: 0.92),
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: scheme.primary, width: 2),
+          ),
+          child: Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.file_upload_outlined, size: 48, color: scheme.onPrimaryContainer),
+                const SizedBox(height: 12),
+                Text(
+                  'Drop to send',
+                  style: Theme.of(context).textTheme.titleLarge
+                      ?.copyWith(color: scheme.onPrimaryContainer),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 

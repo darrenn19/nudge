@@ -138,8 +138,28 @@ where
         .and_then(|n| n.to_str())
         .ok_or_else(|| Error::BadFileName(path.display().to_string()))?
         .to_owned();
-    let file = File::open(path)?;
+    send_open_file_tracked(stream, File::open(path)?, name, progress).await
+}
+
+/// Send a file that is already open, under `name`. Android shares files as
+/// open descriptors rather than paths, so this is how they go out.
+pub async fn send_open_file_tracked<S>(
+    stream: &mut S,
+    file: File,
+    name: String,
+    progress: &Progress,
+) -> Result<TransferStats>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let metadata = file.metadata()?;
+    // Resume needs to seek, and the offer needs a size up front.
+    if !metadata.is_file() {
+        return Err(Error::Io(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{name} isn't a regular file"),
+        )));
+    }
     let offer = Offer {
         name,
         size: metadata.len(),

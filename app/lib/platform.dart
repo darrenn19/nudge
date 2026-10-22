@@ -1,4 +1,5 @@
-// Per-platform details: names, folders, and Android's multicast lock.
+// Per-platform details: names, folders, picking and sharing files, and
+// Android's notifications and multicast lock.
 
 import 'dart:io';
 
@@ -71,49 +72,114 @@ Future<void> enableMulticast() async {
   if (Platform.isAndroid) await _channel.invokeMethod('acquireMulticastLock');
 }
 
-/// Tell Android's media index about a received file so it shows up in
-/// Files and Gallery.
-Future<void> announceReceivedFile(String path) async {
-  if (Platform.isAndroid) {
-    await _channel.invokeMethod('scanFile', {'path': path});
-  }
-}
+/// A file waiting to be sent: a path, or (Android) a descriptor the system
+/// opened for us. Descriptors are owned until sent or [closeUnsent].
+class OutgoingFile {
+  const OutgoingFile.path(String this.path, {required this.name, required this.size}) : fd = null;
+  const OutgoingFile.fd(int this.fd, {required this.name, required this.size}) : path = null;
 
-/// Let the user choose files to send. Returns local paths.
-///
-/// Android may hand back content URIs instead of paths; those are copied to
-/// the cache first. That copy is slow for big videos and goes away when the
-/// share-sheet work (Phase 3) streams straight from file descriptors.
-Future<List<String>> pickFiles() async {
-  final picked = await FilePicker.pickFiles(dialogTitle: 'Choose files to send');
-  final paths = <String>[];
-  for (final file in picked) {
-    final path = file.path;
-    if (path != null) {
-      paths.add(path);
-      continue;
-    }
-    final tmp = await getTemporaryDirectory();
-    final dir = await Directory(
-      '${tmp.path}${Platform.pathSeparator}outgoing${Platform.pathSeparator}'
-      '${DateTime.now().microsecondsSinceEpoch}',
-    ).create(recursive: true);
-    final copy = '${dir.path}${Platform.pathSeparator}${file.name}';
-    await file.xFile.saveTo(copy);
-    paths.add(copy);
-  }
-  return paths;
-}
+  final String? path;
+  final int? fd;
+  final String name;
+  final int size;
 
-/// Remove copies made by [pickFiles] in earlier sessions.
-Future<void> clearPickedCopies() async {
-  try {
-    await FilePicker.clearTemporaryFiles();
-    final outgoing = Directory(
-      '${(await getTemporaryDirectory()).path}${Platform.pathSeparator}outgoing',
+  static OutgoingFile fromMap(Map<Object?, Object?> m) {
+    final name = m['name'] as String? ?? 'file';
+    final size = (m['size'] as num?)?.toInt() ?? 0;
+    final fd = m['fd'] as int?;
+    return fd != null
+        ? OutgoingFile.fd(fd, name: name, size: size)
+        : OutgoingFile.path(m['path'] as String, name: name, size: size);
+  }
+
+  static OutgoingFile fromPath(String path) {
+    final file = File(path);
+    return OutgoingFile.path(
+      path,
+      name: path.split(RegExp(r'[\/]')).last,
+      size: file.existsSync() ? file.lengthSync() : 0,
     );
-    if (await outgoing.exists()) await outgoing.delete(recursive: true);
-  } catch (_) {
-    // Best effort.
+  }
+}
+
+/// Let the user choose files to send.
+///
+/// On Android these come back as open descriptors, read in place: no copy,
+/// however big the file.
+Future<List<OutgoingFile>> pickFiles() async {
+  if (Platform.isAndroid) {
+    final picked = await _activity.invokeListMethod<Map<Object?, Object?>>('pickFiles');
+    return [for (final m in picked ?? const <Map<Object?, Object?>>[]) OutgoingFile.fromMap(m)];
+  }
+  final picked = await FilePicker.pickFiles(dialogTitle: 'Choose files to send');
+  return [
+    for (final file in picked)
+      if (file.path != null) OutgoingFile.fromPath(file.path!),
+  ];
+}
+
+/// Release files the user decided not to send.
+Future<void> closeUnsent(List<OutgoingFile> files) async {
+  final fds = [for (final f in files) ?f.fd];
+  if (fds.isNotEmpty) await _channel.invokeMethod('closeFiles', {'fds': fds});
+}
+
+// Android: files shared with Nudge, and the notifications.
+
+const _activity = MethodChannel('nudge/activity');
+
+/// Calls [onFiles] with files shared to Nudge (share sheet, quick settings
+/// tile), now and whenever more arrive.
+Future<void> listenForShares(void Function(List<OutgoingFile> files) onFiles) async {
+  if (!Platform.isAndroid) return;
+  Future<void> take() async {
+    try {
+      final shared = await _activity.invokeListMethod<Map<Object?, Object?>>('takeShared');
+      if (shared != null && shared.isNotEmpty) onFiles(shared.map(OutgoingFile.fromMap).toList());
+    } on MissingPluginException {
+      // No window yet; files wait in the activity until it asks again.
+    }
+  }
+
+  _activity.setMethodCallHandler((call) async {
+    if (call.method == 'sharedAvailable') await take();
+  });
+  await take();
+}
+
+/// Go back to the app the user shared from. Transfers carry on.
+Future<void> leaveApp() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await _activity.invokeMethod('moveToBack');
+  } on MissingPluginException {
+    // Window already gone.
+  }
+}
+
+/// Show (or update) the ongoing transfer notification. [progress] is 0–100,
+/// or -1 when unknown. Also keeps Android from stopping the app mid-transfer.
+Future<void> showTransferProgress({
+  required String title,
+  required String text,
+  required int progress,
+}) async {
+  if (!Platform.isAndroid) return;
+  await _channel.invokeMethod('transfersActive', {
+    'title': title,
+    'text': text,
+    'progress': progress,
+  });
+}
+
+Future<void> hideTransferProgress() async {
+  if (Platform.isAndroid) await _channel.invokeMethod('transfersIdle');
+}
+
+/// "Received photo.jpg from Laptop", with an Open action. Also adds the file
+/// to Android's media index so it shows up in Files and Gallery.
+Future<void> notifyReceived({required String path, required String from}) async {
+  if (Platform.isAndroid) {
+    await _channel.invokeMethod('notifyReceived', {'path': path, 'from': from});
   }
 }
