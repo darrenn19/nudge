@@ -14,7 +14,7 @@ import java.io.File
 /**
  * Questions only Android can answer, and things only it can do, that don't
  * need a window: names and folders, the multicast lock, notifications and
- * the foreground service. Lives as long as the process.
+ * the background service. Lives as long as the process.
  */
 class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHandler {
     private var multicastLock: WifiManager.MulticastLock? = null
@@ -35,7 +35,7 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 result.success(null)
             }
             "transfersActive" -> {
-                TransferService.update(
+                NudgeService.showProgress(
                     context,
                     call.argument<String>("title") ?: "Nudge",
                     call.argument<String>("text") ?: "",
@@ -44,7 +44,7 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 result.success(null)
             }
             "transfersIdle" -> {
-                TransferService.stop(context)
+                NudgeService.idle(context)
                 result.success(null)
             }
             "notifyReceived" -> {

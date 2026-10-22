@@ -14,16 +14,38 @@ struct TestNode {
     downloads: std::path::PathBuf,
 }
 
+/// A free UDP port below the OS's random-port range. Discovery falls back
+/// to a random port when its own is taken, and that must never land on a
+/// port another test is using, or the tests hear each other.
 fn free_udp_port() -> u16 {
-    std::net::UdpSocket::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT: AtomicU16 = AtomicU16::new(0);
+    let _ = NEXT.compare_exchange(
+        0,
+        20_000 + (std::process::id() % 4_000) as u16 * 2,
+        Ordering::SeqCst,
+        Ordering::SeqCst,
+    );
+    loop {
+        let port = NEXT.fetch_add(1, Ordering::SeqCst);
+        assert!(port < 30_000, "no free test ports");
+        if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Loopback only (no firewall prompts), beacons only (mDNS on CI is flaky).
 async fn start(name: &str, udp_port: u16, other_udp: u16) -> TestNode {
+    start_with(name, udp_port, other_udp, |_| {}).await
+}
+
+async fn start_with(
+    name: &str,
+    udp_port: u16,
+    other_udp: u16,
+    tweak: impl FnOnce(&mut NodeConfig),
+) -> TestNode {
     let data = tempfile::tempdir().unwrap();
     let downloads = tempfile::tempdir().unwrap();
     let mut config = NodeConfig::new(
@@ -40,7 +62,12 @@ async fn start(name: &str, udp_port: u16, other_udp: u16) -> TestNode {
         udp_port,
         extra_targets: vec![SocketAddr::from((Ipv4Addr::LOCALHOST, other_udp))],
     };
+    tweak(&mut config);
     let (node, events) = Node::start(config).await.unwrap();
+    assert!(
+        node.discovery_running(),
+        "couldn't bind UDP port {udp_port}"
+    );
     TestNode {
         node,
         events,
@@ -216,4 +243,84 @@ async fn wrong_code_is_rejected() {
         phone.node.pair("https://example.com").await,
         Err(Error::BadPairingCode(_))
     ));
+}
+
+/// Two nodes that see and trust each other.
+async fn paired(laptop_idle: Option<Duration>) -> (TestNode, TestNode) {
+    let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+    let mut laptop = start_with("Laptop", udp_a, udp_b, |c| {
+        if let Some(idle) = laptop_idle {
+            c.idle_timeout = idle;
+        }
+    })
+    .await;
+    let mut phone = start("Phone", udp_b, udp_a).await;
+    wait_until_seen(&mut phone, &laptop).await;
+    wait_until_seen(&mut laptop, &phone).await;
+    let code = laptop.node.start_pairing();
+    phone.node.pair(&code).await.unwrap();
+    (laptop, phone)
+}
+
+/// Waits for every transfer in `ids` to finish on the sender.
+async fn wait_sent(events: &mut UnboundedReceiver<NodeEvent>, ids: &[u64]) {
+    let mut left: Vec<u64> = ids.to_vec();
+    while !left.is_empty() {
+        let id = wait_for(events, |e| match e {
+            NodeEvent::TransferDone { id, .. } => Some(*id),
+            NodeEvent::TransferFailed { error, .. } => panic!("send failed: {error}"),
+            _ => None,
+        })
+        .await;
+        left.retain(|x| *x != id);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_over_warmed_connections() {
+    let (laptop, mut phone) = paired(None).await;
+    let src_dir = tempfile::tempdir().unwrap();
+    let files: Vec<_> = (0..3)
+        .map(|i| {
+            let path = src_dir.path().join(format!("file{i}.bin"));
+            std::fs::write(&path, vec![i as u8; 100_000 + i]).unwrap();
+            path
+        })
+        .collect();
+
+    // Warm before the user picks; warming twice is harmless.
+    phone.node.warm(laptop.node.fingerprint());
+    phone.node.warm(laptop.node.fingerprint());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let ids = phone
+        .node
+        .send_files(laptop.node.fingerprint(), files.clone());
+    wait_sent(&mut phone.events, &ids).await;
+    for (i, src) in files.iter().enumerate() {
+        let got = std::fs::read(laptop.downloads.join(format!("file{i}.bin"))).unwrap();
+        assert_eq!(got, std::fs::read(src).unwrap());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_warmed_connection_is_retried() {
+    // The laptop drops idle connections quickly, so the phone's warmed one
+    // is dead by the time it's used.
+    let (laptop, mut phone) = paired(Some(Duration::from_millis(200))).await;
+    let src_dir = tempfile::tempdir().unwrap();
+    let src = src_dir.path().join("late.bin");
+    std::fs::write(&src, vec![7u8; 5_000_000]).unwrap();
+
+    phone.node.warm(laptop.node.fingerprint());
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    let ids = phone
+        .node
+        .send_files(laptop.node.fingerprint(), vec![src.clone()]);
+    wait_sent(&mut phone.events, &ids).await;
+    assert_eq!(
+        std::fs::read(laptop.downloads.join("late.bin")).unwrap(),
+        std::fs::read(&src).unwrap()
+    );
 }

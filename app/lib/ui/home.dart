@@ -45,10 +45,14 @@ class _HomeScreenState extends State<HomeScreen> {
     if (device != null && context.mounted) {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('Paired with ${device.name}')));
+      // Now that there's somewhere to send, make sure Android won't stop
+      // Nudge mid-transfer or while waiting to receive. Asked once.
+      unawaited(askToRunInBackground());
     }
   }
 
   Future<void> _send(BuildContext context, DeviceInfo device) async {
+    controller.warmUp(device);
     final files = await pickFiles();
     controller.send(device, files);
   }
@@ -69,7 +73,10 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return DropTarget(
       enable: Platform.isWindows,
-      onDragEntered: (_) => setState(() => _dragging = true),
+      onDragEntered: (_) {
+        setState(() => _dragging = true);
+        controller.warmUp();
+      },
       onDragExited: (_) => setState(() => _dragging = false),
       onDragDone: _onDrop,
       child: Stack(children: [_buildHome(context), if (_dragging) const _DropHint()]),
@@ -128,7 +135,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         for (final d in paired)
                           _DeviceTile(
                             device: d,
-                            onTap: d.online ? () => _send(context, d) : null,
+                            onTap: d.reachable ? () => _send(context, d) : null,
                             onUnpair: () => _confirmUnpair(context, d),
                           ),
                       ],
@@ -285,14 +292,19 @@ class _DeviceTile extends StatelessWidget {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final status = device.paired
-        ? (device.online ? 'Nearby · tap to send' : 'Not nearby')
+        ? (device.online
+              ? 'Nearby · tap to send'
+              // Seen earlier: most likely a phone with its screen off.
+              : device.reachable
+              ? 'Not seen just now · tap to try'
+              : 'Not nearby')
         : 'Not paired';
 
     return Card(
       margin: const EdgeInsets.symmetric(vertical: 4),
       child: ListTile(
         contentPadding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
-        enabled: !device.paired || device.online,
+        enabled: !device.paired || device.reachable,
         onTap: onTap,
         leading: CircleAvatar(
           backgroundColor: device.online ? scheme.primaryContainer : scheme.surfaceContainerHighest,

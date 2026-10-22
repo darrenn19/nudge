@@ -9,8 +9,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'frb_generated.dart';
-import 'frb_generated.io.dart'
-    if (dart.library.js_interop) 'frb_generated.web.dart';
+import 'frb_generated.io.dart' if (dart.library.js_interop) 'frb_generated.web.dart';
 
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
@@ -49,12 +48,10 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   static void dispose() => instance.disposeImpl();
 
   @override
-  ApiImplConstructor<RustLibApiImpl, RustLibWire> get apiImplConstructor =>
-      RustLibApiImpl.new;
+  ApiImplConstructor<RustLibApiImpl, RustLibWire> get apiImplConstructor => RustLibApiImpl.new;
 
   @override
-  WireConstructor<RustLibWire> get wireConstructor =>
-      RustLibWire.fromExternalLibrary;
+  WireConstructor<RustLibWire> get wireConstructor => RustLibWire.fromExternalLibrary;
 
   @override
   Future<void> executeRustInitializers() async {
@@ -69,15 +66,14 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 955880271;
+  int get rustContentHash => -856850838;
 
-  static const kDefaultExternalLibraryLoaderConfig =
-      ExternalLibraryLoaderConfig(
-        stem: 'nudge_bridge',
-        ioDirectory: 'rust/target/release/',
-        webPrefix: 'pkg/',
-        wasmBindgenName: 'wasm_bindgen',
-      );
+  static const kDefaultExternalLibraryLoaderConfig = ExternalLibraryLoaderConfig(
+    stem: 'nudge_bridge',
+    ioDirectory: 'rust/target/release/',
+    webPrefix: 'pkg/',
+    wasmBindgenName: 'wasm_bindgen',
+  );
 }
 
 abstract class RustLibApi extends BaseApi {
@@ -95,10 +91,7 @@ abstract class RustLibApi extends BaseApi {
 
   Stream<AppEvent> crateApiNudgeNudgeAppEvents({required NudgeApp that});
 
-  Future<DeviceInfo> crateApiNudgeNudgeAppPair({
-    required NudgeApp that,
-    required String code,
-  });
+  Future<DeviceInfo> crateApiNudgeNudgeAppPair({required NudgeApp that, required String code});
 
   void crateApiNudgeNudgeAppRefresh({required NudgeApp that});
 
@@ -114,10 +107,7 @@ abstract class RustLibApi extends BaseApi {
     required List<OpenFile> files,
   });
 
-  void crateApiNudgeNudgeAppSetDownloadDir({
-    required NudgeApp that,
-    required String dir,
-  });
+  void crateApiNudgeNudgeAppSetDownloadDir({required NudgeApp that, required String dir});
 
   Future<NudgeApp> crateApiNudgeNudgeAppStart({
     required String dataDir,
@@ -128,18 +118,15 @@ abstract class RustLibApi extends BaseApi {
 
   String crateApiNudgeNudgeAppStartPairing({required NudgeApp that});
 
-  void crateApiNudgeNudgeAppUnpair({
-    required NudgeApp that,
-    required String deviceId,
-  });
+  void crateApiNudgeNudgeAppUnpair({required NudgeApp that, required String deviceId});
+
+  void crateApiNudgeNudgeAppWarm({required NudgeApp that, required String deviceId});
 
   Future<void> crateApiNudgeInitApp();
 
-  RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_NudgeApp;
+  RustArcIncrementStrongCountFnType get rust_arc_increment_strong_count_NudgeApp;
 
-  RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_NudgeApp;
+  RustArcDecrementStrongCountFnType get rust_arc_decrement_strong_count_NudgeApp;
 
   CrossPlatformFinalizerArg get rust_arc_decrement_strong_count_NudgeAppPtr;
 }
@@ -164,10 +151,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 1)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppCancelPairingConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -176,10 +160,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppCancelPairingConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_cancel_pairing",
-        argNames: ["that"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_cancel_pairing", argNames: ["that"]);
 
   @override
   String crateApiNudgeNudgeAppDeviceId({required NudgeApp that}) {
@@ -193,10 +174,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 2)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppDeviceIdConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -219,10 +197,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 3)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppDeviceNameConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -231,10 +206,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppDeviceNameConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_device_name",
-        argNames: ["that"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_device_name", argNames: ["that"]);
 
   @override
   List<DeviceInfo> crateApiNudgeNudgeAppDevices({required NudgeApp that}) {
@@ -248,10 +220,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 4)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_list_device_info,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_list_device_info, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppDevicesConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -274,10 +243,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 5)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_bool,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_bool, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppDiscoveryRunningConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -286,10 +252,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppDiscoveryRunningConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_discovery_running",
-        argNames: ["that"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_discovery_running", argNames: ["that"]);
 
   @override
   String crateApiNudgeNudgeAppDownloadDir({required NudgeApp that}) {
@@ -303,10 +266,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 6)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppDownloadDirConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -315,10 +275,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppDownloadDirConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_download_dir",
-        argNames: ["that"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_download_dir", argNames: ["that"]);
 
   @override
   Stream<AppEvent> crateApiNudgeNudgeAppEvents({required NudgeApp that}) {
@@ -333,17 +290,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
               serializer,
             );
             sse_encode_StreamSink_app_event_Sse(sink, serializer);
-            pdeCallFfi(
-              generalizedFrbRustBinding,
-              serializer,
-              funcId: 7,
-              port: port_,
-            );
+            pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 7, port: port_);
           },
-          codec: SseCodec(
-            decodeSuccessData: sse_decode_unit,
-            decodeErrorData: null,
-          ),
+          codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
           constMeta: kCrateApiNudgeNudgeAppEventsConstMeta,
           argValues: [that, sink],
           apiImpl: this,
@@ -354,16 +303,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppEventsConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_events",
-        argNames: ["that", "sink"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_events", argNames: ["that", "sink"]);
 
   @override
-  Future<DeviceInfo> crateApiNudgeNudgeAppPair({
-    required NudgeApp that,
-    required String code,
-  }) {
+  Future<DeviceInfo> crateApiNudgeNudgeAppPair({required NudgeApp that, required String code}) {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -373,12 +316,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(code, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 8,
-            port: port_,
-          );
+          pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 8, port: port_);
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_device_info,
@@ -391,10 +329,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNudgeNudgeAppPairConstMeta => const TaskConstMeta(
-    debugName: "NudgeApp_pair",
-    argNames: ["that", "code"],
-  );
+  TaskConstMeta get kCrateApiNudgeNudgeAppPairConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_pair", argNames: ["that", "code"]);
 
   @override
   void crateApiNudgeNudgeAppRefresh({required NudgeApp that}) {
@@ -408,10 +344,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 9)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppRefreshConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -451,11 +384,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNudgeNudgeAppSendFilesConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_send_files",
-        argNames: ["that", "deviceId", "paths"],
-      );
+  TaskConstMeta get kCrateApiNudgeNudgeAppSendFilesConstMeta => const TaskConstMeta(
+    debugName: "NudgeApp_send_files",
+    argNames: ["that", "deviceId", "paths"],
+  );
 
   @override
   Int64List crateApiNudgeNudgeAppSendOpenFiles({
@@ -486,17 +418,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
   }
 
-  TaskConstMeta get kCrateApiNudgeNudgeAppSendOpenFilesConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_send_open_files",
-        argNames: ["that", "deviceId", "files"],
-      );
+  TaskConstMeta get kCrateApiNudgeNudgeAppSendOpenFilesConstMeta => const TaskConstMeta(
+    debugName: "NudgeApp_send_open_files",
+    argNames: ["that", "deviceId", "files"],
+  );
 
   @override
-  void crateApiNudgeNudgeAppSetDownloadDir({
-    required NudgeApp that,
-    required String dir,
-  }) {
+  void crateApiNudgeNudgeAppSetDownloadDir({required NudgeApp that, required String dir}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
@@ -508,10 +436,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(dir, serializer);
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 12)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppSetDownloadDirConstMeta,
         argValues: [that, dir],
         apiImpl: this,
@@ -520,10 +445,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppSetDownloadDirConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_set_download_dir",
-        argNames: ["that", "dir"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_set_download_dir", argNames: ["that", "dir"]);
 
   @override
   Future<NudgeApp> crateApiNudgeNudgeAppStart({
@@ -540,12 +462,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_String(downloadDir, serializer);
           sse_encode_String(deviceName, serializer);
           sse_encode_String(platform, serializer);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 13,
-            port: port_,
-          );
+          pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 13, port: port_);
         },
         codec: SseCodec(
           decodeSuccessData:
@@ -576,10 +493,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 14)!;
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_String,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_String, decodeErrorData: null),
         constMeta: kCrateApiNudgeNudgeAppStartPairingConstMeta,
         argValues: [that],
         apiImpl: this,
@@ -588,16 +502,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppStartPairingConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_start_pairing",
-        argNames: ["that"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_start_pairing", argNames: ["that"]);
 
   @override
-  void crateApiNudgeNudgeAppUnpair({
-    required NudgeApp that,
-    required String deviceId,
-  }) {
+  void crateApiNudgeNudgeAppUnpair({required NudgeApp that, required String deviceId}) {
     return handler.executeSync(
       SyncTask(
         callFfi: () {
@@ -621,10 +529,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   TaskConstMeta get kCrateApiNudgeNudgeAppUnpairConstMeta =>
-      const TaskConstMeta(
-        debugName: "NudgeApp_unpair",
-        argNames: ["that", "deviceId"],
-      );
+      const TaskConstMeta(debugName: "NudgeApp_unpair", argNames: ["that", "deviceId"]);
+
+  @override
+  void crateApiNudgeNudgeAppWarm({required NudgeApp that, required String deviceId}) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          sse_encode_String(deviceId, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 16)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNudgeNudgeAppWarmConstMeta,
+        argValues: [that, deviceId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNudgeNudgeAppWarmConstMeta =>
+      const TaskConstMeta(debugName: "NudgeApp_warm", argNames: ["that", "deviceId"]);
 
   @override
   Future<void> crateApiNudgeInitApp() {
@@ -632,17 +564,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       NormalTask(
         callFfi: (port_) {
           final serializer = SseSerializer(generalizedFrbRustBinding);
-          pdeCallFfi(
-            generalizedFrbRustBinding,
-            serializer,
-            funcId: 16,
-            port: port_,
-          );
+          pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 17, port: port_);
         },
-        codec: SseCodec(
-          decodeSuccessData: sse_decode_unit,
-          decodeErrorData: null,
-        ),
+        codec: SseCodec(decodeSuccessData: sse_decode_unit, decodeErrorData: null),
         constMeta: kCrateApiNudgeInitAppConstMeta,
         argValues: [],
         apiImpl: this,
@@ -653,12 +577,10 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   TaskConstMeta get kCrateApiNudgeInitAppConstMeta =>
       const TaskConstMeta(debugName: "init_app", argNames: []);
 
-  RustArcIncrementStrongCountFnType
-  get rust_arc_increment_strong_count_NudgeApp => wire
+  RustArcIncrementStrongCountFnType get rust_arc_increment_strong_count_NudgeApp => wire
       .rust_arc_increment_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp;
 
-  RustArcDecrementStrongCountFnType
-  get rust_arc_decrement_strong_count_NudgeApp => wire
+  RustArcDecrementStrongCountFnType get rust_arc_decrement_strong_count_NudgeApp => wire
       .rust_arc_decrement_strong_count_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp;
 
   @protected
@@ -686,8 +608,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  NudgeApp
-  dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+  NudgeApp dco_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -713,9 +634,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       case 0:
         return AppEvent_DevicesChanged();
       case 1:
-        return AppEvent_Paired(
-          device: dco_decode_box_autoadd_device_info(raw[1]),
-        );
+        return AppEvent_Paired(device: dco_decode_box_autoadd_device_info(raw[1]));
       case 2:
         return AppEvent_PairingClosed();
       case 3:
@@ -767,8 +686,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   DeviceInfo dco_decode_device_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 6)
-      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    if (arr.length != 7) throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return DeviceInfo(
       id: dco_decode_String(arr[0]),
       shortId: dco_decode_String(arr[1]),
@@ -776,6 +694,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       platform: dco_decode_String(arr[3]),
       paired: dco_decode_bool(arr[4]),
       online: dco_decode_bool(arr[5]),
+      reachable: dco_decode_bool(arr[6]),
     );
   }
 
@@ -831,12 +750,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   OpenFile dco_decode_open_file(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 2)
-      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
-    return OpenFile(
-      fd: dco_decode_i_32(arr[0]),
-      name: dco_decode_String(arr[1]),
-    );
+    if (arr.length != 2) throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return OpenFile(fd: dco_decode_i_32(arr[0]), name: dco_decode_String(arr[1]));
   }
 
   @protected
@@ -889,8 +804,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  NudgeApp
-  sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+  NudgeApp sse_decode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
     SseDeserializer deserializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -901,9 +815,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  RustStreamSink<AppEvent> sse_decode_StreamSink_app_event_Sse(
-    SseDeserializer deserializer,
-  ) {
+  RustStreamSink<AppEvent> sse_decode_StreamSink_app_event_Sse(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     throw UnimplementedError('Unreachable ()');
   }
@@ -995,6 +907,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_platform = sse_decode_String(deserializer);
     var var_paired = sse_decode_bool(deserializer);
     var var_online = sse_decode_bool(deserializer);
+    var var_reachable = sse_decode_bool(deserializer);
     return DeviceInfo(
       id: var_id,
       shortId: var_shortId,
@@ -1002,6 +915,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       platform: var_platform,
       paired: var_paired,
       online: var_online,
+      reachable: var_reachable,
     );
   }
 
@@ -1099,51 +1013,36 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_AnyhowException(
-    AnyhowException self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_AnyhowException(AnyhowException self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_String(self.message, serializer);
   }
 
   @protected
-  void
-  sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+  void sse_encode_Auto_Owned_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
     NudgeApp self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_usize(
-      (self as NudgeAppImpl).frbInternalSseEncode(move: true),
-      serializer,
-    );
+    sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: true), serializer);
   }
 
   @protected
-  void
-  sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+  void sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
     NudgeApp self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_usize(
-      (self as NudgeAppImpl).frbInternalSseEncode(move: false),
-      serializer,
-    );
+    sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: false), serializer);
   }
 
   @protected
-  void
-  sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+  void sse_encode_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
     NudgeApp self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
-    sse_encode_usize(
-      (self as NudgeAppImpl).frbInternalSseEncode(move: null),
-      serializer,
-    );
+    sse_encode_usize((self as NudgeAppImpl).frbInternalSseEncode(move: null), serializer);
   }
 
   @protected
@@ -1231,10 +1130,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_box_autoadd_device_info(
-    DeviceInfo self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_box_autoadd_device_info(DeviceInfo self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_device_info(self, serializer);
   }
@@ -1248,6 +1144,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.platform, serializer);
     sse_encode_bool(self.paired, serializer);
     sse_encode_bool(self.online, serializer);
+    sse_encode_bool(self.reachable, serializer);
   }
 
   @protected
@@ -1278,10 +1175,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_device_info(
-    List<DeviceInfo> self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_list_device_info(List<DeviceInfo> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
@@ -1290,10 +1184,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_open_file(
-    List<OpenFile> self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_list_open_file(List<OpenFile> self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
@@ -1302,20 +1193,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
-  void sse_encode_list_prim_i_64_strict(
-    Int64List self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_list_prim_i_64_strict(Int64List self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putInt64List(self);
   }
 
   @protected
-  void sse_encode_list_prim_u_8_strict(
-    Uint8List self,
-    SseSerializer serializer,
-  ) {
+  void sse_encode_list_prim_u_8_strict(Uint8List self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
@@ -1357,76 +1242,62 @@ class NudgeAppImpl extends RustOpaque implements NudgeApp {
     : super.frbInternalSseDecode(ptr, externalSizeOnNative, _kStaticData);
 
   static final _kStaticData = RustArcStaticData(
-    rustArcIncrementStrongCount:
-        RustLib.instance.api.rust_arc_increment_strong_count_NudgeApp,
-    rustArcDecrementStrongCount:
-        RustLib.instance.api.rust_arc_decrement_strong_count_NudgeApp,
+    rustArcIncrementStrongCount: RustLib.instance.api.rust_arc_increment_strong_count_NudgeApp,
+    rustArcDecrementStrongCount: RustLib.instance.api.rust_arc_decrement_strong_count_NudgeApp,
     rustArcDecrementStrongCountPtr:
         RustLib.instance.api.rust_arc_decrement_strong_count_NudgeAppPtr,
   );
 
-  void cancelPairing() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppCancelPairing(that: this);
+  void cancelPairing() => RustLib.instance.api.crateApiNudgeNudgeAppCancelPairing(that: this);
 
-  String deviceId() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppDeviceId(that: this);
+  String deviceId() => RustLib.instance.api.crateApiNudgeNudgeAppDeviceId(that: this);
 
-  String deviceName() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppDeviceName(that: this);
+  String deviceName() => RustLib.instance.api.crateApiNudgeNudgeAppDeviceName(that: this);
 
   /// Paired devices first, then unpaired nearby ones.
-  List<DeviceInfo> devices() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppDevices(that: this);
+  List<DeviceInfo> devices() => RustLib.instance.api.crateApiNudgeNudgeAppDevices(that: this);
 
-  bool discoveryRunning() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppDiscoveryRunning(that: this);
+  bool discoveryRunning() => RustLib.instance.api.crateApiNudgeNudgeAppDiscoveryRunning(that: this);
 
-  String downloadDir() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppDownloadDir(that: this);
+  String downloadDir() => RustLib.instance.api.crateApiNudgeNudgeAppDownloadDir(that: this);
 
   /// Deliver events to Dart. Call once; later calls do nothing.
-  Stream<AppEvent> events() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppEvents(that: this);
+  Stream<AppEvent> events() => RustLib.instance.api.crateApiNudgeNudgeAppEvents(that: this);
 
   /// Pair with the device showing `code` (scanned or pasted).
   Future<DeviceInfo> pair({required String code}) =>
       RustLib.instance.api.crateApiNudgeNudgeAppPair(that: this, code: code);
 
   /// Ask nearby devices to announce themselves now.
-  void refresh() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppRefresh(that: this);
+  void refresh() => RustLib.instance.api.crateApiNudgeNudgeAppRefresh(that: this);
 
   /// Send files to a paired device in the background. Returns one
   /// transfer ID per file; progress arrives as events.
-  Int64List sendFiles({
-    required String deviceId,
-    required List<String> paths,
-  }) => RustLib.instance.api.crateApiNudgeNudgeAppSendFiles(
-    that: this,
-    deviceId: deviceId,
-    paths: paths,
-  );
+  Int64List sendFiles({required String deviceId, required List<String> paths}) => RustLib
+      .instance
+      .api
+      .crateApiNudgeNudgeAppSendFiles(that: this, deviceId: deviceId, paths: paths);
 
   /// Send files the platform has already opened (Android shares arrive
   /// as open descriptors, not paths). Takes ownership of each descriptor
   /// and closes it when its transfer ends. Unix only.
-  Int64List sendOpenFiles({
-    required String deviceId,
-    required List<OpenFile> files,
-  }) => RustLib.instance.api.crateApiNudgeNudgeAppSendOpenFiles(
-    that: this,
-    deviceId: deviceId,
-    files: files,
-  );
+  Int64List sendOpenFiles({required String deviceId, required List<OpenFile> files}) => RustLib
+      .instance
+      .api
+      .crateApiNudgeNudgeAppSendOpenFiles(that: this, deviceId: deviceId, files: files);
 
-  void setDownloadDir({required String dir}) => RustLib.instance.api
-      .crateApiNudgeNudgeAppSetDownloadDir(that: this, dir: dir);
+  void setDownloadDir({required String dir}) =>
+      RustLib.instance.api.crateApiNudgeNudgeAppSetDownloadDir(that: this, dir: dir);
 
   /// Show a pairing code: returns the text for the QR code. It works once
   /// and expires after five minutes (`AppEvent::PairingClosed`).
-  String startPairing() =>
-      RustLib.instance.api.crateApiNudgeNudgeAppStartPairing(that: this);
+  String startPairing() => RustLib.instance.api.crateApiNudgeNudgeAppStartPairing(that: this);
 
-  void unpair({required String deviceId}) => RustLib.instance.api
-      .crateApiNudgeNudgeAppUnpair(that: this, deviceId: deviceId);
+  void unpair({required String deviceId}) =>
+      RustLib.instance.api.crateApiNudgeNudgeAppUnpair(that: this, deviceId: deviceId);
+
+  /// Open a connection to a paired, nearby device ahead of a likely send,
+  /// so the send starts without a handshake. Safe to call often.
+  void warm({required String deviceId}) =>
+      RustLib.instance.api.crateApiNudgeNudgeAppWarm(that: this, deviceId: deviceId);
 }

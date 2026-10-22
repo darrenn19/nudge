@@ -14,12 +14,14 @@ import androidx.core.content.FileProvider
 import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
-/** Nudge's two kinds of notification: transfer progress and "received". */
+/** Nudge's notifications: "ready to receive", transfer progress, and "received". */
 object Notifications {
+    private const val READY = "ready"
     private const val TRANSFERS = "transfers"
     private const val RECEIVED = "received"
     private const val RECEIVED_GROUP = "io.github.darrenn19.nudge.RECEIVED"
-    const val PROGRESS_ID = 1
+    /** The service's ongoing notification: "ready" or progress. */
+    const val SERVICE_ID = 1
     private val nextId = AtomicInteger(1000)
 
     fun createChannels(context: Context) {
@@ -27,12 +29,30 @@ object Notifications {
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannels(
             listOf(
+                // Minimised: no status bar icon or sound, just a line at the
+                // bottom of the shade. Users can turn it off here.
+                NotificationChannel(READY, "Ready to receive", NotificationManager.IMPORTANCE_MIN)
+                    .apply { setShowBadge(false) },
                 NotificationChannel(TRANSFERS, "Transfers in progress", NotificationManager.IMPORTANCE_LOW)
                     .apply { setShowBadge(false) },
                 NotificationChannel(RECEIVED, "Received files", NotificationManager.IMPORTANCE_DEFAULT),
             ),
         )
     }
+
+    /** Shown while Nudge waits in the background for files. */
+    fun ready(context: Context): Notification =
+        NotificationCompat.Builder(context, READY)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Ready to receive")
+            .setContentText("Your paired devices can send files here")
+            .setOngoing(true)
+            .setSilent(true)
+            .setShowWhen(false)
+            .setPriority(NotificationCompat.PRIORITY_MIN)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setContentIntent(openApp(context))
+            .build()
 
     /** The ongoing notification shown while files are moving. [progress] is 0–100, or -1 if unknown. */
     fun progress(context: Context, title: String, text: String, progress: Int): Notification =

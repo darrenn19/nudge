@@ -111,8 +111,25 @@ class NudgeController extends ChangeNotifier {
   /// that need a device chosen. The home screen listens.
   Stream<FilesToSend> get filesToSend => _toSend.stream;
 
+  /// A send is likely soon: open connections now, to [device] or to every
+  /// nearby paired device, so it starts without a handshake. Cheap to call;
+  /// unused connections close on their own.
+  void warmUp([DeviceInfo? device]) {
+    // Includes devices that went quiet: connecting early also wakes a phone
+    // with its screen off before the files go.
+    final targets = device != null ? [device] : pairedDevices.where((d) => d.reachable);
+    for (final d in targets) {
+      try {
+        app.warm(deviceId: d.id);
+      } catch (_) {
+        // Only ever a head start; the send connects anyway.
+      }
+    }
+  }
+
   void offer(List<OutgoingFile> files, {bool fromOutside = true}) {
     if (files.isEmpty) return;
+    warmUp();
     final request = FilesToSend(files, fromOutside: fromOutside);
     _toSend.hasListener ? _toSend.add(request) : _unclaimed.add(request);
   }

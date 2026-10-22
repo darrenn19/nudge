@@ -8,7 +8,8 @@ import '../platform.dart';
 import '../src/rust/api/nudge.dart';
 
 /// Send [request]'s files, asking which device only when there's a choice:
-/// with one paired device nearby they go straight to it.
+/// with one paired device nearby they go straight to it. With none nearby
+/// but one seen earlier (say, a phone with its screen off), they go to that.
 Future<void> chooseAndSend(
   BuildContext context,
   NudgeController controller,
@@ -16,8 +17,11 @@ Future<void> chooseAndSend(
 ) async {
   final files = request.files;
   final nearby = controller.pairedDevices.where((d) => d.online).toList();
+  final reachable = controller.pairedDevices.where((d) => d.reachable).toList();
   final device = nearby.length == 1
       ? nearby.single
+      : nearby.isEmpty && reachable.length == 1
+      ? reachable.single
       : await showModalBottomSheet<DeviceInfo>(
           context: context,
           showDragHandle: true,
@@ -84,18 +88,24 @@ class _DevicePicker extends StatelessWidget {
                   Card(
                     margin: const EdgeInsets.symmetric(vertical: 4),
                     child: ListTile(
-                      enabled: d.online,
+                      enabled: d.reachable,
                       leading: Icon(
                         d.platform == 'android' || d.platform == 'ios'
                             ? Icons.smartphone_rounded
                             : Icons.laptop_windows_rounded,
                       ),
                       title: Text(d.name, overflow: TextOverflow.ellipsis),
-                      subtitle: Text(d.online ? 'Nearby' : 'Not nearby'),
+                      subtitle: Text(
+                        d.online
+                            ? 'Nearby'
+                            : d.reachable
+                            ? 'Not seen just now · tap to try'
+                            : 'Not nearby',
+                      ),
                       onTap: () => Navigator.of(context).pop(d),
                     ),
                   ),
-                if (paired.isNotEmpty && !paired.any((d) => d.online))
+                if (paired.isNotEmpty && !paired.any((d) => d.reachable))
                   Padding(
                     padding: const EdgeInsets.only(top: 12),
                     child: Text(

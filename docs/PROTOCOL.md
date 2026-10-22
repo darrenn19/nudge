@@ -17,6 +17,8 @@ TCP, default port 47800, wrapped in **TLS 1.3 only** (rustls with the aws-lc-rs 
 - **Trusted list:** `trusted_peers.txt`, one device per line: fingerprint, a space, then the name it gave when pairing. Lines starting with `#` are comments. Filled by QR pairing (below) or by hand with `nudge trust`.
 - **Failures:** the side that rejects reports `UntrustedPeer(fingerprint)`; the rejected side receives a `certificate_unknown` alert and reports `NotTrustedByPeer`.
 
+- **Waiting for the request:** after the handshake, the listening side waits up to 15 s for the header below, or up to 60 s if the peer is trusted. The longer wait lets a paired device open a connection ahead of time (when the share sheet opens, or while the user picks a device) and send its offer when the user taps Send. The sender uses such a connection for at most 45 s. If it turns out to be closed, the sender retries once on a fresh connection, and resume makes that safe. While sending several files, the next file's connection opens while the current one streams. None of this changes the wire format.
+
 The messages below run inside the TLS stream.
 
 ## Messages (v4)

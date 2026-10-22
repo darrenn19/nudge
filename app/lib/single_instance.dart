@@ -10,6 +10,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'windows_shell.dart';
+
 const _sendFlag = '--send';
 
 /// File paths passed on the command line (`--send <path>...`).
@@ -36,7 +38,8 @@ class SingleInstance {
       await lockFile.lock(FileLock.exclusive);
     } on FileSystemException {
       await lockFile.close();
-      await _handOver(dataDir, args);
+      // Started at login while Nudge is already running: nothing to hand over.
+      if (!args.contains(backgroundFlag)) await _handOver(dataDir, args);
       return null;
     }
     final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);

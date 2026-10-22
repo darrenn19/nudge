@@ -22,52 +22,48 @@ Future<void> main(List<String> args) async {
     if (instance == null) exit(0);
   }
   await RustLib.init();
-  await initWindow();
-  runApp(NudgeRoot(instance: instance, files: filesFromArgs(args)));
+  await initWindow(hidden: args.contains(backgroundFlag));
+  // Nudge runs before (and without) any screen: Windows starts it hidden at
+  // login, and Android starts it at boot or keeps it after the window closes.
+  // Either way it must be ready to receive.
+  final starting = _start(instance, filesFromArgs(args));
+  runApp(NudgeRoot(starting: starting));
 }
 
-class NudgeRoot extends StatefulWidget {
-  const NudgeRoot({super.key, this.instance, this.files = const []});
-
-  /// Windows: hands us files from later launches.
-  final SingleInstance? instance;
-
-  /// Files to send from the command line ("Send with Nudge").
-  final List<String> files;
-
-  @override
-  State<NudgeRoot> createState() => _NudgeRootState();
-}
-
-class _NudgeRootState extends State<NudgeRoot> {
-  late final Future<NudgeController> _starting = _start();
-
-  Future<NudgeController> _start() async {
-    await enableMulticast();
-    final app = await NudgeApp.start(
-      dataDir: await dataDir(),
-      downloadDir: await downloadDir(),
-      deviceName: await deviceName(),
-      platform: platformTag,
-    );
-    final controller = NudgeController(app);
-    TransferNotifier(controller);
-    // Android: files shared to Nudge (share sheet, quick settings tile).
-    unawaited(listenForShares(controller.offer));
-    // Windows: tray icon, Explorer menu, and files from other launches.
-    if (Platform.isWindows) {
-      await Tray.start(controller);
-      unawaited(registerSendToMenu());
-      void offerPaths(List<String> paths) {
-        unawaited(showWindow());
-        controller.offer(paths.map(OutgoingFile.fromPath).toList());
-      }
-
-      widget.instance?.listen(onFiles: offerPaths, onShow: () => unawaited(showWindow()));
-      if (widget.files.isNotEmpty) offerPaths(widget.files);
+Future<NudgeController> _start(SingleInstance? instance, List<String> files) async {
+  await enableMulticast();
+  final dir = await dataDir();
+  final app = await NudgeApp.start(
+    dataDir: dir,
+    downloadDir: await downloadDir(),
+    deviceName: await deviceName(),
+    platform: platformTag,
+  );
+  final controller = NudgeController(app);
+  TransferNotifier(controller);
+  // Android: files shared to Nudge (share sheet, quick settings tile).
+  unawaited(listenForShares(controller.offer, onStarting: controller.warmUp));
+  // Windows: tray icon, Explorer menu, start at login, and files from other
+  // launches.
+  if (Platform.isWindows) {
+    await Tray.start(controller, dataDir: dir);
+    unawaited(registerSendToMenu());
+    unawaited(syncStartWithWindows(dir));
+    void offerPaths(List<String> paths) {
+      unawaited(showWindow());
+      controller.offer(paths.map(OutgoingFile.fromPath).toList());
     }
-    return controller;
+
+    instance?.listen(onFiles: offerPaths, onShow: () => unawaited(showWindow()));
+    if (files.isNotEmpty) offerPaths(files);
   }
+  return controller;
+}
+
+class NudgeRoot extends StatelessWidget {
+  const NudgeRoot({super.key, required this.starting});
+
+  final Future<NudgeController> starting;
 
   @override
   Widget build(BuildContext context) {
@@ -77,7 +73,7 @@ class _NudgeRootState extends State<NudgeRoot> {
       theme: _theme(Brightness.light),
       darkTheme: _theme(Brightness.dark),
       home: FutureBuilder<NudgeController>(
-        future: _starting,
+        future: starting,
         builder: (context, snapshot) {
           if (snapshot.hasError) return _StartError(error: '${snapshot.error}');
           final controller = snapshot.data;

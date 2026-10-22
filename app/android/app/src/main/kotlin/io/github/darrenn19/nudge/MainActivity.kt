@@ -1,6 +1,7 @@
 package io.github.darrenn19.nudge
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -8,6 +9,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.provider.Settings
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -36,6 +39,8 @@ class MainActivity : FlutterActivity() {
         super.onCreate(savedInstanceState)
         if (savedInstanceState == null) handle(intent)
         askForNotifications()
+        // From the foreground, Android always allows this.
+        NudgeService.start(this)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -57,6 +62,10 @@ class MainActivity : FlutterActivity() {
                         moveTaskToBack(true)
                         result.success(null)
                     }
+                    "askToRunInBackground" -> {
+                        askToRunInBackground()
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -72,6 +81,11 @@ class MainActivity : FlutterActivity() {
     /** Files shared with Nudge, or a request from the tile to pick some. */
     private fun handle(intent: Intent?) {
         if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
+        if (intent.action in SEND_ACTIONS) {
+            // Lets Dart open a connection while the files are still being
+            // opened (or picked), so sending starts the moment they're ready.
+            channel?.invokeMethod("shareStarting", null)
+        }
         when (intent.action) {
             Intent.ACTION_SEND -> {
                 val uri = intent.stream()
@@ -143,6 +157,26 @@ class MainActivity : FlutterActivity() {
         requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
     }
 
+    /**
+     * Ask once to be left out of battery optimization. Without it, Samsung
+     * and others stop Nudge in the background, which kills long transfers
+     * and receiving while the app is closed. It also lets a transfer that
+     * arrives in the background start its foreground service.
+     */
+    @SuppressLint("BatteryLife") // Running in the background is the app's job.
+    private fun askToRunInBackground() {
+        val power = getSystemService(PowerManager::class.java) ?: return
+        if (power.isIgnoringBatteryOptimizations(packageName)) return
+        val prefs = getSharedPreferences("nudge", MODE_PRIVATE)
+        if (prefs.getBoolean("askedBattery", false)) return
+        prefs.edit().putBoolean("askedBattery", true).apply()
+        val ask = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName"))
+        runCatching { startActivity(ask) }.onFailure {
+            // Some builds hide the direct prompt; the settings list still works.
+            runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+        }
+    }
+
     override fun onDestroy() {
         worker.shutdown()
         super.onDestroy()
@@ -168,5 +202,6 @@ class MainActivity : FlutterActivity() {
         const val CHANNEL = "nudge/activity"
         const val ACTION_PICK_FILES = "io.github.darrenn19.nudge.PICK_FILES"
         private const val PICK_REQUEST = 4201
+        private val SEND_ACTIONS = setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE, ACTION_PICK_FILES)
     }
 }

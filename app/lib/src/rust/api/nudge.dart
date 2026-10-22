@@ -43,10 +43,7 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Send files the platform has already opened (Android shares arrive
   /// as open descriptors, not paths). Takes ownership of each descriptor
   /// and closes it when its transfer ends. Unix only.
-  Int64List sendOpenFiles({
-    required String deviceId,
-    required List<OpenFile> files,
-  });
+  Int64List sendOpenFiles({required String deviceId, required List<OpenFile> files});
 
   void setDownloadDir({required String dir});
 
@@ -69,6 +66,10 @@ abstract class NudgeApp implements RustOpaqueInterface {
   String startPairing();
 
   void unpair({required String deviceId});
+
+  /// Open a connection to a paired, nearby device ahead of a likely send,
+  /// so the send starts without a handshake. Safe to call often.
+  void warm({required String deviceId});
 }
 
 @freezed
@@ -103,10 +104,8 @@ sealed class AppEvent with _$AppEvent {
     required double seconds,
     required PlatformInt64 resumedFrom,
   }) = AppEvent_TransferDone;
-  const factory AppEvent.transferFailed({
-    required PlatformInt64 id,
-    required String error,
-  }) = AppEvent_TransferFailed;
+  const factory AppEvent.transferFailed({required PlatformInt64 id, required String error}) =
+      AppEvent_TransferFailed;
 }
 
 /// A device as the app shows it.
@@ -121,7 +120,13 @@ class DeviceInfo {
   /// "windows", "android", ... or empty if not known yet.
   final String platform;
   final bool paired;
+
+  /// Nearby right now.
   final bool online;
+
+  /// Worth sending to: nearby, or seen earlier this session (a phone with
+  /// its screen off goes quiet but can still receive).
+  final bool reachable;
 
   const DeviceInfo({
     required this.id,
@@ -130,6 +135,7 @@ class DeviceInfo {
     required this.platform,
     required this.paired,
     required this.online,
+    required this.reachable,
   });
 
   @override
@@ -139,7 +145,8 @@ class DeviceInfo {
       name.hashCode ^
       platform.hashCode ^
       paired.hashCode ^
-      online.hashCode;
+      online.hashCode ^
+      reachable.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -151,7 +158,8 @@ class DeviceInfo {
           name == other.name &&
           platform == other.platform &&
           paired == other.paired &&
-          online == other.online;
+          online == other.online &&
+          reachable == other.reachable;
 }
 
 /// A file the platform opened for us: its descriptor and display name.
@@ -167,8 +175,5 @@ class OpenFile {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is OpenFile &&
-          runtimeType == other.runtimeType &&
-          fd == other.fd &&
-          name == other.name;
+      other is OpenFile && runtimeType == other.runtimeType && fd == other.fd && name == other.name;
 }

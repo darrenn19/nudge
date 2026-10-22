@@ -34,6 +34,14 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// How long a new connection may take to say what it wants.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// The same, for a paired device: long enough for a connection it opened
+/// ahead of time (`Node::warm`) to wait while the user picks a device.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a connection opened by `Node::warm` is kept for a send. Shorter
+/// than the other side's `IDLE_TIMEOUT`, so it's still open when used.
+const WARM_LIFETIME: Duration = Duration::from_secs(45);
+
 /// How often progress events are sent for running transfers.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 
@@ -53,6 +61,9 @@ pub struct NodeConfig {
     /// Address to listen on; all interfaces by default.
     pub bind: IpAddr,
     pub discovery: DiscoveryConfig,
+    /// How long a paired device may hold a connection open before saying
+    /// what it wants (see `Node::warm`).
+    pub idle_timeout: Duration,
 }
 
 impl NodeConfig {
@@ -70,6 +81,7 @@ impl NodeConfig {
             port: None,
             bind: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             discovery: DiscoveryConfig::default(),
+            idle_timeout: IDLE_TIMEOUT,
         }
     }
 }
@@ -85,6 +97,10 @@ pub struct Peer {
     pub paired: bool,
     /// Seen on the network right now.
     pub online: bool,
+    /// Worth trying to send to: nearby, or seen earlier with an address to
+    /// try. A phone with its screen off stops announcing itself but can
+    /// still receive, so a paired device stays reachable after it goes quiet.
+    pub reachable: bool,
 }
 
 /// A file to send.
@@ -116,6 +132,17 @@ impl Outgoing {
             Self::Path(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
             Self::Open { file, .. } => file.metadata().map(|m| m.len()).unwrap_or(0),
         }
+    }
+
+    /// A second handle to the same file, for a retry.
+    fn try_clone(&self) -> std::io::Result<Self> {
+        Ok(match self {
+            Self::Path(path) => Self::Path(path.clone()),
+            Self::Open { file, name } => Self::Open {
+                file: file.try_clone()?,
+                name: name.clone(),
+            },
+        })
     }
 }
 
@@ -171,6 +198,13 @@ pub struct Node {
     tasks: Vec<JoinHandle<()>>,
 }
 
+type Conn = tokio_rustls::client::TlsStream<TcpStream>;
+
+/// A connection opened ahead of a send, and when it opened. Locked while
+/// it's being opened, so a send that arrives meanwhile waits for it rather
+/// than opening a second one.
+type WarmSlot = Arc<tokio::sync::Mutex<Option<(Conn, Instant)>>>;
+
 struct Shared {
     identity: Identity,
     fingerprint: Fingerprint,
@@ -183,14 +217,20 @@ struct Shared {
     events: mpsc::UnboundedSender<NodeEvent>,
     state: Mutex<State>,
     next_id: AtomicU64,
+    idle_timeout: Duration,
 }
 
 #[derive(Default)]
 struct State {
     nearby: HashMap<Fingerprint, DiscoveredPeer>,
+    /// The last sighting of every device seen this session, kept after it
+    /// goes quiet: where to try a sleeping phone.
+    last_seen: HashMap<Fingerprint, DiscoveredPeer>,
     /// The code this device is showing, and when it stops working.
     pairing: Option<(PairingCode, Instant)>,
     active: HashMap<u64, Active>,
+    /// Connections opened ahead of a send, one per device at most.
+    warm: HashMap<Fingerprint, WarmSlot>,
 }
 
 /// A running transfer, for progress reporting.
@@ -232,6 +272,7 @@ impl Node {
             events,
             state: Mutex::default(),
             next_id: AtomicU64::new(1),
+            idle_timeout: config.idle_timeout,
         });
 
         let mut tasks = vec![
@@ -309,17 +350,18 @@ impl Node {
             .list()
             .into_iter()
             .map(|(fp, name)| {
-                let nearby = state.nearby.get(&fp);
+                let seen = state.last_seen.get(&fp);
                 Peer {
                     fingerprint: fp,
                     device_name: if name.is_empty() {
-                        nearby.map_or_else(|| fp.short(), |n| n.device_name.clone())
+                        seen.map_or_else(|| fp.short(), |n| n.device_name.clone())
                     } else {
                         name
                     },
-                    platform: nearby.map(|n| n.platform.clone()).unwrap_or_default(),
+                    platform: seen.map(|n| n.platform.clone()).unwrap_or_default(),
                     paired: true,
-                    online: nearby.is_some(),
+                    online: state.nearby.contains_key(&fp),
+                    reachable: seen.is_some(),
                 }
             })
             .collect();
@@ -334,6 +376,7 @@ impl Node {
                     platform: n.platform.clone(),
                     paired: false,
                     online: true,
+                    reachable: true,
                 }),
         );
         peers.sort_by(|a, b| {
@@ -404,7 +447,7 @@ impl Node {
             .iter()
             .map(|ip| SocketAddr::new(*ip, code.port))
             .collect();
-        addrs.extend(self.shared.nearby_addrs(&code.fingerprint));
+        addrs.extend(self.shared.addrs_of(&code.fingerprint));
         let mut stream = connect_any(&tls, &addrs, code.fingerprint).await?;
 
         PairRequest {
@@ -445,6 +488,17 @@ impl Node {
         self.send(peer, paths.into_iter().map(Outgoing::Path).collect())
     }
 
+    /// Open a connection to `peer` now, so a send that follows soon starts
+    /// without waiting for the handshake. Call it when a send is likely
+    /// (the share sheet opened, files were dragged in, a device was tapped).
+    ///
+    /// Does nothing unless the device is paired and nearby, or if a
+    /// connection to it is already open or opening. An unused connection
+    /// closes after `WARM_LIFETIME`.
+    pub fn warm(&self, peer: Fingerprint) {
+        self.shared.warm(peer);
+    }
+
     /// `send_files` for any mix of paths and already-open files.
     pub fn send(&self, peer: Fingerprint, items: Vec<Outgoing>) -> Vec<u64> {
         let jobs: Vec<(u64, Outgoing)> = items
@@ -454,7 +508,9 @@ impl Node {
         let ids = jobs.iter().map(|(id, _)| *id).collect();
         let shared = self.shared.clone();
         tokio::spawn(async move {
-            for (id, item) in jobs {
+            let count = jobs.len();
+            for (index, (id, item)) in jobs.into_iter().enumerate() {
+                let more = index + 1 < count;
                 let name = item.name();
                 let size = item.size();
                 shared.emit(NodeEvent::TransferStarted {
@@ -469,7 +525,7 @@ impl Node {
                     Outgoing::Path(path) => path.clone(),
                     Outgoing::Open { .. } => PathBuf::from(&name),
                 };
-                let result = shared.send_one(peer, item, &progress).await;
+                let result = shared.send_one(peer, item, &progress, more).await;
                 shared.finish(id, result.map(|stats| (source, stats)));
             }
         });
@@ -509,7 +565,7 @@ impl Shared {
 
     fn peer(&self, fp: Fingerprint) -> Peer {
         let state = self.state();
-        let nearby = state.nearby.get(&fp);
+        let nearby = state.last_seen.get(&fp);
         Peer {
             fingerprint: fp,
             device_name: self
@@ -520,14 +576,19 @@ impl Shared {
                 .unwrap_or_else(|| fp.short()),
             platform: nearby.map(|n| n.platform.clone()).unwrap_or_default(),
             paired: self.trusted.contains(&fp),
-            online: nearby.is_some(),
+            online: state.nearby.contains_key(&fp),
+            reachable: nearby.is_some(),
         }
     }
 
-    fn nearby_addrs(&self, fp: &Fingerprint) -> Vec<SocketAddr> {
-        self.state()
+    /// Where to reach `fp`: where it is now if it's nearby, else where it
+    /// was last seen.
+    fn addrs_of(&self, fp: &Fingerprint) -> Vec<SocketAddr> {
+        let state = self.state();
+        state
             .nearby
             .get(fp)
+            .or_else(|| state.last_seen.get(fp))
             .map(|p| {
                 p.addrs
                     .iter()
@@ -561,25 +622,94 @@ impl Shared {
         });
     }
 
+    fn warm(self: &Arc<Self>, peer: Fingerprint) {
+        if !self.trusted.contains(&peer) {
+            return;
+        }
+        let addrs = self.addrs_of(&peer);
+        if addrs.is_empty() {
+            return;
+        }
+        let slot = WarmSlot::default();
+        let mut opening = slot
+            .clone()
+            .try_lock_owned()
+            .expect("a new slot is unlocked");
+        {
+            let mut state = self.state();
+            if state.warm.contains_key(&peer) {
+                return;
+            }
+            state.warm.insert(peer, slot.clone());
+        }
+        let shared = self.clone();
+        tokio::spawn(async move {
+            match connect_any(&shared.tls, &addrs, peer).await {
+                Ok(conn) => *opening = Some((conn, Instant::now())),
+                Err(_) => {
+                    drop(opening);
+                    shared.drop_warm(peer, &slot);
+                    return;
+                }
+            }
+            drop(opening);
+            tokio::time::sleep(WARM_LIFETIME).await;
+            shared.drop_warm(peer, &slot);
+        });
+    }
+
+    /// Forget `slot` if it's still the one held for `peer`, closing its
+    /// connection unless a send already took it.
+    fn drop_warm(&self, peer: Fingerprint, slot: &WarmSlot) {
+        let mut state = self.state();
+        if state.warm.get(&peer).is_some_and(|s| Arc::ptr_eq(s, slot)) {
+            state.warm.remove(&peer);
+        }
+    }
+
+    /// The connection `warm` opened to `peer`, if it's still fresh. Waits
+    /// for one that's still opening.
+    async fn take_warm(&self, peer: Fingerprint) -> Option<Conn> {
+        let slot = self.state().warm.remove(&peer)?;
+        let (conn, opened) = slot.lock().await.take()?;
+        (opened.elapsed() < WARM_LIFETIME).then_some(conn)
+    }
+
+    /// Send one file. `more` says another file to the same device follows,
+    /// so its connection can open while this one sends.
     async fn send_one(
-        &self,
+        self: &Arc<Self>,
         peer: Fingerprint,
         item: Outgoing,
         progress: &Progress,
+        more: bool,
     ) -> Result<TransferStats> {
         if !self.trusted.contains(&peer) {
             return Err(Error::UntrustedPeer(peer));
         }
-        let addrs = self.nearby_addrs(&peer);
-        let mut stream = connect_any(&self.tls, &addrs, peer).await?;
-        let stats = match item {
-            Outgoing::Path(path) => send_file_tracked(&mut stream, &path, progress).await?,
-            Outgoing::Open { file, name } => {
-                send_open_file_tracked(&mut stream, file, name, progress).await?
-            }
+        let warmed = self.take_warm(peer).await;
+        // A connection opened ahead of time may have been closed by the other
+        // side while it waited (it restarted, or waited too long). Keep a
+        // second handle to the file so the send can go again on a fresh
+        // connection; resume makes that safe even partway through.
+        let spare = match warmed {
+            Some(_) => item.try_clone().ok(),
+            None => None,
         };
-        let _ = stream.shutdown().await;
-        Ok(stats)
+        let mut stream = match warmed {
+            Some(conn) => conn,
+            None => connect_any(&self.tls, &self.addrs_of(&peer), peer).await?,
+        };
+        if more {
+            self.warm(peer);
+        }
+        match (send_over(&mut stream, item, progress).await, spare) {
+            (Err(Error::Io(_)), Some(spare)) => {
+                let mut stream = connect_any(&self.tls, &self.addrs_of(&peer), peer).await?;
+                send_over(&mut stream, spare, progress).await
+            }
+            (result, _) => result,
+        }
     }
 
     /// Handle one incoming connection: a file from a paired device, or a
@@ -588,10 +718,17 @@ impl Shared {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        let request = tokio::time::timeout(REQUEST_TIMEOUT, Request::read_from(&mut stream))
+        let trusted = self.tls.is_trusted(&peer);
+        // A paired device may connect before it knows what to send (see
+        // `Node::warm`); anyone else must say at once.
+        let wait = if trusted {
+            self.idle_timeout
+        } else {
+            REQUEST_TIMEOUT
+        };
+        let request = tokio::time::timeout(wait, Request::read_from(&mut stream))
             .await
             .map_err(|_| Error::Protocol("no request in time"))??;
-        let trusted = self.tls.is_trusted(&peer);
         match request {
             Request::File(offer) if trusted => {
                 let id = self.next_id.fetch_add(1, Ordering::Relaxed);
@@ -707,6 +844,7 @@ async fn discovery_loop(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Dis
                             .add_named(peer.fingerprint, &peer.device_name);
                         let _ = shared.trusted.save(&shared.data_dir);
                     }
+                    state.last_seen.insert(peer.fingerprint, peer.clone());
                     state.nearby.insert(peer.fingerprint, peer);
                 }
                 DiscoveryEvent::Lost(fp) => {
@@ -747,14 +885,26 @@ async fn progress_loop(shared: Arc<Shared>) {
     }
 }
 
+/// Send one file over an open connection, then close it.
+async fn send_over(
+    stream: &mut Conn,
+    item: Outgoing,
+    progress: &Progress,
+) -> Result<TransferStats> {
+    let stats = match item {
+        Outgoing::Path(path) => send_file_tracked(stream, &path, progress).await?,
+        Outgoing::Open { file, name } => {
+            send_open_file_tracked(stream, file, name, progress).await?
+        }
+    };
+    let _ = stream.shutdown().await;
+    Ok(stats)
+}
+
 /// Connect over TLS to `expected` at the first of `addrs` where it answers.
 /// Addresses held by some other device (a stale discovery entry, a reused
 /// IP) are skipped.
-async fn connect_any(
-    tls: &Tls,
-    addrs: &[SocketAddr],
-    expected: Fingerprint,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
+async fn connect_any(tls: &Tls, addrs: &[SocketAddr], expected: Fingerprint) -> Result<Conn> {
     let mut last_error = Error::Unreachable;
     for addr in addrs {
         let tcp = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
@@ -792,4 +942,109 @@ fn local_addrs() -> Vec<IpAddr> {
         addrs.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
     addrs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn start(
+        name: &str,
+        udp: u16,
+        other_udp: u16,
+    ) -> (Node, mpsc::UnboundedReceiver<NodeEvent>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = NodeConfig::new(
+            dir.path().join("id"),
+            dir.path().join("downloads"),
+            name,
+            "android",
+        );
+        config.port = Some(0);
+        config.bind = Ipv4Addr::LOCALHOST.into();
+        config.discovery = DiscoveryConfig {
+            mdns: false,
+            broadcast: true,
+            udp_port: udp,
+            extra_targets: vec![SocketAddr::from((Ipv4Addr::LOCALHOST, other_udp))],
+        };
+        let (node, events) = Node::start(config).await.unwrap();
+        assert!(node.discovery_running(), "couldn't bind UDP port {udp}");
+        (node, events, dir)
+    }
+
+    /// A free UDP port below the OS's random-port range. Discovery falls back
+    /// to a random port when its own is taken, and that must never land on a
+    /// port another test is using, or the tests hear each other.
+    fn free_udp_port() -> u16 {
+        use std::sync::atomic::{AtomicU16, Ordering};
+        static NEXT: AtomicU16 = AtomicU16::new(0);
+        let _ = NEXT.compare_exchange(
+            0,
+            20_000 + (std::process::id() % 4_000) as u16 * 2,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        );
+        loop {
+            let port = NEXT.fetch_add(1, Ordering::SeqCst);
+            assert!(port < 30_000, "no free test ports");
+            if std::net::UdpSocket::bind(("0.0.0.0", port)).is_ok() {
+                return port;
+            }
+        }
+    }
+
+    async fn until(mut check: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while !check() {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("timed out");
+    }
+
+    /// A phone with its screen off stops announcing itself, and drops out of
+    /// the nearby list, but can still be sent to where it was last seen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sends_to_a_device_that_went_quiet() {
+        let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+        let (laptop, mut laptop_events, _l) = start("Laptop", udp_a, udp_b).await;
+        let (phone, _phone_events, phone_dir) = start("Phone", udp_b, udp_a).await;
+        let phone_fp = phone.fingerprint();
+        until(|| {
+            phone
+                .peers()
+                .iter()
+                .any(|p| p.fingerprint == laptop.fingerprint())
+        })
+        .await;
+        until(|| laptop.peers().iter().any(|p| p.fingerprint == phone_fp)).await;
+        phone.pair(&laptop.start_pairing()).await.unwrap();
+        until(|| laptop.peers().iter().any(|p| p.paired)).await;
+
+        // The phone goes quiet: gone from nearby, still remembered.
+        laptop.shared.state().nearby.remove(&phone_fp);
+        let seen = laptop
+            .peers()
+            .into_iter()
+            .find(|p| p.fingerprint == phone_fp)
+            .unwrap();
+        assert!(seen.paired && !seen.online && seen.reachable);
+        assert_eq!(seen.platform, "android");
+        assert!(!laptop.shared.addrs_of(&phone_fp).is_empty());
+
+        let src = phone_dir.path().join("note.txt");
+        std::fs::write(&src, b"hello from the laptop").unwrap();
+        let ids = laptop.send_files(phone_fp, vec![src]);
+        loop {
+            match laptop_events.recv().await.unwrap() {
+                NodeEvent::TransferDone { id, .. } if id == ids[0] => break,
+                NodeEvent::TransferFailed { error, .. } => panic!("send failed: {error}"),
+                _ => {}
+            }
+        }
+        let got = std::fs::read(phone_dir.path().join("downloads").join("note.txt")).unwrap();
+        assert_eq!(got, b"hello from the laptop");
+    }
 }

@@ -45,7 +45,11 @@ pub struct DeviceInfo {
     /// "windows", "android", ... or empty if not known yet.
     pub platform: String,
     pub paired: bool,
+    /// Nearby right now.
     pub online: bool,
+    /// Worth sending to: nearby, or seen earlier this session (a phone with
+    /// its screen off goes quiet but can still receive).
+    pub reachable: bool,
 }
 
 impl From<Peer> for DeviceInfo {
@@ -57,6 +61,7 @@ impl From<Peer> for DeviceInfo {
             platform: p.platform,
             paired: p.paired,
             online: p.online,
+            reachable: p.reachable,
         }
     }
 }
@@ -255,6 +260,16 @@ impl NudgeApp {
     #[frb(sync)]
     pub fn unpair(&self, device_id: String) -> Result<()> {
         Ok(self.node.unpair(&parse_id(&device_id)?)?)
+    }
+
+    /// Open a connection to a paired, nearby device ahead of a likely send,
+    /// so the send starts without a handshake. Safe to call often.
+    #[frb(sync)]
+    pub fn warm(&self, device_id: String) -> Result<()> {
+        let peer = parse_id(&device_id)?;
+        let _guard = runtime().enter();
+        self.node.warm(peer);
+        Ok(())
     }
 
     /// Send files to a paired device in the background. Returns one

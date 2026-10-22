@@ -6,7 +6,7 @@ Fast, seamless, private file transfer between phones and computers: an AirDrop-s
 - **Seamless:** one tap to send, no accept prompts between paired devices.
 - **Private:** device to device only. No cloud, no accounts, no telemetry.
 
-> Status: early development. Phase 1 (core engine) is done. Phase 2 is in progress: the Android and Windows apps find each other on the network, pair once by QR code, and send files with no prompts. Share sheet, tray and right-click integration come in Phase 3.
+> Status: early development. Phases 1–3 are done: the core engine; Android and Windows apps that find each other, pair once by QR code and send with no prompts; and system integration (Android share sheet, quick settings tile and notifications; Windows tray, drag and drop and Explorer's "Send with Nudge"). Next: multi-file packing and folder transfer (Phase 4).
 
 ## Layout
 | Path | What it is |
@@ -50,6 +50,8 @@ cd app && flutter_rust_bridge_codegen generate
 1. Open Nudge on both devices, on the same Wi-Fi.
 2. On the computer, tap the QR icon (**Pair a device**). On the phone, do the same and scan the computer's code.
 3. Tap a paired device to choose files and send. Files arrive in **Downloads** (Windows) or **Download/Nudge** (Android).
+
+Neither device needs Nudge open to receive. On Windows it starts with Windows, hidden in the tray (untick **Start with Windows** in the tray menu to stop that), and shows a toast for each file. On Android it runs in the background with a minimised "Ready to receive" notification, starts at boot, and shows a notification for each file. A phone with its screen off can still receive: the computer sends to where it last saw it.
 
 ## Trying it from the command line
 The `nudge` tool (at `target/release/nudge`) does everything the apps do, without a UI.

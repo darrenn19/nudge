@@ -1,11 +1,12 @@
 // Windows: tray icon, close-to-tray, and "received" toasts.
 //
 // Closing the window hides Nudge to the tray, where it keeps receiving.
-// "Quit Nudge" in the tray menu really exits.
+// "Quit Nudge" in the tray menu really exits, as does closing a debug build.
 
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:local_notifier/local_notifier.dart';
 import 'package:open_filex/open_filex.dart';
@@ -14,11 +15,13 @@ import 'package:window_manager/window_manager.dart';
 
 import 'controller.dart';
 import 'platform.dart';
+import 'windows_shell.dart';
 
 bool get _desktop => Platform.isWindows;
 
-/// Before `runApp`: take over the window's close button.
-Future<void> initWindow() async {
+/// Before `runApp`: take over the window's close button. With [hidden]
+/// (started at login), Nudge starts in the tray with no window.
+Future<void> initWindow({bool hidden = false}) async {
   if (!_desktop) return;
   await windowManager.ensureInitialized();
   await windowManager.waitUntilReadyToShow(
@@ -29,6 +32,7 @@ Future<void> initWindow() async {
       center: true,
     ),
     () async {
+      if (hidden) return;
       await windowManager.show();
       await windowManager.focus();
     },
@@ -66,24 +70,26 @@ Future<void> showReceivedToast({required String path, required String from}) asy
 
 /// The tray icon and its menu, and hide-on-close.
 class Tray with WindowListener {
-  Tray._(this.controller, this._icon);
+  Tray._(this.controller, this._icon, this._dataDir);
 
   final NudgeController controller;
+  final String _dataDir;
 
   // Kept for the life of the app: if it's garbage-collected, the icon goes.
   final tray.TrayIcon _icon;
   static Tray? _instance;
 
-  static Future<void> start(NudgeController controller) async {
+  static Future<void> start(NudgeController controller, {required String dataDir}) async {
     if (!_desktop || _instance != null) return;
     final icon = tray.TrayIcon.create();
     if (icon == null) return;
-    final t = _instance = Tray._(controller, icon);
+    final t = _instance = Tray._(controller, icon, dataDir);
     windowManager.addListener(t);
+    final startsAtLogin = canStartWithWindows ? await startsWithWindows(dataDir) : null;
     icon
       ..icon = tray.ImageAsset.fromAsset('assets/tray.ico')
       ..setTooltip('Nudge')
-      ..setContextMenu(t._menu())
+      ..setContextMenu(t._menu(startsAtLogin))
       ..setContextMenuTrigger(tray.ContextMenuTrigger.rightClicked)
       ..addListener((event) {
         if (event is tray.TrayIconClickedEvent) unawaited(showWindow());
@@ -91,24 +97,43 @@ class Tray with WindowListener {
       ..setVisible(true);
   }
 
-  tray.Menu _menu() {
+  /// [startsAtLogin] is null when the option doesn't apply (debug builds).
+  tray.Menu _menu(bool? startsAtLogin) {
     final menu = tray.Menu.create()!;
-    void add(String label, void Function() onClick) {
-      final item = tray.MenuItem.createWithLabelAndType(label, tray.MenuItemType.normal)!;
+    tray.MenuItem add(
+      String label,
+      void Function(tray.MenuItem item) onClick, {
+      tray.MenuItemType type = tray.MenuItemType.normal,
+    }) {
+      final item = tray.MenuItem.createWithLabelAndType(label, type)!;
       item.addListener((event) {
-        if (event is tray.MenuItemClickedEvent) onClick();
+        if (event is tray.MenuItemClickedEvent) onClick(item);
       });
       menu.addItem(item);
+      return item;
     }
 
-    add('Open Nudge', () => unawaited(showWindow()));
-    add('Send files…', () => unawaited(_pickAndSend()));
+    add('Open Nudge', (_) => unawaited(showWindow()));
+    add('Send files…', (_) => unawaited(_pickAndSend()));
     menu.addSeparator();
-    add('Quit Nudge', () => unawaited(_quit()));
+    if (startsAtLogin != null) {
+      var on = startsAtLogin;
+      tray.MenuItemState state(bool on) =>
+          on ? tray.MenuItemState.checked : tray.MenuItemState.unchecked;
+      add('Start with Windows', (item) {
+        on = !on;
+        item.state = state(on);
+        unawaited(setStartWithWindows(_dataDir, on));
+      }, type: tray.MenuItemType.checkbox).state = state(
+        on,
+      );
+    }
+    add('Quit Nudge', (_) => unawaited(_quit()));
     return menu;
   }
 
   Future<void> _pickAndSend() async {
+    controller.warmUp();
     await showWindow();
     controller.offer(await pickFiles(), fromOutside: false);
   }
@@ -119,7 +144,9 @@ class Tray with WindowListener {
     await windowManager.destroy();
   }
 
-  /// The close button hides to the tray; files keep arriving.
+  /// The close button hides to the tray; files keep arriving. Debug builds
+  /// quit instead: a copy left in the tray locks the exe and breaks the
+  /// next build.
   @override
-  void onWindowClose() => unawaited(windowManager.hide());
+  void onWindowClose() => unawaited(kDebugMode ? _quit() : windowManager.hide());
 }

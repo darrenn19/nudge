@@ -129,8 +129,12 @@ Future<void> closeUnsent(List<OutgoingFile> files) async {
 const _activity = MethodChannel('nudge/activity');
 
 /// Calls [onFiles] with files shared to Nudge (share sheet, quick settings
-/// tile), now and whenever more arrive.
-Future<void> listenForShares(void Function(List<OutgoingFile> files) onFiles) async {
+/// tile), now and whenever more arrive. [onStarting] runs the moment a share
+/// or pick begins, before the files are ready.
+Future<void> listenForShares(
+  void Function(List<OutgoingFile> files) onFiles, {
+  void Function()? onStarting,
+}) async {
   if (!Platform.isAndroid) return;
   Future<void> take() async {
     try {
@@ -142,9 +146,26 @@ Future<void> listenForShares(void Function(List<OutgoingFile> files) onFiles) as
   }
 
   _activity.setMethodCallHandler((call) async {
-    if (call.method == 'sharedAvailable') await take();
+    switch (call.method) {
+      case 'shareStarting':
+        onStarting?.call();
+      case 'sharedAvailable':
+        await take();
+    }
   });
   await take();
+}
+
+/// Android: ask once to be left out of battery optimization, so the system
+/// doesn't stop Nudge mid-transfer or while it waits for files. Does nothing
+/// if already allowed or asked before.
+Future<void> askToRunInBackground() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await _activity.invokeMethod('askToRunInBackground');
+  } on MissingPluginException {
+    // No window; ask another time.
+  }
 }
 
 /// Go back to the app the user shared from. Transfers carry on.

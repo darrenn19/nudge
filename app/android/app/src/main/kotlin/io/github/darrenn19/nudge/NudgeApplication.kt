@@ -7,9 +7,9 @@ import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
 
 /**
- * Starts Nudge's Flutter engine with the process, not the window. Transfers
- * keep running (and reporting progress) after the user leaves the app, as
- * long as [TransferService] holds the process in the foreground.
+ * Starts Nudge's Flutter engine with the process, not the window, so Nudge
+ * runs (and receives) with no window open, for as long as [NudgeService]
+ * keeps the process alive.
  */
 class NudgeApplication : Application() {
     override fun onCreate() {
@@ -22,6 +22,7 @@ class NudgeApplication : Application() {
             .setMethodCallHandler(PlatformChannel(this))
         engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
         FlutterEngineCache.getInstance().put(ENGINE_ID, engine)
+        NudgeService.start(this)
     }
 
     companion object {
