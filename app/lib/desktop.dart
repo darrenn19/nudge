@@ -19,34 +19,58 @@ import 'windows_shell.dart';
 
 bool get _desktop => Platform.isWindows;
 
+/// Whether the window is on screen (not hidden in the tray or minimized).
+/// Animations stop while it isn't, so Nudge in the tray costs nothing.
+final windowShown = ValueNotifier<bool>(true);
+
 /// Before `runApp`: take over the window's close button. With [hidden]
 /// (started at login), Nudge starts in the tray with no window.
+///
+/// The runner already made the window at its size and place, and shows it
+/// with the first frame (windows/runner), so nothing here waits on it.
 Future<void> initWindow({bool hidden = false}) async {
   if (!_desktop) return;
+  windowShown.value = !hidden;
   await windowManager.ensureInitialized();
-  await windowManager.waitUntilReadyToShow(
-    const WindowOptions(
-      title: 'Nudge',
-      size: Size(480, 720),
-      minimumSize: Size(360, 480),
-      center: true,
-      backgroundColor: Color(0xFF0A0B13),
-    ),
-    () async {
-      if (hidden) return;
-      await windowManager.show();
-      await windowManager.focus();
-    },
-  );
-  await windowManager.setPreventClose(true);
+  windowManager.addListener(_Shown());
   // The title bar is made dark in the runner (win32_window.cpp): this
   // plugin's setBrightness only goes dark when Windows itself is dark.
-  await localNotifier.setup(appName: 'Nudge', shortcutPolicy: ShortcutPolicy.requireCreate);
+  await Future.wait([
+    windowManager.setMinimumSize(const Size(360, 480)),
+    windowManager.setPreventClose(true),
+  ]);
+}
+
+class _Shown with WindowListener {
+  @override
+  void onWindowEvent(String eventName) {
+    switch (eventName) {
+      case 'show' || 'restore':
+        windowShown.value = true;
+      case 'hide' || 'minimize':
+        windowShown.value = false;
+    }
+  }
+}
+
+/// Toasts are set up once, off the startup path (it can create a Start
+/// menu shortcut, which is slow).
+Future<void>? _toastsReady;
+
+Future<void> _toasts() => _toastsReady ??= localNotifier.setup(
+  appName: 'Nudge',
+  shortcutPolicy: ShortcutPolicy.requireCreate,
+);
+
+/// Get toasts ready ahead of the first one.
+void prepareToasts() {
+  if (_desktop) unawaited(_toasts().catchError((_) {}));
 }
 
 /// Bring the window back from the tray.
 Future<void> showWindow() async {
   if (!_desktop) return;
+  windowShown.value = true;
   await windowManager.show();
   await windowManager.focus();
 }
@@ -65,6 +89,7 @@ Future<void> showReceivedToast({required String path, required String from}) asy
     ..onClick = open
     ..onClickAction = (_) => open();
   try {
+    await _toasts();
     await toast.show();
   } catch (_) {
     // Toasts are a nicety; the file is saved either way.
@@ -101,6 +126,7 @@ Future<void Function()> showOfferToast({
   toast.onClick = () => unawaited(showWindow());
   toast.onClickAction = (i) => onAnswer(i == 0);
   try {
+    await _toasts();
     await toast.show();
   } catch (_) {
     // The in-app question is still there.

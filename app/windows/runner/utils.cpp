@@ -22,9 +22,13 @@ void CreateAndAttachConsole() {
 }
 
 std::vector<std::string> GetCommandLineArguments() {
+  return ArgumentsOf(::GetCommandLineW());
+}
+
+std::vector<std::string> ArgumentsOf(const wchar_t* command_line) {
   // Convert the UTF-16 command line arguments to UTF-8 for the Engine to use.
   int argc;
-  wchar_t** argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
+  wchar_t** argv = ::CommandLineToArgvW(command_line, &argc);
   if (argv == nullptr) {
     return std::vector<std::string>();
   }

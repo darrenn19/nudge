@@ -10,14 +10,11 @@
 // A class abstraction for a high DPI-aware Win32 Window. Intended to be
 // inherited from by classes that wish to specialize with custom
 // rendering and input handling
+// The window class of Nudge's window, so a second launch can find it.
+constexpr const wchar_t kWindowClassName[] = L"NudgeWindow";
+
 class Win32Window {
  public:
-  struct Point {
-    unsigned int x;
-    unsigned int y;
-    Point(unsigned int x, unsigned int y) : x(x), y(y) {}
-  };
-
   struct Size {
     unsigned int width;
     unsigned int height;
@@ -28,13 +25,12 @@ class Win32Window {
   Win32Window();
   virtual ~Win32Window();
 
-  // Creates a win32 window with |title| that is positioned and sized using
-  // |origin| and |size|. New windows are created on the default monitor. Window
-  // sizes are specified to the OS in physical pixels, hence to ensure a
-  // consistent size this function will scale the inputted width and height as
-  // as appropriate for the default monitor. The window is invisible until
-  // |Show| is called. Returns true if the window was created successfully.
-  bool Create(const std::wstring& title, const Point& origin, const Size& size);
+  // Creates a win32 window with |title|, |size| logical pixels, centred on
+  // the monitor under the mouse (scaled for that monitor's DPI). Placing it
+  // here, rather than moving it from Dart later, means it never has to be
+  // resized after it appears. The window is invisible until |Show| is
+  // called. Returns true if the window was created successfully.
+  bool Create(const std::wstring& title, const Size& size);
 
   // Show the current window. Returns true if the window was successfully shown.
   bool Show();

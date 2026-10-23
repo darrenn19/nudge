@@ -28,6 +28,76 @@ abstract final class Palette {
 
 const _spring = Curves.easeOutCubic;
 
+/// The clock for slow, ambient motion (the background's drift, an orb's
+/// calm breathing). It ticks 15 times a second rather than every frame:
+/// motion this slow looks the same, and the window is redrawn a quarter as
+/// often (each redraw costs about the same however little moved). One clock,
+/// so everything ambient moves in the same frames. It runs only while
+/// something listens.
+class _AmbientClock extends ChangeNotifier {
+  static const _interval = Duration(milliseconds: 66);
+  final _watch = Stopwatch()..start();
+  Timer? _timer;
+  int _listeners = 0;
+
+  double get seconds => _watch.elapsedMicroseconds / 1e6;
+
+  @override
+  void addListener(VoidCallback listener) {
+    super.addListener(listener);
+    if (_listeners++ == 0) _timer = Timer.periodic(_interval, (_) => notifyListeners());
+  }
+
+  @override
+  void removeListener(VoidCallback listener) {
+    super.removeListener(listener);
+    if (--_listeners == 0) {
+      _timer?.cancel();
+      _timer = null;
+    }
+  }
+}
+
+final _ambient = _AmbientClock();
+
+/// Moves a State with the ambient clock while [ambient] is set, and stops
+/// while its tickers are muted (the window hidden in the tray).
+mixin _AmbientMotion<T extends StatefulWidget> on State<T> {
+  bool _wantsAmbient = false;
+  bool _listening = false;
+  bool _ready = false;
+
+  /// Called on each ambient tick with the clock's time.
+  void onAmbientTick(double seconds);
+
+  set ambient(bool on) {
+    _wantsAmbient = on;
+    if (_ready) _syncAmbient();
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _ready = true;
+    _syncAmbient();
+  }
+
+  void _syncAmbient() {
+    final on = _wantsAmbient && TickerMode.valuesOf(context).enabled;
+    if (on == _listening) return;
+    _listening = on;
+    on ? _ambient.addListener(_tick) : _ambient.removeListener(_tick);
+  }
+
+  void _tick() => onAmbientTick(_ambient.seconds);
+
+  @override
+  void dispose() {
+    if (_listening) _ambient.removeListener(_tick);
+    super.dispose();
+  }
+}
+
 /// A light tap on phones, where it reads as "pressed".
 void tapFeedback() {
   if (Platform.isAndroid || Platform.isIOS) HapticFeedback.selectionClick();
@@ -43,9 +113,18 @@ class NudgeBackground extends StatefulWidget {
   State<NudgeBackground> createState() => _NudgeBackgroundState();
 }
 
-class _NudgeBackgroundState extends State<NudgeBackground> with SingleTickerProviderStateMixin {
-  late final _drift = AnimationController(vsync: this, duration: const Duration(seconds: 40))
-    ..repeat();
+class _NudgeBackgroundState extends State<NudgeBackground> with _AmbientMotion {
+  /// Where the light is in its 40-second sway, 0 to 1.
+  final _drift = ValueNotifier<double>(0);
+
+  @override
+  void initState() {
+    super.initState();
+    ambient = true;
+  }
+
+  @override
+  void onAmbientTick(double seconds) => _drift.value = seconds % 40 / 40;
 
   @override
   void dispose() {
@@ -454,29 +533,46 @@ class Orb extends StatefulWidget {
   State<Orb> createState() => _OrbState();
 }
 
-class _OrbState extends State<Orb> with TickerProviderStateMixin {
+class _OrbState extends State<Orb> with TickerProviderStateMixin, _AmbientMotion {
   late final _breath = AnimationController(vsync: this, duration: _period);
   late final _wave = AnimationController(vsync: this, duration: const Duration(milliseconds: 1100));
 
   Duration get _period =>
       widget.pulse ? const Duration(milliseconds: 1600) : const Duration(seconds: 5);
 
+  /// The ambient clock's time at the last calm breath, to carry on from.
+  double? _lastTick;
+
   @override
   void initState() {
     super.initState();
-    if (widget.breathe) _breath.repeat();
+    _breathe();
   }
 
   @override
   void didUpdateWidget(Orb old) {
     super.didUpdateWidget(old);
     if (old.pulse != widget.pulse) _breath.duration = _period;
-    if (widget.breathe && (!_breath.isAnimating || old.pulse != widget.pulse)) {
-      _breath.repeat();
-    } else if (!widget.breathe && _breath.isAnimating) {
-      _breath.stop();
-    }
+    if (old.pulse != widget.pulse || old.breathe != widget.breathe) _breathe();
     if (old.ripple != widget.ripple) _wave.forward(from: 0);
+  }
+
+  /// A pulse is quick, so it moves every frame; a calm breath is slow
+  /// enough for the ambient clock.
+  void _breathe() {
+    final pulsing = widget.breathe && widget.pulse;
+    if (pulsing && !_breath.isAnimating) _breath.repeat();
+    if (!pulsing && _breath.isAnimating) _breath.stop();
+    _lastTick = null;
+    ambient = widget.breathe && !widget.pulse;
+  }
+
+  @override
+  void onAmbientTick(double seconds) {
+    final last = _lastTick;
+    _lastTick = seconds;
+    if (last == null) return;
+    _breath.value = (_breath.value + (seconds - last) / 5) % 1;
   }
 
   @override

@@ -19,12 +19,6 @@ import 'wifi.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
-  SingleInstance? instance;
-  if (Platform.isWindows) {
-    // Another Nudge is running: give it our files and exit.
-    instance = await SingleInstance.claim(await dataDir(), args);
-    if (instance == null) exit(0);
-  }
   if (Platform.isAndroid) {
     // Draw behind the status and navigation bars, with light icons on the
     // dark background.
@@ -43,11 +37,19 @@ Future<void> main(List<String> args) async {
   // Nudge runs before (and without) any screen: Windows starts it hidden at
   // login, and Android starts it at boot or keeps it after the window closes.
   // Either way it must be ready to receive.
-  final starting = _start(instance, filesFromArgs(args));
-  runApp(NudgeRoot(starting: starting));
+  final starting = _start(filesFromArgs(args));
+  // The core starts in well under a second: wait for it, so the first frame
+  // is the device list rather than a placeholder that then fades away.
+  NudgeController? ready;
+  try {
+    ready = await starting.timeout(const Duration(milliseconds: 800));
+  } catch (_) {
+    // Still starting (or failed): the placeholder shows until it's done.
+  }
+  runApp(NudgeRoot(starting: starting, ready: ready));
 }
 
-Future<NudgeController> _start(SingleInstance? instance, List<String> files) async {
+Future<NudgeController> _start(List<String> files) async {
   await enableMulticast();
   final dir = await dataDir();
   final app = await NudgeApp.start(
@@ -85,27 +87,44 @@ Future<NudgeController> _start(SingleInstance? instance, List<String> files) asy
   // Windows: tray icon, Explorer menu, start at login, and files from other
   // launches.
   if (Platform.isWindows) {
-    await Tray.start(controller, dataDir: dir);
-    unawaited(registerSendToMenu());
-    unawaited(syncStartWithWindows(dir));
+    unawaited(Tray.start(controller, dataDir: dir));
     void offerPaths(List<String> paths) {
       unawaited(showWindow());
       controller.offer(paths.map(OutgoingFile.fromPath).toList());
     }
 
-    instance?.listen(onFiles: offerPaths, onShow: () => unawaited(showWindow()));
+    unawaited(listenForLaunches(onFiles: offerPaths, onShow: () => unawaited(showWindow())));
     if (files.isNotEmpty) offerPaths(files);
+    // Housekeeping that can wait until Nudge is up and idle.
+    unawaited(
+      Future<void>.delayed(const Duration(seconds: 3), () async {
+        prepareToasts();
+        await registerShell(dir);
+      }),
+    );
   }
   return controller;
 }
 
 class NudgeRoot extends StatelessWidget {
-  const NudgeRoot({super.key, required this.starting});
+  const NudgeRoot({super.key, required this.starting, this.ready});
 
   final Future<NudgeController> starting;
 
+  /// Already started: shown straight away.
+  final NudgeController? ready;
+
   @override
   Widget build(BuildContext context) {
+    // Nothing animates while the window is hidden in the tray or minimized.
+    return ValueListenableBuilder<bool>(
+      valueListenable: windowShown,
+      builder: (context, shown, child) => TickerMode(enabled: shown, child: child!),
+      child: _app(),
+    );
+  }
+
+  Widget _app() {
     return MaterialApp(
       title: 'Nudge',
       debugShowCheckedModeBanner: false,
@@ -116,20 +135,22 @@ class NudgeRoot extends StatelessWidget {
       // One background behind every screen: moving between screens only
       // moves their content, never repaints the backdrop.
       builder: (context, child) => NudgeBackground(child: child ?? const SizedBox()),
-      home: FutureBuilder<NudgeController>(
-        future: starting,
-        builder: (context, snapshot) {
-          final Widget page;
-          if (snapshot.hasError) {
-            page = _StartError(error: '${snapshot.error}');
-          } else if (snapshot.data case final controller?) {
-            page = HomeScreen(controller: controller);
-          } else {
-            page = const _Starting();
-          }
-          return AnimatedSwitcher(duration: const Duration(milliseconds: 500), child: page);
-        },
-      ),
+      home: ready != null
+          ? HomeScreen(controller: ready!)
+          : FutureBuilder<NudgeController>(
+              future: starting,
+              builder: (context, snapshot) {
+                final Widget page;
+                if (snapshot.hasError) {
+                  page = _StartError(error: '${snapshot.error}');
+                } else if (snapshot.data case final controller?) {
+                  page = HomeScreen(controller: controller);
+                } else {
+                  page = const _Starting();
+                }
+                return AnimatedSwitcher(duration: const Duration(milliseconds: 300), child: page);
+              },
+            ),
     );
   }
 }

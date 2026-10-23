@@ -40,6 +40,10 @@ pub use web::WEB_PORT;
 /// How long to wait for each address when connecting.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 
+/// How long an address gets before the next one is tried alongside it. A
+/// connection on the local network opens in a few milliseconds.
+const CONNECT_STAGGER: Duration = Duration::from_millis(250);
+
 /// How long a new connection may take to say what it wants.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -2062,27 +2066,65 @@ async fn send_over(
     Ok(stats)
 }
 
-/// Connect over TLS to `expected` at the first of `addrs` where it answers.
+/// Connect over TLS to `expected` at whichever of `addrs` answers first.
+/// Addresses are tried in order, each given [`CONNECT_STAGGER`] before the
+/// next one starts alongside it, so a dead address (an old hotspot, a
+/// moved phone) costs a quarter second rather than a full timeout.
 /// Addresses held by some other device (a stale discovery entry, a reused
 /// IP) are skipped.
 async fn connect_any(tls: &Tls, addrs: &[SocketAddr], expected: Fingerprint) -> Result<Conn> {
     let mut last_error = Error::Unreachable;
-    for addr in addrs {
-        let tcp = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
-            Ok(Ok(tcp)) => tcp,
-            _ => continue,
-        };
-        let _ = tcp.set_nodelay(true);
-        match tokio::time::timeout(CONNECT_TIMEOUT, tls.connect(tcp)).await {
-            Ok(Ok((stream, fp))) if fp == expected => return Ok(stream),
-            Ok(Ok(_)) | Ok(Err(Error::UntrustedPeer(_))) => {}
-            // The right device, but it doesn't trust us: that's the answer.
-            Ok(Err(Error::NotTrustedByPeer)) => return Err(Error::NotTrustedByPeer),
-            Ok(Err(e)) => last_error = e,
-            Err(_) => {}
+    let mut waiting = addrs.iter().copied();
+    // Dropping the set aborts attempts still running.
+    let mut attempts = tokio::task::JoinSet::new();
+    let mut next = waiting.next();
+    loop {
+        if attempts.is_empty() {
+            match next.take() {
+                Some(addr) => {
+                    attempts.spawn(connect_one(tls.clone(), addr, expected));
+                    next = waiting.next();
+                }
+                None => return Err(last_error),
+            }
+        }
+        tokio::select! {
+            done = attempts.join_next() => match done {
+                Some(Ok(Ok(stream))) => return Ok(stream),
+                // The right device, but it doesn't trust us: that's the answer.
+                Some(Ok(Err(Some(Error::NotTrustedByPeer)))) => {
+                    return Err(Error::NotTrustedByPeer);
+                }
+                Some(Ok(Err(Some(e)))) => last_error = e,
+                Some(Ok(Err(None)) | Err(_)) | None => {}
+            },
+            () = tokio::time::sleep(CONNECT_STAGGER), if next.is_some() => {
+                if let Some(addr) = next.take() {
+                    attempts.spawn(connect_one(tls.clone(), addr, expected));
+                    next = waiting.next();
+                }
+            }
         }
     }
-    Err(last_error)
+}
+
+/// One address for [`connect_any`]. `Err(None)`: nothing worth reporting
+/// (no answer, or some other device).
+async fn connect_one(
+    tls: Tls,
+    addr: SocketAddr,
+    expected: Fingerprint,
+) -> std::result::Result<Conn, Option<Error>> {
+    let tcp = match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
+        Ok(Ok(tcp)) => tcp,
+        _ => return Err(None),
+    };
+    let _ = tcp.set_nodelay(true);
+    match tokio::time::timeout(CONNECT_TIMEOUT, tls.connect(tcp)).await {
+        Ok(Ok((stream, fp))) if fp == expected => Ok(stream),
+        Ok(Ok(_)) | Ok(Err(Error::UntrustedPeer(_))) | Err(_) => Err(None),
+        Ok(Err(e)) => Err(Some(e)),
+    }
 }
 
 /// This device's addresses worth putting in a pairing code: up, not
@@ -2405,5 +2447,23 @@ mod tests {
             .record(peer, fast, 1 << 30, Duration::from_secs(1));
         let first = node.shared.addrs_of(&peer)[0].ip();
         assert_eq!(crate::link::kind_toward(&nets, first), Some(fast));
+    }
+
+    /// An address that never answers, listed first, doesn't hold up the
+    /// one that does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn silent_address_doesnt_delay_connecting() {
+        let ((laptop, _le, _ld), (phone, _pe, _pd)) = paired_pair().await;
+        // Accepts TCP (the OS does that) but never speaks TLS.
+        let silent = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addrs = [
+            silent.local_addr().unwrap(),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, phone.port())),
+        ];
+        let started = Instant::now();
+        connect_any(&laptop.shared.tls, &addrs, phone.fingerprint())
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
     }
 }

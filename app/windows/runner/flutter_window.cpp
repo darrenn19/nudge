@@ -38,6 +38,24 @@ bool FlutterWindow::OnCreate() {
       &flutter::StandardMethodCodec::GetInstance());
   AddClipboardFormatListener(GetHandle());
 
+  // Later launches. Dart says "listen" once it's ready, and gets any that
+  // came before.
+  instance_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "nudge/instance",
+      &flutter::StandardMethodCodec::GetInstance());
+  instance_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() != "listen") {
+          result->NotImplemented();
+          return;
+        }
+        dart_listening_ = true;
+        result->Success(flutter::EncodableValue(flutter::EncodableList(
+            pending_launches_.begin(), pending_launches_.end())));
+        pending_launches_.clear();
+      });
+
   // Started at login (--background): stay in the tray until opened. The
   // Dart side shows the window when the user asks for it.
   if (!wcsstr(GetCommandLineW(), L" --background")) {
@@ -57,6 +75,7 @@ bool FlutterWindow::OnCreate() {
 void FlutterWindow::OnDestroy() {
   RemoveClipboardFormatListener(GetHandle());
   clipboard_ = nullptr;
+  instance_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -85,9 +104,33 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_CLIPBOARDUPDATE:
       ReportCopy();
       return 0;
+    case WM_COPYDATA: {
+      auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
+      if (data && data->dwData == kLaunchMessage && data->lpData &&
+          data->cbData >= sizeof(wchar_t)) {
+        std::wstring line(static_cast<const wchar_t*>(data->lpData),
+                          data->cbData / sizeof(wchar_t) - 1);
+        OnLaunch(line);
+        return TRUE;
+      }
+      break;
+    }
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
+}
+
+void FlutterWindow::OnLaunch(const std::wstring& command_line) {
+  flutter::EncodableList args;
+  for (const auto& arg : ArgumentsOf(command_line.c_str())) {
+    args.push_back(flutter::EncodableValue(arg));
+  }
+  flutter::EncodableValue launch(std::move(args));
+  if (dart_listening_ && instance_) {
+    instance_->InvokeMethod("launched", std::make_unique<flutter::EncodableValue>(launch));
+  } else {
+    pending_launches_.push_back(std::move(launch));
+  }
 }
 
 namespace {

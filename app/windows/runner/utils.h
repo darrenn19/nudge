@@ -16,4 +16,8 @@ std::string Utf8FromUtf16(const wchar_t* utf16_string);
 // encoded in UTF-8. Returns an empty std::vector<std::string> on failure.
 std::vector<std::string> GetCommandLineArguments();
 
+// The arguments in |command_line| (a whole command line, program first),
+// without the program, encoded in UTF-8.
+std::vector<std::string> ArgumentsOf(const wchar_t* command_line);
+
 #endif  // RUNNER_UTILS_H_
