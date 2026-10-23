@@ -53,6 +53,10 @@ pub enum Error {
     #[error("they declined")]
     Declined,
 
+    /// The user on this device said no to files that were arriving.
+    #[error("you declined")]
+    YouDeclined,
+
     #[error("no answer")]
     NoAnswer,
 

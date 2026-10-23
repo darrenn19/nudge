@@ -71,6 +71,29 @@ pub struct ReceivedFile {
     pub stats: TransferStats,
 }
 
+/// Spare buffers handed back by whoever used them last, so each transfer
+/// allocates (and zeroes) its few buffers once instead of one per megabyte.
+#[derive(Clone, Default)]
+struct Pool(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+
+impl Pool {
+    /// A buffer of exactly `len` bytes. Reused contents are left as they
+    /// are: every caller overwrites the whole buffer.
+    fn get(&self, len: usize) -> Vec<u8> {
+        let spare = self.0.lock().unwrap_or_else(|e| e.into_inner()).pop();
+        let mut buf = spare.unwrap_or_default();
+        buf.resize(len, 0);
+        buf
+    }
+
+    fn put(&self, buf: Vec<u8>) {
+        let mut spares = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if spares.len() <= PIPELINE_DEPTH {
+            spares.push(buf);
+        }
+    }
+}
+
 /// What travels between a disk thread and the network loop.
 enum Piece {
     Data(Vec<u8>),
@@ -105,6 +128,9 @@ struct ProgressInner {
     position: AtomicU64,
     accepted: std::sync::atomic::AtomicBool,
     pending: std::sync::atomic::AtomicBool,
+    held: std::sync::atomic::AtomicBool,
+    /// Wakes `until_pending`.
+    became_pending: tokio::sync::Notify,
 }
 
 impl Progress {
@@ -138,6 +164,24 @@ impl Progress {
 
     pub(crate) fn mark_pending(&self) {
         self.0.pending.store(true, Ordering::Relaxed);
+        self.0.became_pending.notify_one();
+    }
+
+    /// Finishes once the receiver says it's asking its user.
+    pub async fn until_pending(&self) {
+        while !self.pending() {
+            self.0.became_pending.notified().await;
+        }
+    }
+
+    /// Every byte is with the receiver, kept until its user answers
+    /// (sending side).
+    pub fn held(&self) -> bool {
+        self.0.held.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn mark_held(&self) {
+        self.0.held.store(true, Ordering::Relaxed);
     }
 }
 
@@ -222,8 +266,10 @@ where
     offer.write_to(stream).await?;
     let offset = loop {
         match Response::read_from(stream).await? {
-            // The receiver is asking its user; the answer comes next.
+            // The receiver is asking its user. The bytes go anyway; the
+            // answer comes later.
             Response::Asking => progress.mark_pending(),
+            Response::Approved => progress.mark_accepted(),
             Response::Accept { offset } if offset <= size && offset % CHUNK_SIZE == 0 => {
                 break offset;
             }
@@ -232,13 +278,20 @@ where
             Response::Declined => return Err(Error::Declined),
             Response::NoAnswer => return Err(Error::NoAnswer),
             Response::NotPaired => return Err(Error::NotTrustedByPeer),
-            Response::Done => return Err(Error::Protocol("unexpected Done before data")),
+            Response::Done | Response::Held => {
+                return Err(Error::Protocol("unexpected answer before data"));
+            }
         }
     };
-    progress.mark_accepted();
+    // Taken without asking: accepted from the start.
+    if !progress.pending() {
+        progress.mark_accepted();
+    }
 
     let (tx, mut rx) = mpsc::channel(PIPELINE_DEPTH);
-    let reader = tokio::task::spawn_blocking(move || read_pieces(source, offset, size, tx));
+    let pool = Pool::default();
+    let spares = pool.clone();
+    let reader = tokio::task::spawn_blocking(move || read_pieces(source, offset, size, tx, spares));
 
     progress.set(offset);
     let mut sent = 0u64;
@@ -246,7 +299,9 @@ where
         match piece? {
             Piece::Data(buf) => {
                 stream.write_all(&buf).await?;
-                sent += buf.len() as u64;
+                let len = buf.len() as u64;
+                pool.put(buf);
+                sent += len;
                 progress.set(offset + sent);
             }
             Piece::ChunkEnd(hash) => stream.write_all(&hash).await?,
@@ -255,13 +310,27 @@ where
     stream.flush().await?;
     reader.await.map_err(io::Error::other)?;
 
-    match Response::read_from(stream).await? {
-        Response::Done => Ok(TransferStats {
-            bytes: sent,
-            resumed_from: offset,
-            elapsed: start.elapsed(),
-        }),
-        _ => Err(Error::Protocol("expected Done after data")),
+    let stats = TransferStats {
+        bytes: sent,
+        resumed_from: offset,
+        elapsed: start.elapsed(),
+    };
+    loop {
+        match Response::read_from(stream).await? {
+            Response::Done => {
+                progress.mark_accepted();
+                return Ok(stats);
+            }
+            // Stored on the other side, waiting for its user's answer.
+            Response::Held => {
+                progress.mark_held();
+                return Ok(stats);
+            }
+            Response::Approved => progress.mark_accepted(),
+            Response::Declined => return Err(Error::Declined),
+            Response::NoAnswer => return Err(Error::NoAnswer),
+            _ => return Err(Error::Protocol("expected Done after data")),
+        }
     }
 }
 
@@ -306,6 +375,66 @@ pub async fn receive_offered<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let landed = land(stream, offer, dir, peer, progress, std::future::pending())
+        .await?
+        .expect("never stopped");
+    let file = landed.keep()?;
+    Response::Done.write_to(stream).await?;
+    Ok(file)
+}
+
+/// A file that has fully arrived, verified and synced to disk, but isn't
+/// under its own name yet: still a partial file, so nothing shows it. The
+/// receiver holds it like this while its user decides.
+#[derive(Debug)]
+pub struct Landed {
+    partial: resume::Partial,
+    dir: PathBuf,
+    name: String,
+    pub stats: TransferStats,
+}
+
+impl Landed {
+    /// Give it its real name: it's received.
+    pub fn keep(self) -> Result<ReceivedFile> {
+        // Pick the final name now: something may have taken it since we started.
+        let final_path = if self.partial.base.exists() {
+            unique_path(&self.dir, &self.name)
+        } else {
+            self.partial.base.clone()
+        };
+        fs::rename(self.partial.part_path(), &final_path)?;
+        resume::finish(&self.partial);
+        Ok(ReceivedFile {
+            path: final_path,
+            stats: self.stats,
+        })
+    }
+
+    /// Delete it: the user didn't want it.
+    pub fn discard(self) {
+        self.partial.remove();
+    }
+}
+
+/// Receive an offered file into a partial file: `Accept`, then the data.
+/// Sends nothing after the data; the caller decides between `Done`, `Held`
+/// and a refusal.
+///
+/// Stops early when `stop` finishes (the user declined), deleting what had
+/// arrived; returns `None` then.
+pub async fn land<S, F>(
+    stream: &mut S,
+    offer: Offer,
+    dir: &Path,
+    peer: Option<Fingerprint>,
+    progress: &Progress,
+    stop: F,
+) -> Result<Option<Landed>>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: Future<Output = ()>,
+{
     let start = Instant::now();
     let size = offer.size;
     let name = match sanitize_file_name(&offer.name) {
@@ -333,26 +462,21 @@ where
     file.seek(SeekFrom::Start(offset))?;
 
     Response::Accept { offset }.write_to(stream).await?;
-    let pos = receive_pieces(stream, file, offset, size, Some(meta), progress).await?;
-
-    // Pick the final name now: something may have taken it since we started.
-    let final_path = if partial.base.exists() {
-        unique_path(dir, &name)
-    } else {
-        partial.base.clone()
+    let Some(pos) = receive_pieces(stream, file, offset, size, Some(meta), progress, stop).await?
+    else {
+        partial.remove();
+        return Ok(None);
     };
-    fs::rename(partial.part_path(), &final_path)?;
-    resume::finish(&partial);
-    Response::Done.write_to(stream).await?;
-
-    Ok(ReceivedFile {
-        path: final_path,
+    Ok(Some(Landed {
+        partial,
+        dir: dir.to_owned(),
+        name,
         stats: TransferStats {
             bytes: pos - offset,
             resumed_from: offset,
             elapsed: start.elapsed(),
         },
-    })
+    }))
 }
 
 /// Receive one transfer into `sink` without saving a file or resume state.
@@ -365,7 +489,17 @@ where
     let offer = Offer::read_from(stream).await?;
     let start = Instant::now();
     Response::Accept { offset: 0 }.write_to(stream).await?;
-    let bytes = receive_pieces(stream, sink, 0, offer.size, None, &Progress::new()).await?;
+    let bytes = receive_pieces(
+        stream,
+        sink,
+        0,
+        offer.size,
+        None,
+        &Progress::new(),
+        std::future::pending(),
+    )
+    .await?
+    .expect("never stopped");
     Response::Done.write_to(stream).await?;
     let stats = TransferStats {
         bytes,
@@ -376,24 +510,28 @@ where
 }
 
 /// Read the data stream from `offset` to `size` and hand it to a writer thread
-/// that checks hashes and writes into `sink`. Returns the end position.
-/// Network errors are held until the writer has finished, so its progress is
-/// saved before we return.
-async fn receive_pieces<S, W>(
+/// that checks hashes and writes into `sink`. Returns the end position, or
+/// `None` if `stop` finished first. Network errors are held until the writer
+/// has finished, so its progress is saved before we return.
+async fn receive_pieces<S, W, F>(
     stream: &mut S,
     sink: W,
     offset: u64,
     size: u64,
     meta: Option<MetaWriter>,
     progress: &Progress,
-) -> Result<u64>
+    stop: F,
+) -> Result<Option<u64>>
 where
     S: AsyncRead + Unpin,
     W: Sink,
+    F: Future<Output = ()>,
 {
     progress.set(offset);
     let (tx, rx) = mpsc::channel(PIPELINE_DEPTH);
-    let writer = tokio::task::spawn_blocking(move || write_pieces(sink, rx, offset, meta));
+    let pool = Pool::default();
+    let spares = pool.clone();
+    let writer = tokio::task::spawn_blocking(move || write_pieces(sink, rx, offset, meta, spares));
 
     let network = async move {
         let truncated = |e: io::Error, pos: u64| {
@@ -411,7 +549,7 @@ where
             let end = chunk_end(pos, size);
             while pos < end {
                 let want = (end - pos).min(BUF_SIZE as u64) as usize;
-                let mut buf = vec![0u8; want];
+                let mut buf = pool.get(want);
                 stream
                     .read_exact(&mut buf)
                     .await
@@ -434,9 +572,15 @@ where
         Ok(pos)
         // `tx` is dropped here, which tells the writer the stream has ended.
     };
-    let network_result: Result<u64> = network.await;
+    // Stopping drops the network side, which closes the channel: the writer
+    // then finishes what it has and returns, so nothing is still writing
+    // when the caller deletes the file.
+    let network_result: Option<Result<u64>> = tokio::select! {
+        result = network => Some(result),
+        () = stop => None,
+    };
     writer.await.map_err(io::Error::other)??;
-    network_result
+    network_result.transpose()
 }
 
 /// Disk side of sending: read from `offset`, hash each chunk, and pass data
@@ -446,6 +590,7 @@ fn read_pieces<R: Read + Seek>(
     offset: u64,
     size: u64,
     tx: mpsc::Sender<io::Result<Piece>>,
+    pool: Pool,
 ) {
     let mut run = || -> io::Result<()> {
         source.seek(SeekFrom::Start(offset))?;
@@ -454,7 +599,7 @@ fn read_pieces<R: Read + Seek>(
         while pos < size {
             let end = chunk_end(pos, size);
             let want = (end - pos).min(BUF_SIZE as u64) as usize;
-            let mut buf = vec![0u8; want];
+            let mut buf = pool.get(want);
             source.read_exact(&mut buf)?;
             hasher.update(&buf);
             pos += want as u64;
@@ -486,6 +631,7 @@ fn write_pieces<W: Sink>(
     mut rx: mpsc::Receiver<Piece>,
     offset: u64,
     mut meta: Option<MetaWriter>,
+    pool: Pool,
 ) -> Result<()> {
     let mut receive = || -> Result<()> {
         let mut hasher = blake3::Hasher::new();
@@ -495,6 +641,7 @@ fn write_pieces<W: Sink>(
                 Piece::Data(buf) => {
                     hasher.update(&buf);
                     sink.write_all(&buf)?;
+                    pool.put(buf);
                 }
                 Piece::ChunkEnd(expected) => {
                     if hasher.finalize().as_bytes() != &expected {

@@ -25,7 +25,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::{Direction, NodeEvent, Outgoing, Shared, local_addrs};
+use super::{Direction, NodeEvent, Outgoing, Shared, Verdict, local_addrs};
 use crate::identity::Fingerprint;
 use crate::pairing::random_bytes;
 use crate::resume::with_suffix;
@@ -492,7 +492,7 @@ async fn ask(
         super::Asking::Now(answer) => answer,
         super::Asking::Wait(key, rx) => shared.wait_answer(key, rx).await,
     };
-    if answer == Some(true)
+    if answer == Verdict::Yes
         && let Some(tab) = shared
             .state()
             .web
@@ -502,9 +502,9 @@ async fn ask(
         tab.allowance = tab.allowance.saturating_add(count);
     }
     let word = match answer {
-        Some(true) => "accepted",
-        Some(false) => "declined",
-        None => "none",
+        Verdict::Yes => "accepted",
+        Verdict::No => "declined",
+        Verdict::Lapsed => "none",
     };
     respond(
         tcp,
@@ -666,7 +666,7 @@ async fn download(
     };
 
     let start = Instant::now();
-    let result = stream_file(shared, tcp, id, item, &name).await;
+    let result = stream_file(shared, tcp, session, id, item, &name).await;
     let delivered = result.is_ok();
     shared.finish(
         id,
@@ -701,6 +701,7 @@ async fn download(
 async fn stream_file(
     shared: &Shared,
     tcp: &mut TcpStream,
+    browser: Fingerprint,
     id: u64,
     item: Outgoing,
     name: &str,
@@ -710,7 +711,7 @@ async fn stream_file(
         Outgoing::Open { file, .. } => file,
     };
     let size = file.metadata()?.len();
-    let progress = shared.track(id, size);
+    let progress = shared.track(id, browser, size);
     let mut file = tokio::fs::File::from_std(file);
     file.seek(SeekFrom::Start(0)).await?;
 
@@ -793,7 +794,7 @@ async fn upload(
         file_name: name.clone(),
         size,
     });
-    let progress = shared.track(id, size);
+    let progress = shared.track(id, session, size);
     let start = Instant::now();
     let dir = shared.download_dir();
     let result = async {

@@ -5,10 +5,27 @@
 //!
 //! Flow for one file:
 //! 1. Sender → `Offer` (header, file name, size, modified time)
-//! 2. Receiver → `Response::Accept { offset }` (or `Reject`)
+//! 2. Receiver → `Response::Asking` if its user is being asked (the bytes
+//!    still go now: "send first, accept later"), then
+//!    `Response::Accept { offset }` (or `Reject` / `Declined` / `NoAnswer`)
 //! 3. Sender → file bytes from `offset` to the end, streamed with no acks;
 //!    each `CHUNK_SIZE` chunk is followed by its 32-byte BLAKE3 hash
-//! 4. Receiver → `Response::Done` once the file is safely on disk
+//! 4. Receiver → `Response::Done` once the file is saved, or `Held` once it's
+//!    safely stored but its user hasn't answered yet (`Declined` / `NoAnswer`
+//!    if they said no or never answered)
+//!
+//! After `Asking`, the sender learns the answer with an `AwaitAnswer`
+//! request on a connection of its own: one per send, however many files.
+//!
+//! A direct link (the phone's hotspot) for the rest of a big transfer:
+//! `Link(Ask)` from the device that would join → `LinkReply::Join` with the
+//! network's details once the phone's hotspot is up (or `Refused`). Or
+//! `Link(Offer)` from the phone → `LinkReply::Ready` (or `Refused`), then the
+//! phone starts its hotspot and sends `LinkReply::Join` on the same
+//! connection.
+//!
+//! Clipboard text between paired devices: `Clip` → `Response::Done` (or
+//! `Reject` if that device doesn't sync its clipboard with this one).
 //!
 //! Flow for pairing:
 //! 1. Scanner → `PairRequest` (header, proof of the QR secret, device name)
@@ -32,10 +49,16 @@ pub const MAX_NAME_LEN: usize = 1024;
 /// Longest device name accepted on the wire, in bytes.
 pub const MAX_DEVICE_NAME_LEN: usize = 255;
 
+/// Longest clipboard text accepted on the wire, in bytes.
+pub const MAX_CLIP_LEN: usize = 1 << 20;
+
 const KIND_FILE: u8 = 1;
 const KIND_PAIR: u8 = 2;
 const KIND_PAIR_ASK: u8 = 3;
 const KIND_STATUS: u8 = 4;
+const KIND_AWAIT: u8 = 5;
+const KIND_CLIP: u8 = 6;
+const KIND_LINK: u8 = 7;
 
 /// Header that opens every connection.
 fn put_header(buf: &mut Vec<u8>, kind: u8) {
@@ -102,6 +125,12 @@ pub enum Request {
     PairAsk(PairAsk),
     /// Swap settings between paired devices.
     Status(Status),
+    /// "What did your user say about this send?" Answered once they have.
+    AwaitAnswer(AwaitAnswer),
+    /// Put this text on your clipboard.
+    Clip(Clip),
+    /// Move to a faster, direct network (the phone's hotspot).
+    Link(Link),
 }
 
 impl Request {
@@ -111,6 +140,15 @@ impl Request {
             KIND_PAIR => Ok(Self::Pair(PairRequest::read_body(r).await?)),
             KIND_PAIR_ASK => Ok(Self::PairAsk(PairAsk::read_body(r).await?)),
             KIND_STATUS => Ok(Self::Status(Status::read_body(r).await?)),
+            KIND_AWAIT => Ok(Self::AwaitAnswer(AwaitAnswer {
+                batch: r.read_u64().await?,
+            })),
+            KIND_CLIP => Ok(Self::Clip(Clip::read_body(r).await?)),
+            KIND_LINK => match r.read_u8().await? {
+                1 => Ok(Self::Link(Link::Ask)),
+                2 => Ok(Self::Link(Link::Offer)),
+                _ => Err(Error::Protocol("unknown link request")),
+            },
             _ => Err(Error::Protocol("unknown request kind")),
         }
     }
@@ -175,6 +213,151 @@ impl Status {
 
     async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
         Self::read_reply(r).await
+    }
+}
+
+/// Asks for the answer to a send (by batch ID) that the receiver is asking
+/// its user about. Replied to with `Response::Approved`, `Declined` or
+/// `NoAnswer`, once there is one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AwaitAnswer {
+    pub batch: u64,
+}
+
+impl AwaitAnswer {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let mut buf = Vec::with_capacity(15);
+        put_header(&mut buf, KIND_AWAIT);
+        buf.extend_from_slice(&self.batch.to_be_bytes());
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+}
+
+/// A direct link request; see the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Link {
+    /// "Start your hotspot and tell me how to join it."
+    Ask,
+    /// "I'll start my hotspot: will you join it?"
+    Offer,
+}
+
+impl Link {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let mut buf = Vec::with_capacity(8);
+        put_header(&mut buf, KIND_LINK);
+        buf.push(match self {
+            Self::Ask => 1,
+            Self::Offer => 2,
+        });
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+}
+
+/// How to join a phone's hotspot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Hotspot {
+    pub ssid: String,
+    pub passphrase: String,
+    /// WPA3 only (no WPA2 fallback).
+    pub wpa3: bool,
+    /// The phone's addresses on it.
+    pub addrs: Vec<std::net::Ipv4Addr>,
+}
+
+/// Answers to a `Link` request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkReply {
+    Refused,
+    /// Willing to join (the reply to `Offer`); `Join` follows.
+    Ready,
+    Join(Hotspot),
+}
+
+impl LinkReply {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let mut buf = Vec::new();
+        match self {
+            Self::Refused => buf.push(0),
+            Self::Ready => buf.push(1),
+            Self::Join(h) => {
+                buf.push(2);
+                put_string(&mut buf, truncate(&h.ssid, 64));
+                put_string(&mut buf, truncate(&h.passphrase, 128));
+                buf.push(u8::from(h.wpa3));
+                let addrs = &h.addrs[..h.addrs.len().min(8)];
+                buf.push(addrs.len() as u8);
+                for a in addrs {
+                    buf.extend_from_slice(&a.octets());
+                }
+            }
+        }
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    pub async fn read_from<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        match r.read_u8().await? {
+            0 => Ok(Self::Refused),
+            1 => Ok(Self::Ready),
+            2 => {
+                let ssid = read_string(r, 64, "network name too long").await?;
+                let passphrase = read_string(r, 128, "passphrase too long").await?;
+                let wpa3 = r.read_u8().await? != 0;
+                let count = r.read_u8().await? as usize;
+                if count > 8 {
+                    return Err(Error::Protocol("too many addresses"));
+                }
+                let mut addrs = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut o = [0u8; 4];
+                    r.read_exact(&mut o).await?;
+                    addrs.push(o.into());
+                }
+                Ok(Self::Join(Hotspot {
+                    ssid,
+                    passphrase,
+                    wpa3,
+                    addrs,
+                }))
+            }
+            _ => Err(Error::Protocol("unknown link reply")),
+        }
+    }
+}
+
+/// Clipboard text for a paired device. Applied at once, without asking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Clip {
+    pub text: String,
+}
+
+impl Clip {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let text = truncate(&self.text, MAX_CLIP_LEN);
+        let mut buf = Vec::with_capacity(7 + 4 + text.len());
+        put_header(&mut buf, KIND_CLIP);
+        buf.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        buf.extend_from_slice(text.as_bytes());
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        let len = r.read_u32().await? as usize;
+        if len > MAX_CLIP_LEN {
+            return Err(Error::Protocol("clipboard text too long"));
+        }
+        let mut bytes = vec![0u8; len];
+        r.read_exact(&mut bytes).await?;
+        let text = String::from_utf8(bytes).map_err(|_| Error::Protocol("text is not UTF-8"))?;
+        Ok(Self { text })
     }
 }
 
@@ -272,9 +455,14 @@ pub enum Response {
     NoAnswer,
     /// The receiver doesn't have the sender paired (any more).
     NotPaired,
-    /// Not an answer yet: the receiver is asking its user. The real answer
-    /// follows.
+    /// The receiver is asking its user. The data goes anyway; the answer
+    /// comes later (see `AwaitAnswer`).
     Asking,
+    /// Every byte is safely stored, but the receiver's user hasn't
+    /// answered yet. Kept if they accept, deleted if they decline.
+    Held,
+    /// The receiver's user said yes (the reply to `AwaitAnswer`).
+    Approved,
 }
 
 const TAG_REJECT: u8 = 0;
@@ -284,6 +472,8 @@ const TAG_DECLINED: u8 = 3;
 const TAG_NO_ANSWER: u8 = 4;
 const TAG_NOT_PAIRED: u8 = 5;
 const TAG_ASKING: u8 = 6;
+const TAG_HELD: u8 = 7;
+const TAG_APPROVED: u8 = 8;
 
 impl Response {
     pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
@@ -300,6 +490,8 @@ impl Response {
             Self::NoAnswer => w.write_u8(TAG_NO_ANSWER).await?,
             Self::NotPaired => w.write_u8(TAG_NOT_PAIRED).await?,
             Self::Asking => w.write_u8(TAG_ASKING).await?,
+            Self::Held => w.write_u8(TAG_HELD).await?,
+            Self::Approved => w.write_u8(TAG_APPROVED).await?,
         }
         w.flush().await?;
         Ok(())
@@ -316,6 +508,8 @@ impl Response {
             TAG_NO_ANSWER => Ok(Self::NoAnswer),
             TAG_NOT_PAIRED => Ok(Self::NotPaired),
             TAG_ASKING => Ok(Self::Asking),
+            TAG_HELD => Ok(Self::Held),
+            TAG_APPROVED => Ok(Self::Approved),
             _ => Err(Error::Protocol("unknown response tag")),
         }
     }
@@ -417,6 +611,8 @@ mod tests {
             Response::NoAnswer,
             Response::NotPaired,
             Response::Asking,
+            Response::Held,
+            Response::Approved,
             Response::Done,
         ] {
             let mut buf = Vec::new();
@@ -454,6 +650,55 @@ mod tests {
         );
         // A pairing request is not a file offer.
         assert!(Offer::read_from(&mut buf.as_slice()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn clip_and_await_round_trip() {
+        let clip = Clip {
+            text: "https://example.com/ünïcode".into(),
+        };
+        let mut buf = Vec::new();
+        clip.write_to(&mut buf).await.unwrap();
+        assert_eq!(
+            Request::read_from(&mut buf.as_slice()).await.unwrap(),
+            Request::Clip(clip)
+        );
+        let ask = AwaitAnswer { batch: 0xFEED };
+        let mut buf = Vec::new();
+        ask.write_to(&mut buf).await.unwrap();
+        assert_eq!(
+            Request::read_from(&mut buf.as_slice()).await.unwrap(),
+            Request::AwaitAnswer(ask)
+        );
+    }
+
+    #[tokio::test]
+    async fn link_messages_round_trip() {
+        for link in [Link::Ask, Link::Offer] {
+            let mut buf = Vec::new();
+            link.write_to(&mut buf).await.unwrap();
+            assert_eq!(
+                Request::read_from(&mut buf.as_slice()).await.unwrap(),
+                Request::Link(link)
+            );
+        }
+        for reply in [
+            LinkReply::Refused,
+            LinkReply::Ready,
+            LinkReply::Join(Hotspot {
+                ssid: "DIRECT-nudge".into(),
+                passphrase: "s3cret pass".into(),
+                wpa3: true,
+                addrs: vec![[192, 168, 49, 1].into()],
+            }),
+        ] {
+            let mut buf = Vec::new();
+            reply.write_to(&mut buf).await.unwrap();
+            assert_eq!(
+                LinkReply::read_from(&mut buf.as_slice()).await.unwrap(),
+                reply
+            );
+        }
     }
 
     #[tokio::test]

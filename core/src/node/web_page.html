@@ -74,7 +74,8 @@
   .label { font-weight: 600; font-size: calc(var(--orb) * .068); line-height: 1.15; overflow-wrap: anywhere; }
   .sub { font-size: calc(var(--orb) * .05); color: var(--muted); font-weight: 500; min-height: 1.2em; transition: color .3s; }
   .sub.good { color: var(--good); } .sub.bad { color: var(--bad); } .sub.accent { color: var(--accent); } .sub.warn { color: var(--warn); }
-  .progress { position: absolute; inset: 19%; transform: rotate(-90deg); pointer-events: none; opacity: 0; transition: opacity .3s; }
+  /* An <svg> isn't stretched by `inset` alone (Safari gives it a default size), so size it explicitly. */
+  .progress { position: absolute; top: 19%; left: 19%; width: 62%; height: 62%; transform: rotate(-90deg); pointer-events: none; opacity: 0; transition: opacity .3s; }
   .progress.on { opacity: 1; }
   .progress circle { fill: none; stroke-width: 2.4; }
   .progress .track { stroke: rgba(255,255,255,.12); }

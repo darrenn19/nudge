@@ -3,7 +3,10 @@
 #include <cwchar>
 #include <optional>
 
+#include <flutter/standard_method_codec.h>
+
 #include "flutter/generated_plugin_registrant.h"
+#include "utils.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -28,6 +31,13 @@ bool FlutterWindow::OnCreate() {
   RegisterPlugins(flutter_controller_->engine());
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
+  // Clipboard sync: hear about every copy, even with the window hidden in
+  // the tray (it still exists, so it still gets messages).
+  clipboard_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "nudge/clipboard",
+      &flutter::StandardMethodCodec::GetInstance());
+  AddClipboardFormatListener(GetHandle());
+
   // Started at login (--background): stay in the tray until opened. The
   // Dart side shows the window when the user asks for it.
   if (!wcsstr(GetCommandLineW(), L" --background")) {
@@ -45,6 +55,8 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  RemoveClipboardFormatListener(GetHandle());
+  clipboard_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -70,7 +82,58 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case WM_CLIPBOARDUPDATE:
+      ReportCopy();
+      return 0;
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
+}
+
+namespace {
+
+// Whether the clipboard carries a DWORD format set to 0: how password
+// managers say "don't keep or sync this".
+bool FormatSaysNo(UINT format) {
+  if (!IsClipboardFormatAvailable(format)) return false;
+  HANDLE data = GetClipboardData(format);
+  if (!data) return false;
+  auto* value = static_cast<DWORD*>(GlobalLock(data));
+  bool no = value && *value == 0;
+  GlobalUnlock(data);
+  return no;
+}
+
+}  // namespace
+
+void FlutterWindow::ReportCopy() {
+  if (!clipboard_) return;
+  static const UINT exclude =
+      RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
+  static const UINT history = RegisterClipboardFormatW(L"CanIncludeInClipboardHistory");
+  static const UINT cloud = RegisterClipboardFormatW(L"CanUploadToCloudClipboard");
+
+  // Another app may hold the clipboard for a moment.
+  bool opened = false;
+  for (int i = 0; i < 5 && !opened; i++) {
+    opened = OpenClipboard(GetHandle());
+    if (!opened) Sleep(20);
+  }
+  if (!opened) return;
+  bool keep_private = IsClipboardFormatAvailable(exclude) || FormatSaysNo(history) ||
+                      FormatSaysNo(cloud);
+  std::wstring text;
+  if (!keep_private && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+    HANDLE data = GetClipboardData(CF_UNICODETEXT);
+    if (data) {
+      auto* chars = static_cast<const wchar_t*>(GlobalLock(data));
+      if (chars) text = chars;
+      GlobalUnlock(data);
+    }
+  }
+  CloseClipboard();
+  // Text only, and nothing huge (the other side takes up to 1 MB).
+  if (keep_private || text.empty() || text.size() > (1 << 18)) return;
+  clipboard_->InvokeMethod("copied",
+                           std::make_unique<flutter::EncodableValue>(Utf8FromUtf16(text.c_str())));
 }

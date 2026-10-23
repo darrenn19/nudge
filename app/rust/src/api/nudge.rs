@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use flutter_rust_bridge::frb;
-use nudge_core::{Direction, Fingerprint, Node, NodeConfig, NodeEvent, Outgoing, Peer};
+use nudge_core::{
+    Direction, Fingerprint, HotspotInfo, LinkKind, Node, NodeConfig, NodeEvent, Outgoing, Peer,
+};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::UnboundedReceiver;
 
@@ -56,6 +58,8 @@ pub struct DeviceInfo {
     /// It accepts files from this device without asking; `None` until it
     /// has said.
     pub accepts_from_us: Option<bool>,
+    /// Clipboard text syncs with it, both ways.
+    pub clipboard: bool,
 }
 
 impl From<Peer> for DeviceInfo {
@@ -70,6 +74,7 @@ impl From<Peer> for DeviceInfo {
             reachable: p.reachable,
             auto_accept: p.auto_accept,
             accepts_from_us: p.accepts_from_us,
+            clipboard: p.clipboard,
         }
     }
 }
@@ -134,6 +139,38 @@ pub enum AppEvent {
     TransferPending {
         id: i64,
     },
+    /// Every byte is there, held until the receiver's user answers.
+    /// Outgoing: sent, waiting for them. Incoming: here, waiting for the
+    /// user; `TransferDone` follows the moment they accept.
+    TransferDelivered {
+        id: i64,
+    },
+    /// The network an outgoing transfer is using: "usb", "wired",
+    /// "hotspot", "wifi" or "other". Can change mid-file.
+    TransferRoute {
+        id: i64,
+        route: String,
+    },
+    /// Clipboard text from a paired device: put it on the clipboard.
+    ClipboardReceived {
+        device_id: String,
+        text: String,
+    },
+    /// Android: start the hotspot for a direct link, then `hotspot_ready`.
+    HotspotWanted {
+        id: i64,
+    },
+    /// Android: stop that hotspot.
+    HotspotDone,
+    /// Windows: join a phone's hotspot, then `joined`.
+    JoinWanted {
+        id: i64,
+        ssid: String,
+        passphrase: String,
+        wpa3: bool,
+    },
+    /// Windows: go back to the usual network.
+    LeaveWanted,
     /// A nearby device wants to pair without a QR code: show `code` and
     /// ask, then `answer_pair`.
     PairAsked {
@@ -204,6 +241,29 @@ impl From<NodeEvent> for AppEvent {
             NodeEvent::OfferClosed { id } => Self::OfferClosed { id: id as i64 },
             NodeEvent::TransferAccepted { id } => Self::TransferAccepted { id: id as i64 },
             NodeEvent::TransferPending { id } => Self::TransferPending { id: id as i64 },
+            NodeEvent::TransferDelivered { id } => Self::TransferDelivered { id: id as i64 },
+            NodeEvent::TransferRoute { id, route } => Self::TransferRoute {
+                id: id as i64,
+                route: route_name(route).to_owned(),
+            },
+            NodeEvent::ClipboardReceived { peer, text } => Self::ClipboardReceived {
+                device_id: peer.to_string(),
+                text,
+            },
+            NodeEvent::HotspotWanted { id } => Self::HotspotWanted { id: id as i64 },
+            NodeEvent::HotspotDone => Self::HotspotDone,
+            NodeEvent::JoinWanted {
+                id,
+                ssid,
+                passphrase,
+                wpa3,
+            } => Self::JoinWanted {
+                id: id as i64,
+                ssid,
+                passphrase,
+                wpa3,
+            },
+            NodeEvent::LeaveWanted => Self::LeaveWanted,
             NodeEvent::PairAsked {
                 id,
                 peer,
@@ -404,6 +464,53 @@ impl NudgeApp {
         self.node.web_share_url()
     }
 
+    /// Put text on a paired device's clipboard. No question on its side.
+    pub async fn send_clipboard(&self, device_id: String, text: String) -> Result<()> {
+        let peer = parse_id(&device_id)?;
+        let node = self.node.clone();
+        runtime()
+            .spawn(async move { node.send_clipboard(peer, text).await })
+            .await
+            .context("Nudge runtime stopped")??;
+        Ok(())
+    }
+
+    /// Sync the clipboard with a paired device, both ways, or stop.
+    #[frb(sync)]
+    pub fn set_clipboard_sync(&self, device_id: String, on: bool) -> Result<()> {
+        Ok(self.node.set_clipboard_sync(&parse_id(&device_id)?, on)?)
+    }
+
+    /// Whether big transfers may move to the phone's hotspot. USB cables
+    /// and Ethernet are always used when faster.
+    #[frb(sync)]
+    pub fn direct_link(&self) -> bool {
+        self.node.direct_link()
+    }
+
+    #[frb(sync)]
+    pub fn set_direct_link(&self, on: bool) -> Result<()> {
+        Ok(self.node.set_direct_link(on)?)
+    }
+
+    /// Answer `AppEvent::HotspotWanted`: the hotspot's name and passphrase,
+    /// or no `ssid` if it couldn't start.
+    #[frb(sync)]
+    pub fn hotspot_ready(&self, id: i64, ssid: Option<String>, passphrase: String, wpa3: bool) {
+        let info = ssid.map(|ssid| HotspotInfo {
+            ssid,
+            passphrase,
+            wpa3,
+        });
+        self.node.hotspot_ready(id as u64, info);
+    }
+
+    /// Answer `AppEvent::JoinWanted`.
+    #[frb(sync)]
+    pub fn joined(&self, id: i64, ok: bool) {
+        self.node.joined(id as u64, ok);
+    }
+
     /// Send files to a paired device in the background. Returns one
     /// transfer ID per file; progress arrives as events.
     #[frb(sync)]
@@ -454,6 +561,10 @@ impl OpenFile {
     fn into_outgoing(self) -> Result<Outgoing> {
         anyhow::bail!("sending open files isn't supported on this platform")
     }
+}
+
+fn route_name(kind: LinkKind) -> &'static str {
+    kind.name()
 }
 
 fn parse_id(id: &str) -> Result<Fingerprint> {

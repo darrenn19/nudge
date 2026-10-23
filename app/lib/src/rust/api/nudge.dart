@@ -9,18 +9,14 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'nudge.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `into_outgoing`, `parse_id`, `runtime`
+// These functions are ignored because they are not marked as `pub`: `into_outgoing`, `parse_id`, `route_name`, `runtime`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>>
 abstract class NudgeApp implements RustOpaqueInterface {
   /// Answer `AppEvent::OfferReceived`. With `always`, that device's files
   /// are accepted without asking from now on.
-  void answerOffer({
-    required PlatformInt64 id,
-    required bool accept,
-    required bool always,
-  });
+  void answerOffer({required PlatformInt64 id, required bool accept, required bool always});
 
   /// Answer `AppEvent::PairAsked`.
   void answerPair({required PlatformInt64 id, required bool accept});
@@ -34,12 +30,28 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Paired devices first, then unpaired nearby ones.
   List<DeviceInfo> devices();
 
+  /// Whether big transfers may move to the phone's hotspot. USB cables
+  /// and Ethernet are always used when faster.
+  bool directLink();
+
   bool discoveryRunning();
 
   String downloadDir();
 
   /// Deliver events to Dart. Call once; later calls do nothing.
   Stream<AppEvent> events();
+
+  /// Answer `AppEvent::HotspotWanted`: the hotspot's name and passphrase,
+  /// or no `ssid` if it couldn't start.
+  void hotspotReady({
+    required PlatformInt64 id,
+    String? ssid,
+    required String passphrase,
+    required bool wpa3,
+  });
+
+  /// Answer `AppEvent::JoinWanted`.
+  void joined({required PlatformInt64 id, required bool ok});
 
   /// Pair with the device showing `code` (scanned or pasted).
   Future<DeviceInfo> pair({required String code});
@@ -54,6 +66,9 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Ask nearby devices to announce themselves now.
   void refresh();
 
+  /// Put text on a paired device's clipboard. No question on its side.
+  Future<void> sendClipboard({required String deviceId, required String text});
+
   /// Send files to a paired device in the background. Returns one
   /// transfer ID per file; progress arrives as events.
   Int64List sendFiles({required String deviceId, required List<String> paths});
@@ -61,13 +76,15 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Send files the platform has already opened (Android shares arrive
   /// as open descriptors, not paths). Takes ownership of each descriptor
   /// and closes it when its transfer ends. Unix only.
-  Int64List sendOpenFiles({
-    required String deviceId,
-    required List<OpenFile> files,
-  });
+  Int64List sendOpenFiles({required String deviceId, required List<OpenFile> files});
 
   /// Accept files from a paired device without asking, or ask again.
   void setAutoAccept({required String deviceId, required bool on_});
+
+  /// Sync the clipboard with a paired device, both ways, or stop.
+  void setClipboardSync({required String deviceId, required bool on_});
+
+  void setDirectLink({required bool on_});
 
   void setDownloadDir({required String dir});
 
@@ -139,10 +156,8 @@ sealed class AppEvent with _$AppEvent {
     required double seconds,
     required PlatformInt64 resumedFrom,
   }) = AppEvent_TransferDone;
-  const factory AppEvent.transferFailed({
-    required PlatformInt64 id,
-    required String error,
-  }) = AppEvent_TransferFailed;
+  const factory AppEvent.transferFailed({required PlatformInt64 id, required String error}) =
+      AppEvent_TransferFailed;
 
   /// Sharing with browsers stopped (see `NudgeApp::start_web_share`).
   const factory AppEvent.webShareStopped() = AppEvent_WebShareStopped;
@@ -160,16 +175,45 @@ sealed class AppEvent with _$AppEvent {
   }) = AppEvent_OfferReceived;
 
   /// Stop showing that question (answered, or it timed out).
-  const factory AppEvent.offerClosed({required PlatformInt64 id}) =
-      AppEvent_OfferClosed;
+  const factory AppEvent.offerClosed({required PlatformInt64 id}) = AppEvent_OfferClosed;
 
   /// The receiver said yes to an outgoing transfer.
-  const factory AppEvent.transferAccepted({required PlatformInt64 id}) =
-      AppEvent_TransferAccepted;
+  const factory AppEvent.transferAccepted({required PlatformInt64 id}) = AppEvent_TransferAccepted;
 
   /// The receiver has it and is asking its user: delivered, answer to come.
-  const factory AppEvent.transferPending({required PlatformInt64 id}) =
-      AppEvent_TransferPending;
+  const factory AppEvent.transferPending({required PlatformInt64 id}) = AppEvent_TransferPending;
+
+  /// Every byte is there, held until the receiver's user answers.
+  /// Outgoing: sent, waiting for them. Incoming: here, waiting for the
+  /// user; `TransferDone` follows the moment they accept.
+  const factory AppEvent.transferDelivered({required PlatformInt64 id}) =
+      AppEvent_TransferDelivered;
+
+  /// The network an outgoing transfer is using: "usb", "wired",
+  /// "hotspot", "wifi" or "other". Can change mid-file.
+  const factory AppEvent.transferRoute({required PlatformInt64 id, required String route}) =
+      AppEvent_TransferRoute;
+
+  /// Clipboard text from a paired device: put it on the clipboard.
+  const factory AppEvent.clipboardReceived({required String deviceId, required String text}) =
+      AppEvent_ClipboardReceived;
+
+  /// Android: start the hotspot for a direct link, then `hotspot_ready`.
+  const factory AppEvent.hotspotWanted({required PlatformInt64 id}) = AppEvent_HotspotWanted;
+
+  /// Android: stop that hotspot.
+  const factory AppEvent.hotspotDone() = AppEvent_HotspotDone;
+
+  /// Windows: join a phone's hotspot, then `joined`.
+  const factory AppEvent.joinWanted({
+    required PlatformInt64 id,
+    required String ssid,
+    required String passphrase,
+    required bool wpa3,
+  }) = AppEvent_JoinWanted;
+
+  /// Windows: go back to the usual network.
+  const factory AppEvent.leaveWanted() = AppEvent_LeaveWanted;
 
   /// A nearby device wants to pair without a QR code: show `code` and
   /// ask, then `answer_pair`.
@@ -209,6 +253,9 @@ class DeviceInfo {
   /// has said.
   final bool? acceptsFromUs;
 
+  /// Clipboard text syncs with it, both ways.
+  final bool clipboard;
+
   const DeviceInfo({
     required this.id,
     required this.shortId,
@@ -219,6 +266,7 @@ class DeviceInfo {
     required this.reachable,
     required this.autoAccept,
     this.acceptsFromUs,
+    required this.clipboard,
   });
 
   @override
@@ -231,7 +279,8 @@ class DeviceInfo {
       online.hashCode ^
       reachable.hashCode ^
       autoAccept.hashCode ^
-      acceptsFromUs.hashCode;
+      acceptsFromUs.hashCode ^
+      clipboard.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -246,7 +295,8 @@ class DeviceInfo {
           online == other.online &&
           reachable == other.reachable &&
           autoAccept == other.autoAccept &&
-          acceptsFromUs == other.acceptsFromUs;
+          acceptsFromUs == other.acceptsFromUs &&
+          clipboard == other.clipboard;
 }
 
 /// A file the platform opened for us: its descriptor and display name.
@@ -262,8 +312,5 @@ class OpenFile {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is OpenFile &&
-          runtimeType == other.runtimeType &&
-          fd == other.fd &&
-          name == other.name;
+      other is OpenFile && runtimeType == other.runtimeType && fd == other.fd && name == other.name;
 }

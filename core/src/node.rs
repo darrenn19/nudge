@@ -21,14 +21,20 @@ use tokio::task::JoinHandle;
 
 use crate::discovery::{Announcement, DiscoveredPeer, Discovery, DiscoveryConfig, DiscoveryEvent};
 use crate::identity::{Fingerprint, Identity, TrustedPeers, clean_name};
+use crate::link::{LinkKind, Speeds};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
-use crate::protocol::{Batch, PairAsk, PairReply, PairRequest, Request, Response, Status};
+use crate::protocol::{
+    AwaitAnswer, Batch, Clip, Offer, PairAsk, PairReply, PairRequest, Request, Response, Status,
+};
 use crate::transfer::{
-    Progress, TransferStats, receive_offered, send_file_tracked, send_open_file_tracked,
+    Landed, Progress, TransferStats, land, receive_offered, send_file_tracked,
+    send_open_file_tracked,
 };
 use crate::{DEFAULT_PORT, Error, Result, Tls};
 
+mod paths;
 mod web;
+pub use paths::HotspotInfo;
 pub use web::WEB_PORT;
 
 /// How long to wait for each address when connecting.
@@ -54,6 +60,10 @@ const PAIR_ASK_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How long an answer covers the rest of its batch.
 const ANSWER_LIFETIME: Duration = Duration::from_secs(30 * 60);
+
+/// How long an incoming transfer whose connection dropped waits to pick up
+/// again before it counts as failed. Moving to a hotspot takes a while.
+const RESUME_GRACE: Duration = Duration::from_secs(45);
 
 /// How often progress events are sent for running transfers.
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
@@ -124,6 +134,9 @@ pub struct Peer {
     /// It accepts files from this device without asking. `None` until
     /// it's said.
     pub accepts_from_us: Option<bool>,
+    /// Clipboard text goes both ways with it (paired devices only; on
+    /// unless turned off).
+    pub clipboard: bool,
 }
 
 /// A file to send.
@@ -234,10 +247,48 @@ pub enum NodeEvent {
     TransferAccepted {
         id: u64,
     },
-    /// The receiver has the offer and is asking its user: the send is
-    /// delivered, the answer to come.
+    /// The receiver is asking its user. The bytes keep going meanwhile
+    /// ("send first, accept later"); the answer comes as `TransferAccepted`
+    /// or a failure.
     TransferPending {
         id: u64,
+    },
+    /// Every byte is there, held until the receiver's user answers.
+    /// Outgoing: delivered, waiting for them. Incoming: here, waiting for
+    /// this device's user; `TransferDone` follows the moment they accept,
+    /// and the file is deleted if they decline.
+    TransferDelivered {
+        id: u64,
+    },
+    /// The network path an outgoing transfer is using (it can change
+    /// mid-file, when a faster one turns up).
+    TransferRoute {
+        id: u64,
+        route: LinkKind,
+    },
+    /// Start this phone's hotspot for a faster direct link, then answer
+    /// with `Node::hotspot_ready` (with `None` if it can't).
+    HotspotWanted {
+        id: u64,
+    },
+    /// The direct link isn't needed any more: stop the hotspot.
+    HotspotDone,
+    /// Join a phone's hotspot for a faster direct link, then answer with
+    /// `Node::joined`.
+    JoinWanted {
+        id: u64,
+        ssid: String,
+        passphrase: String,
+        /// WPA3 only, no WPA2 fallback.
+        wpa3: bool,
+    },
+    /// The direct link isn't needed any more: go back to the usual network.
+    LeaveWanted,
+    /// Clipboard text from a paired device: put it on this device's
+    /// clipboard. Never asked about.
+    ClipboardReceived {
+        peer: Fingerprint,
+        text: String,
     },
     /// A nearby device wants to pair without a QR code. Check both screens
     /// show `code`, then answer with `Node::answer_pair` (closed with
@@ -284,7 +335,55 @@ struct Shared {
     ask: bool,
     /// Paired devices whose files are accepted without asking.
     auto_accept: Mutex<HashSet<Fingerprint>>,
+    /// Paired devices the clipboard doesn't sync with.
+    clip_off: Mutex<HashSet<Fingerprint>>,
+    /// Measured speeds per device and path.
+    speeds: Speeds,
+    /// May set up a direct link (the phone's hotspot) for big transfers.
+    direct_link: std::sync::atomic::AtomicBool,
 }
+
+/// What became of a question about files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verdict {
+    Yes,
+    No,
+    /// Nobody answered in time.
+    Lapsed,
+}
+
+impl Verdict {
+    /// The reply that tells the sender.
+    fn reply(self) -> Response {
+        match self {
+            Self::Yes => Response::Approved,
+            Self::No => Response::Declined,
+            Self::Lapsed => Response::NoAnswer,
+        }
+    }
+
+    /// How a refused transfer ends, on the side that asked.
+    fn error_here(self) -> Error {
+        match self {
+            Self::No => Error::YouDeclined,
+            _ => Error::NoAnswer,
+        }
+    }
+
+    /// How a refused transfer ends, on the side that sent.
+    fn error_there(self) -> Error {
+        match self {
+            Self::No => Error::Declined,
+            _ => Error::NoAnswer,
+        }
+    }
+}
+
+/// The answer to a question, once there is one.
+type AnswerRx = tokio::sync::watch::Receiver<Option<Verdict>>;
+
+/// A file kept until its batch is answered, and what to do then.
+type Held = Box<dyn FnOnce(Verdict) + Send>;
 
 #[derive(Default)]
 struct State {
@@ -298,10 +397,12 @@ struct State {
     pairing: Option<(PairingCode, Instant)>,
     active: HashMap<u64, Active>,
     /// Questions waiting for the user, by ID, with the batch they're about.
-    questions: HashMap<u64, (BatchKey, tokio::sync::watch::Sender<Option<bool>>)>,
+    questions: HashMap<u64, (BatchKey, tokio::sync::watch::Sender<Option<Verdict>>)>,
     /// The answer to each batch asked about, so the rest of its files
     /// follow it; `None` while still waiting.
-    answers: HashMap<BatchKey, (tokio::sync::watch::Receiver<Option<bool>>, Instant)>,
+    answers: HashMap<BatchKey, (AnswerRx, Instant)>,
+    /// Files that arrived while their batch was being asked about.
+    held: HashMap<BatchKey, Vec<Held>>,
     /// "Can we pair?" questions waiting for the user, by ID.
     pair_asks: HashMap<u64, (Fingerprint, tokio::sync::oneshot::Sender<bool>)>,
     /// Whether each paired device accepts our files without asking, as it
@@ -310,10 +411,28 @@ struct State {
     status_asked: HashSet<Fingerprint>,
     /// Connections opened ahead of a send, one per device at most.
     warm: HashMap<Fingerprint, WarmSlot>,
+    /// Where each paired device last connected to us from: an address
+    /// that works, even if discovery hasn't seen it.
+    learned: HashMap<Fingerprint, IpAddr>,
+    /// Its addresses on its hotspot, while joined to it.
+    extra: HashMap<Fingerprint, Vec<IpAddr>>,
+    /// The direct link (hotspot) in use, if any.
+    link: Option<paths::DirectLink>,
+    /// When a direct link with each device was last tried.
+    link_tried: HashMap<Fingerprint, Instant>,
+    /// Paths that didn't connect when moved to, and when.
+    dead_paths: HashMap<(Fingerprint, LinkKind), Instant>,
+    /// The app's answers to `HotspotWanted` and `JoinWanted`.
+    hotspot_waits: HashMap<u64, tokio::sync::oneshot::Sender<Option<HotspotInfo>>>,
+    join_waits: HashMap<u64, tokio::sync::oneshot::Sender<bool>>,
+    /// Incoming files whose connection dropped, by sender, name and size:
+    /// one that picks up again soon (a path change) keeps its transfer.
+    interrupted: HashMap<(Fingerprint, String, u64), u64>,
 }
 
 /// A running transfer, for progress reporting.
 struct Active {
+    peer: Fingerprint,
     progress: Progress,
     size: u64,
     last: (u64, Instant),
@@ -327,10 +446,147 @@ type BatchKey = (Fingerprint, u64);
 
 /// Where a decision to take files stands.
 enum Asking {
-    /// Decided (`None`: nobody answered in time).
-    Now(Option<bool>),
+    Now(Verdict),
     /// The user is being asked.
-    Wait(BatchKey, tokio::sync::watch::Receiver<Option<bool>>),
+    Wait(BatchKey, AnswerRx),
+}
+
+/// Finishes when `answer` turns out to be no (or lapses); never otherwise.
+async fn said_no(mut answer: AnswerRx) {
+    let no = answer
+        .wait_for(|v| matches!(v, Some(Verdict::No | Verdict::Lapsed)))
+        .await
+        .is_ok();
+    if !no {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// The answer, once given. A question dropped without one has lapsed.
+async fn answered(mut answer: AnswerRx) -> Verdict {
+    match answer.wait_for(Option::is_some).await {
+        Ok(v) => (*v).unwrap_or(Verdict::Lapsed),
+        Err(_) => Verdict::Lapsed,
+    }
+}
+
+/// The sending side of a batch the receiver is asking about: its answer,
+/// once known, and the files delivered while it wasn't.
+struct OutBatch {
+    inner: Mutex<OutBatchInner>,
+    verdict: tokio::sync::watch::Sender<Option<Verdict>>,
+}
+
+#[derive(Default)]
+struct OutBatchInner {
+    verdict: Option<Verdict>,
+    /// Delivered files waiting for the answer.
+    held: Vec<(u64, PathBuf, TransferStats, Progress)>,
+    /// The file on its way now.
+    current: Option<Progress>,
+    /// An `AwaitAnswer` is out.
+    awaiting: bool,
+}
+
+impl OutBatch {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::default(),
+            verdict: tokio::sync::watch::channel(None).0,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, OutBatchInner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn verdict(&self) -> Option<Verdict> {
+        self.lock().verdict
+    }
+
+    /// Finishes when the answer is no (or lapsed); never otherwise.
+    async fn until_no(&self) -> Verdict {
+        let mut rx = self.verdict.subscribe();
+        let no = match rx
+            .wait_for(|v| matches!(v, Some(Verdict::No | Verdict::Lapsed)))
+            .await
+        {
+            Ok(v) => *v,
+            Err(_) => None,
+        };
+        match no {
+            Some(v) => v,
+            None => std::future::pending().await,
+        }
+    }
+
+    fn set_current(&self, progress: Option<Progress>) {
+        self.lock().current = progress;
+    }
+
+    /// True the first time only: whoever gets it sends the `AwaitAnswer`.
+    fn start_awaiting(&self) -> bool {
+        !std::mem::replace(&mut self.lock().awaiting, true)
+    }
+
+    /// A file is delivered and held by the receiver: settle it with the
+    /// answer, now if it's known, or when it comes.
+    fn hold(&self, shared: &Shared, id: u64, source: PathBuf, stats: TransferStats, p: Progress) {
+        let known = {
+            let mut inner = self.lock();
+            match inner.verdict {
+                Some(v) => Some((v, source, stats, p)),
+                None => {
+                    inner.held.push((id, source, stats, p));
+                    None
+                }
+            }
+        };
+        match known {
+            Some((v, source, stats, p)) => settle_sent(shared, id, source, stats, &p, v),
+            None => shared.emit(NodeEvent::TransferDelivered { id }),
+        }
+    }
+
+    /// The answer came: settle everything delivered so far, and tell the
+    /// file on its way now.
+    fn settle(&self, shared: &Shared, v: Verdict) {
+        let held = {
+            let mut inner = self.lock();
+            if inner.verdict.is_some() {
+                return;
+            }
+            inner.verdict = Some(v);
+            if v == Verdict::Yes
+                && let Some(current) = &inner.current
+            {
+                current.mark_accepted();
+            }
+            std::mem::take(&mut inner.held)
+        };
+        self.verdict.send_replace(Some(v));
+        for (id, source, stats, p) in held {
+            settle_sent(shared, id, source, stats, &p, v);
+        }
+    }
+}
+
+/// How a delivered, held file ends on the sending side.
+fn settle_sent(
+    shared: &Shared,
+    id: u64,
+    source: PathBuf,
+    stats: TransferStats,
+    progress: &Progress,
+    v: Verdict,
+) {
+    match v {
+        Verdict::Yes => {
+            progress.mark_accepted();
+            shared.finish(id, Ok((source, stats)));
+        }
+        v => shared.finish(id, Err(v.error_there())),
+    }
 }
 
 impl Node {
@@ -355,7 +611,10 @@ impl Node {
         };
         let port = listener.local_addr()?.port();
 
-        let auto_accept = load_auto_accept(&config.data_dir);
+        let auto_accept = load_fingerprints(&config.data_dir, AUTO_ACCEPT_FILE);
+        let speeds = Speeds::load(&config.data_dir);
+        let direct_link = !config.data_dir.join(DIRECT_LINK_OFF_FILE).exists();
+        let clip_off = load_fingerprints(&config.data_dir, CLIP_OFF_FILE);
         let device_name = clean_name(&config.device_name);
         let (events, events_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -375,6 +634,9 @@ impl Node {
             platform: config.platform.clone(),
             ask: config.ask_before_receiving,
             auto_accept: Mutex::new(auto_accept),
+            clip_off: Mutex::new(clip_off),
+            speeds,
+            direct_link: std::sync::atomic::AtomicBool::new(direct_link),
         });
 
         let mut tasks = vec![
@@ -466,6 +728,7 @@ impl Node {
                     reachable: seen.is_some(),
                     auto_accept: self.shared.auto_accepts(&fp),
                     accepts_from_us: state.remote_auto.get(&fp).copied(),
+                    clipboard: self.shared.syncs_clipboard(&fp),
                 }
             })
             .collect();
@@ -483,6 +746,7 @@ impl Node {
                     reachable: true,
                     auto_accept: false,
                     accepts_from_us: None,
+                    clipboard: false,
                 }),
         );
         if let Some(web) = &state.web {
@@ -495,6 +759,7 @@ impl Node {
                 reachable: true,
                 auto_accept: false,
                 accepts_from_us: None,
+                clipboard: false,
             }));
         }
         peers.sort_by(|a, b| {
@@ -657,7 +922,7 @@ impl Node {
         let Some(((peer, _), answer)) = question else {
             return Ok(()); // already answered, or timed out
         };
-        let _ = answer.send(Some(accept));
+        let _ = answer.send(Some(if accept { Verdict::Yes } else { Verdict::No }));
         self.shared.emit(NodeEvent::OfferClosed { id });
         if accept && always {
             if web::is_browser(&self.shared, &peer) {
@@ -668,6 +933,84 @@ impl Node {
             }
         }
         Ok(())
+    }
+
+    /// Whether big transfers may move to a direct link (the phone's
+    /// hotspot). On unless turned off. USB cables and Ethernet are always
+    /// used when they're faster: they cost nothing.
+    pub fn direct_link(&self) -> bool {
+        self.shared.direct_link.load(Ordering::Relaxed)
+    }
+
+    pub fn set_direct_link(&self, on: bool) -> Result<()> {
+        self.shared.direct_link.store(on, Ordering::Relaxed);
+        let file = self.shared.data_dir.join(DIRECT_LINK_OFF_FILE);
+        if on {
+            let _ = std::fs::remove_file(file);
+        } else {
+            std::fs::write(file, "Direct links (hotspot) turned off.\n")?;
+        }
+        Ok(())
+    }
+
+    /// Answer `NodeEvent::HotspotWanted`: how to join the hotspot that was
+    /// started, or `None`.
+    pub fn hotspot_ready(&self, id: u64, info: Option<HotspotInfo>) {
+        self.shared.hotspot_ready(id, info);
+    }
+
+    /// Answer `NodeEvent::JoinWanted`.
+    pub fn joined(&self, id: u64, ok: bool) {
+        self.shared.joined(id, ok);
+    }
+
+    /// Sync the clipboard with a paired device (both ways), or stop.
+    pub fn set_clipboard_sync(&self, peer: &Fingerprint, on: bool) -> Result<()> {
+        let list = {
+            let mut off = self
+                .shared
+                .clip_off
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let changed = if on {
+                off.remove(peer)
+            } else {
+                off.insert(*peer)
+            };
+            if !changed {
+                return Ok(());
+            }
+            off.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        save_fingerprints(
+            &self.shared.data_dir,
+            CLIP_OFF_FILE,
+            "# Paired devices the clipboard doesn't sync with.",
+            list,
+        )?;
+        self.shared.emit(NodeEvent::PeersChanged);
+        Ok(())
+    }
+
+    /// Put `text` on a paired device's clipboard. No question on the other
+    /// side; fails if it doesn't sync its clipboard with this device.
+    pub async fn send_clipboard(&self, peer: Fingerprint, text: String) -> Result<()> {
+        let shared = &self.shared;
+        if !shared.trusted.contains(&peer) {
+            return Err(Error::UntrustedPeer(peer));
+        }
+        let mut stream = connect_any(&shared.tls, &shared.addrs_of(&peer), peer).await?;
+        Clip { text }.write_to(&mut stream).await?;
+        let reply = tokio::time::timeout(REQUEST_TIMEOUT, Response::read_from(&mut stream))
+            .await
+            .map_err(|_| Error::Unreachable)??;
+        let _ = stream.shutdown().await;
+        match reply {
+            Response::Done => Ok(()),
+            Response::Reject => Err(Error::Rejected),
+            Response::NotPaired => Err(Error::NotTrustedByPeer),
+            _ => Err(Error::Protocol("unexpected reply to clipboard text")),
+        }
     }
 
     /// Send files to a paired, nearby device, one after another, in the
@@ -726,10 +1069,15 @@ impl Node {
                 count: count as u32,
                 size: jobs.iter().map(|(_, item)| item.size()).sum(),
             };
-            // Once they decline (or don't answer), the rest isn't offered.
+            // If they're asked, the files still go, one after another; the
+            // answer arrives on its own connection (`await_answer`).
+            let out = Arc::new(OutBatch::new());
+            let sizes: Vec<u64> = jobs.iter().map(|(_, item)| item.size()).collect();
+            // Once they decline (or don't answer), the rest isn't sent.
             let mut refused: Option<fn() -> Error> = None;
             for (index, (id, item)) in jobs.into_iter().enumerate() {
                 let more = index + 1 < count;
+                let after: u64 = sizes[index + 1..].iter().sum();
                 let name = item.name();
                 let size = item.size();
                 shared.emit(NodeEvent::TransferStarted {
@@ -739,16 +1087,48 @@ impl Node {
                     file_name: name.clone(),
                     size,
                 });
-                let progress = shared.track(id, size);
+                let progress = shared.track(id, peer, size);
                 let source = match &item {
                     Outgoing::Path(path) => path.clone(),
                     Outgoing::Open { .. } => PathBuf::from(&name),
                 };
+                match out.verdict() {
+                    Some(Verdict::No) => refused = Some(|| Error::Declined),
+                    Some(Verdict::Lapsed) => refused = Some(|| Error::NoAnswer),
+                    _ => {}
+                }
                 if let Some(error) = refused {
                     shared.finish(id, Err(error()));
                     continue;
                 }
-                let result = shared.send_one(peer, item, batch, &progress, more).await;
+                out.set_current(Some(progress.clone()));
+                let result = {
+                    let send = shared.send_one(peer, id, item, batch, &progress, more, after);
+                    tokio::pin!(send);
+                    let mut asked = false;
+                    loop {
+                        tokio::select! {
+                            result = &mut send => break result,
+                            // They're being asked: listen for the answer.
+                            () = progress.until_pending(), if !asked => {
+                                asked = true;
+                                shared.await_answer(peer, batch.id, out.clone());
+                            }
+                            // They said no: stop sending.
+                            v = out.until_no() => break Err(v.error_there()),
+                        }
+                    }
+                };
+                out.set_current(None);
+                let result = match result {
+                    // A refusal mid-file can cut the connection before the
+                    // answer arrives: wait a moment for it.
+                    Err(Error::Io(e)) if progress.pending() => {
+                        let no = tokio::time::timeout(Duration::from_secs(2), out.until_no()).await;
+                        Err(no.map_or(Error::Io(e), Verdict::error_there))
+                    }
+                    other => other,
+                };
                 match &result {
                     Err(Error::Declined) => refused = Some(|| Error::Declined),
                     Err(Error::NoAnswer) => refused = Some(|| Error::NoAnswer),
@@ -758,7 +1138,21 @@ impl Node {
                 if progress.accepted() || progress.pending() {
                     shared.record_remote_auto(peer, !progress.pending());
                 }
-                shared.finish(id, result.map(|stats| (source, stats)));
+                match result {
+                    // There, and waiting for their answer.
+                    Ok(stats) if progress.held() => {
+                        shared.await_answer(peer, batch.id, out.clone());
+                        out.hold(&shared, id, source, stats, progress);
+                    }
+                    Ok(stats) => {
+                        // Saved after they were asked: they said yes.
+                        if progress.pending() {
+                            out.settle(&shared, Verdict::Yes);
+                        }
+                        shared.finish(id, Ok((source, stats)));
+                    }
+                    Err(e) => shared.finish(id, Err(e)),
+                }
             }
         });
         ids
@@ -798,20 +1192,29 @@ impl Shared {
             }
             set.iter().map(ToString::to_string).collect::<Vec<_>>()
         };
-        let mut text = String::from("# Paired devices whose files are accepted without asking.\n");
-        for fp in list {
-            text.push_str(&fp);
-            text.push('\n');
-        }
-        std::fs::write(self.data_dir.join(AUTO_ACCEPT_FILE), text)?;
+        save_fingerprints(
+            &self.data_dir,
+            AUTO_ACCEPT_FILE,
+            "# Paired devices whose files are accepted without asking.",
+            list,
+        )?;
         Ok(())
     }
 
+    fn syncs_clipboard(&self, peer: &Fingerprint) -> bool {
+        !self
+            .clip_off
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(peer)
+    }
+
     /// Start deciding whether to take files: at once for auto-accepted
-    /// devices or a batch already answered; otherwise the user is asked
-    /// (once per batch) and the answer is waited for with `wait_answer`.
+    /// devices or a batch already answered; otherwise the user is asked,
+    /// once per batch. Files can arrive meanwhile and wait (`hold`); when
+    /// the answer comes they're kept or deleted.
     fn start_asking(
-        &self,
+        self: &Arc<Self>,
         peer: Fingerprint,
         batch: u64,
         first_name: &str,
@@ -819,7 +1222,7 @@ impl Shared {
         size: u64,
     ) -> Asking {
         if !self.ask || self.auto_accepts(&peer) || web::always_accepts(self, &peer) {
-            return Asking::Now(Some(true));
+            return Asking::Now(Verdict::Yes);
         }
         let key = match batch {
             0 => (peer, u64::from_be_bytes(pairing::random_bytes()).max(1)),
@@ -845,43 +1248,126 @@ impl Shared {
                         count: count.max(1),
                         size,
                     });
+                    // Whatever the answer, settle what arrived meanwhile.
+                    let shared = self.clone();
+                    let waiting = rx.clone();
+                    tokio::spawn(async move {
+                        let v = shared.wait_answer(key, waiting).await;
+                        shared.settle_held(key, v);
+                    });
                     rx
                 }
             }
         };
         let known = *answer.borrow();
         match known {
-            Some(value) => Asking::Now(Some(value)),
+            Some(v) => Asking::Now(v),
             None => Asking::Wait(key, answer),
         }
     }
 
-    /// Wait for the user's answer. `None`: nobody answered in time.
-    async fn wait_answer(
-        &self,
-        key: BatchKey,
-        mut answer: tokio::sync::watch::Receiver<Option<bool>>,
-    ) -> Option<bool> {
-        let waited = tokio::time::timeout(ANSWER_TIMEOUT, answer.wait_for(Option::is_some)).await;
-        match waited {
-            Ok(Ok(value)) => *value,
-            _ => {
-                // Nobody answered: close the question and forget the batch,
-                // so a later send asks again.
-                let mut state = self.state();
-                state.answers.remove(&key);
-                let id = state
-                    .questions
-                    .iter()
-                    .find(|(_, (k, _))| *k == key)
-                    .map(|(id, _)| *id);
-                if let Some(id) = id {
-                    state.questions.remove(&id);
-                    drop(state);
-                    self.emit(NodeEvent::OfferClosed { id });
-                }
-                None
+    /// Wait for the user's answer. If nobody answers in time, the question
+    /// closes and lapses.
+    async fn wait_answer(&self, key: BatchKey, answer: AnswerRx) -> Verdict {
+        if let Ok(v) = tokio::time::timeout(ANSWER_TIMEOUT, answered(answer)).await {
+            return v;
+        }
+        // Nobody answered: close the question and forget the batch, so a
+        // later send asks again.
+        let mut state = self.state();
+        state.answers.remove(&key);
+        let id = state
+            .questions
+            .iter()
+            .find(|(_, (k, _))| *k == key)
+            .map(|(id, _)| *id);
+        if let Some(id) = id
+            && let Some((_, tx)) = state.questions.remove(&id)
+        {
+            drop(state);
+            let _ = tx.send(Some(Verdict::Lapsed));
+            self.emit(NodeEvent::OfferClosed { id });
+        }
+        Verdict::Lapsed
+    }
+
+    /// Keep a file that arrived before its batch was answered; settle it
+    /// at once if the answer is in.
+    fn hold(&self, key: BatchKey, answer: &AnswerRx, file: Held) {
+        let known = {
+            let mut state = self.state();
+            let known = *answer.borrow();
+            if known.is_none() {
+                state.held.entry(key).or_default().push(file);
+                return;
             }
+            known
+        };
+        if let Some(v) = known {
+            file(v);
+        }
+    }
+
+    /// The batch was answered: keep or delete what it held.
+    fn settle_held(&self, key: BatchKey, v: Verdict) {
+        let held = self.state().held.remove(&key).unwrap_or_default();
+        for file in held {
+            file(v);
+        }
+    }
+
+    /// Give a held file its name, or delete it.
+    fn settle_landed(&self, id: u64, landed: Landed, v: Verdict) {
+        let result = match v {
+            Verdict::Yes => landed.keep().map(|f| (f.path, f.stats)),
+            v => {
+                landed.discard();
+                Err(v.error_here())
+            }
+        };
+        self.finish(id, result);
+    }
+
+    /// Listen for the answer to a batch the receiver is asking about, on a
+    /// connection of its own, and settle the batch with it. Once per batch.
+    fn await_answer(self: &Arc<Self>, peer: Fingerprint, batch: u64, out: Arc<OutBatch>) {
+        if !out.start_awaiting() {
+            return;
+        }
+        let shared = self.clone();
+        tokio::spawn(async move {
+            let give_up = Instant::now() + ANSWER_TIMEOUT + Duration::from_secs(60);
+            loop {
+                if out.verdict().is_some() {
+                    return;
+                }
+                match shared.ask_answer(peer, batch).await {
+                    Ok(v) => return out.settle(&shared, v),
+                    // A dropped connection (a phone locking): ask again.
+                    Err(_) if Instant::now() < give_up => {
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                    Err(_) => return out.settle(&shared, Verdict::Lapsed),
+                }
+            }
+        });
+    }
+
+    async fn ask_answer(&self, peer: Fingerprint, batch: u64) -> Result<Verdict> {
+        let mut stream = connect_any(&self.tls, &self.addrs_of(&peer), peer).await?;
+        AwaitAnswer { batch }.write_to(&mut stream).await?;
+        let reply = tokio::time::timeout(
+            ANSWER_TIMEOUT + Duration::from_secs(30),
+            Response::read_from(&mut stream),
+        )
+        .await
+        .map_err(|_| Error::NoAnswer)??;
+        let _ = stream.shutdown().await;
+        match reply {
+            Response::Approved => Ok(Verdict::Yes),
+            Response::Declined => Ok(Verdict::No),
+            Response::NoAnswer => Ok(Verdict::Lapsed),
+            _ => Err(Error::Protocol("unexpected reply to AwaitAnswer")),
         }
     }
 
@@ -950,31 +1436,16 @@ impl Shared {
             reachable: nearby.is_some(),
             auto_accept: self.auto_accepts(&fp),
             accepts_from_us: state.remote_auto.get(&fp).copied(),
+            clipboard: self.trusted.contains(&fp) && self.syncs_clipboard(&fp),
         }
     }
 
-    /// Where to reach `fp`: where it is now if it's nearby, else where it
-    /// was last seen.
-    fn addrs_of(&self, fp: &Fingerprint) -> Vec<SocketAddr> {
-        let state = self.state();
-        state
-            .nearby
-            .get(fp)
-            .or_else(|| state.last_seen.get(fp))
-            .map(|p| {
-                p.addrs
-                    .iter()
-                    .map(|ip| SocketAddr::new(*ip, p.port))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    fn track(&self, id: u64, size: u64) -> Progress {
+    fn track(&self, id: u64, peer: Fingerprint, size: u64) -> Progress {
         let progress = Progress::new();
         self.state().active.insert(
             id,
             Active {
+                peer,
                 progress: progress.clone(),
                 size,
                 last: (0, Instant::now()),
@@ -1058,51 +1529,23 @@ impl Shared {
         (opened.elapsed() < WARM_LIFETIME).then_some(conn)
     }
 
-    /// Send one file. `more` says another file to the same device follows,
-    /// so its connection can open while this one sends.
-    async fn send_one(
-        self: &Arc<Self>,
-        peer: Fingerprint,
-        item: Outgoing,
-        batch: Batch,
-        progress: &Progress,
-        more: bool,
-    ) -> Result<TransferStats> {
-        if !self.trusted.contains(&peer) {
-            return Err(Error::UntrustedPeer(peer));
-        }
-        let warmed = self.take_warm(peer).await;
-        // A connection opened ahead of time may have been closed by the other
-        // side while it waited (it restarted, or waited too long). Keep a
-        // second handle to the file so the send can go again on a fresh
-        // connection; resume makes that safe even partway through.
-        let spare = match warmed {
-            Some(_) => item.try_clone().ok(),
-            None => None,
-        };
-        let mut stream = match warmed {
-            Some(conn) => conn,
-            None => connect_any(&self.tls, &self.addrs_of(&peer), peer).await?,
-        };
-        if more {
-            self.warm(peer);
-        }
-        match (send_over(&mut stream, item, batch, progress).await, spare) {
-            (Err(Error::Io(_)), Some(spare)) => {
-                let mut stream = connect_any(&self.tls, &self.addrs_of(&peer), peer).await?;
-                send_over(&mut stream, spare, batch, progress).await
-            }
-            (result, _) => result,
-        }
-    }
-
     /// Handle one incoming connection: a file from a paired device, or a
     /// pairing request from a device that scanned our code.
-    async fn serve<S>(self: &Arc<Self>, mut stream: S, peer: Fingerprint) -> Result<()>
+    async fn serve<S>(
+        self: &Arc<Self>,
+        mut stream: S,
+        peer: Fingerprint,
+        from: IpAddr,
+    ) -> Result<()>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
         let trusted = self.tls.is_trusted(&peer);
+        if trusted {
+            // An address that just worked: good for sending back, even on a
+            // network discovery hasn't seen (a hotspot just joined).
+            self.state().learned.insert(peer, from);
+        }
         // A paired device may connect before it knows what to send (see
         // `Node::warm`); anyone else must say at once.
         let wait = if trusted {
@@ -1114,63 +1557,47 @@ impl Shared {
             .await
             .map_err(|_| Error::Protocol("no request in time"))??;
         match request {
-            Request::File(offer) if trusted => {
-                let decision = match self.start_asking(
-                    peer,
-                    offer.batch.id,
-                    &offer.name,
-                    offer.batch.count,
-                    offer.batch.size.max(offer.size),
-                ) {
-                    Asking::Now(answer) => answer,
-                    Asking::Wait(key, answer) => {
-                        // Let the sender know it's delivered and waiting.
-                        let _ = Response::Asking.write_to(&mut stream).await;
-                        self.wait_answer(key, answer).await
-                    }
+            Request::File(offer) if trusted => self.receive(stream, peer, offer).await,
+            Request::File(_) => {
+                let _ = Response::NotPaired.write_to(&mut stream).await;
+                Err(Error::UntrustedPeer(peer))
+            }
+            Request::AwaitAnswer(AwaitAnswer { batch }) if trusted => {
+                let answer = self
+                    .state()
+                    .answers
+                    .get(&(peer, batch))
+                    .map(|(answer, _)| answer.clone());
+                // No question about it (any more): it lapsed.
+                let v = match answer {
+                    Some(answer) => tokio::time::timeout(
+                        ANSWER_TIMEOUT + Duration::from_secs(10),
+                        answered(answer),
+                    )
+                    .await
+                    .unwrap_or(Verdict::Lapsed),
+                    None => Verdict::Lapsed,
                 };
-                match decision {
-                    Some(true) => {}
-                    Some(false) => {
-                        let _ = Response::Declined.write_to(&mut stream).await;
-                        return Ok(());
-                    }
-                    None => {
-                        let _ = Response::NoAnswer.write_to(&mut stream).await;
-                        return Ok(());
-                    }
-                }
-                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-                self.emit(NodeEvent::TransferStarted {
-                    id,
-                    peer,
-                    direction: Direction::Incoming,
-                    file_name: offer.name.clone(),
-                    size: offer.size,
-                });
-                let progress = self.track(id, offer.size);
-                let dir = self
-                    .download_dir
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clone();
-                let result = match std::fs::create_dir_all(&dir) {
-                    Ok(()) => receive_offered(&mut stream, offer, &dir, Some(peer), &progress)
-                        .await
-                        .map(|f| (f.path, f.stats)),
-                    Err(e) => {
-                        let _ = Response::Reject.write_to(&mut stream).await;
-                        Err(e.into())
-                    }
-                };
-                let failed = result.is_err();
-                self.finish(id, result);
-                if !failed {
-                    let _ = stream.shutdown().await;
-                }
+                v.reply().write_to(&mut stream).await?;
+                let _ = stream.shutdown().await;
                 Ok(())
             }
-            Request::File(_) => {
+            Request::Clip(clip) if trusted => {
+                let reply = if self.syncs_clipboard(&peer) {
+                    self.emit(NodeEvent::ClipboardReceived {
+                        peer,
+                        text: clip.text,
+                    });
+                    Response::Done
+                } else {
+                    Response::Reject
+                };
+                reply.write_to(&mut stream).await?;
+                let _ = stream.shutdown().await;
+                Ok(())
+            }
+            Request::Link(request) if trusted => self.answer_link(stream, peer, request).await,
+            Request::AwaitAnswer(_) | Request::Clip(_) | Request::Link(_) => {
                 let _ = Response::NotPaired.write_to(&mut stream).await;
                 Err(Error::UntrustedPeer(peer))
             }
@@ -1188,6 +1615,171 @@ impl Shared {
             }
             Request::Status(_) => Err(Error::UntrustedPeer(peer)),
         }
+    }
+
+    /// A file from a paired device. If its user is being asked, the file
+    /// still comes in at once, into a partial file nobody sees: kept the
+    /// moment they accept, deleted if they decline.
+    async fn receive<S>(
+        self: &Arc<Self>,
+        mut stream: S,
+        peer: Fingerprint,
+        offer: Offer,
+    ) -> Result<()>
+    where
+        S: AsyncRead + AsyncWrite + Unpin,
+    {
+        let asked = match self.start_asking(
+            peer,
+            offer.batch.id,
+            &offer.name,
+            offer.batch.count,
+            offer.batch.size.max(offer.size),
+        ) {
+            Asking::Now(Verdict::Yes) => None,
+            Asking::Now(v) => {
+                let _ = v.reply().write_to(&mut stream).await;
+                return Ok(());
+            }
+            Asking::Wait(key, answer) => {
+                // The sender carries on sending, and learns the answer later.
+                Response::Asking.write_to(&mut stream).await?;
+                Some((key, answer))
+            }
+        };
+        // The same file picking up after its connection dropped (the sender
+        // moved to a faster path, or Wi-Fi blinked) carries on as the same
+        // transfer.
+        let resumed_key = (peer, offer.name.clone(), offer.size);
+        let resumed = self.state().interrupted.remove(&resumed_key);
+        let id = match resumed {
+            Some(id) => id,
+            None => {
+                let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+                self.emit(NodeEvent::TransferStarted {
+                    id,
+                    peer,
+                    direction: Direction::Incoming,
+                    file_name: offer.name.clone(),
+                    size: offer.size,
+                });
+                id
+            }
+        };
+        let progress = self.track(id, peer, offer.size);
+        let dir = self.download_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            let _ = Response::Reject.write_to(&mut stream).await;
+            self.finish(id, Err(e.into()));
+            return Ok(());
+        }
+
+        let Some((key, answer)) = asked else {
+            let result = receive_offered(&mut stream, offer, &dir, Some(peer), &progress)
+                .await
+                .map(|f| (f.path, f.stats));
+            let ok = result.is_ok();
+            self.end_incoming(id, resumed_key, result);
+            if ok {
+                let _ = stream.shutdown().await;
+            }
+            return Ok(());
+        };
+
+        let batch = offer.batch.id;
+        let landed = match land(
+            &mut stream,
+            offer,
+            &dir,
+            Some(peer),
+            &progress,
+            said_no(answer.clone()),
+        )
+        .await
+        {
+            Ok(Some(landed)) => landed,
+            // Declined (or lapsed) while it was arriving: already deleted.
+            Ok(None) => {
+                let v = (*answer.borrow()).unwrap_or(Verdict::Lapsed);
+                let _ = v.reply().write_to(&mut stream).await;
+                let _ = stream.shutdown().await;
+                self.finish(id, Err(v.error_here()));
+                return Ok(());
+            }
+            Err(e) => {
+                self.end_incoming(id, resumed_key, Err(e));
+                return Ok(());
+            }
+        };
+
+        let known = *answer.borrow();
+        if let Some(v) = known {
+            let reply = if v == Verdict::Yes {
+                Response::Done
+            } else {
+                v.reply()
+            };
+            self.settle_landed(id, landed, v);
+            let _ = reply.write_to(&mut stream).await;
+            let _ = stream.shutdown().await;
+            return Ok(());
+        }
+        self.emit(NodeEvent::TransferDelivered { id });
+        if batch == 0 {
+            // A file sent on its own (the command-line tool): its sender
+            // waits for the answer on this connection.
+            let v = answered(answer).await;
+            let reply = if v == Verdict::Yes {
+                Response::Done
+            } else {
+                v.reply()
+            };
+            self.settle_landed(id, landed, v);
+            let _ = reply.write_to(&mut stream).await;
+        } else {
+            let shared = self.clone();
+            self.hold(
+                key,
+                &answer,
+                Box::new(move |v| shared.settle_landed(id, landed, v)),
+            );
+            let _ = Response::Held.write_to(&mut stream).await;
+        }
+        let _ = stream.shutdown().await;
+        Ok(())
+    }
+
+    /// End an incoming transfer. If its connection dropped, wait a while
+    /// first: the sender may be moving to a faster path, and then the same
+    /// file picks up again as the same transfer.
+    fn end_incoming(
+        self: &Arc<Self>,
+        id: u64,
+        key: (Fingerprint, String, u64),
+        result: Result<(PathBuf, TransferStats)>,
+    ) {
+        let dropped = matches!(result, Err(Error::Io(_) | Error::Truncated { .. }));
+        if !dropped {
+            return self.finish(id, result);
+        }
+        let message = result.err().map(|e| e.to_string()).unwrap_or_default();
+        self.state().interrupted.insert(key.clone(), id);
+        let shared = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(RESUME_GRACE).await;
+            let gone = {
+                let mut state = shared.state();
+                let still = state.interrupted.get(&key) == Some(&id);
+                if still {
+                    state.interrupted.remove(&key);
+                }
+                still
+            };
+            if gone {
+                shared.state().active.remove(&id);
+                shared.emit(NodeEvent::TransferFailed { id, error: message });
+            }
+        });
     }
 
     /// "Can we pair?" from a nearby device: ask the user, who compares the
@@ -1262,23 +1854,25 @@ impl Shared {
         }
         let shared = self.clone();
         tokio::spawn(async move {
-            let addrs = shared.addrs_of(&peer);
-            let Ok(mut stream) = connect_any(&shared.tls, &addrs, peer).await else {
-                return;
-            };
-            let mine = Status {
-                auto_accepts_you: shared.auto_accepts(&peer),
-            };
-            if mine.write_to(&mut stream).await.is_err() {
-                return;
-            }
-            if let Ok(Ok(theirs)) =
-                tokio::time::timeout(REQUEST_TIMEOUT, Status::read_reply(&mut stream)).await
-            {
-                shared.record_remote_auto(peer, theirs.auto_accepts_you);
-            }
-            let _ = stream.shutdown().await;
+            let _ = shared.swap_status(peer).await;
         });
+    }
+
+    /// Swap settings with a paired device now. Connecting also tells it
+    /// where this device is.
+    async fn swap_status(&self, peer: Fingerprint) -> Result<()> {
+        let addrs = self.addrs_of(&peer);
+        let mut stream = connect_any(&self.tls, &addrs, peer).await?;
+        let mine = Status {
+            auto_accepts_you: self.auto_accepts(&peer),
+        };
+        mine.write_to(&mut stream).await?;
+        let theirs = tokio::time::timeout(REQUEST_TIMEOUT, Status::read_reply(&mut stream))
+            .await
+            .map_err(|_| Error::Unreachable)??;
+        self.record_remote_auto(peer, theirs.auto_accepts_you);
+        let _ = stream.shutdown().await;
+        Ok(())
     }
 
     async fn answer_pairing<S>(
@@ -1319,7 +1913,7 @@ impl Shared {
 
 async fn accept_loop(shared: Arc<Shared>, listener: TcpListener) {
     loop {
-        let Ok((tcp, _addr)) = listener.accept().await else {
+        let Ok((tcp, addr)) = listener.accept().await else {
             // Out of file handles or similar: back off instead of spinning.
             tokio::time::sleep(Duration::from_millis(100)).await;
             continue;
@@ -1332,7 +1926,7 @@ async fn accept_loop(shared: Arc<Shared>, listener: TcpListener) {
             else {
                 return; // untrusted device outside a pairing window, or junk
             };
-            let _ = shared.serve(stream, peer).await;
+            let _ = shared.serve(stream, peer, addr.ip()).await;
         });
     }
 }
@@ -1419,14 +2013,32 @@ fn progress_update(id: u64, active: &mut Active, now: Instant) -> Option<NodeEve
 }
 
 const AUTO_ACCEPT_FILE: &str = "auto_accept.txt";
+const CLIP_OFF_FILE: &str = "clipboard_off.txt";
+const DIRECT_LINK_OFF_FILE: &str = "direct_link_off.txt";
 
-fn load_auto_accept(dir: &std::path::Path) -> HashSet<Fingerprint> {
-    std::fs::read_to_string(dir.join(AUTO_ACCEPT_FILE))
+/// A list of devices kept beside the identity, one fingerprint per line.
+fn load_fingerprints(dir: &std::path::Path, file: &str) -> HashSet<Fingerprint> {
+    std::fs::read_to_string(dir.join(file))
         .unwrap_or_default()
         .lines()
         .filter(|l| !l.trim_start().starts_with('#'))
         .filter_map(|l| l.trim().parse().ok())
         .collect()
+}
+
+fn save_fingerprints(
+    dir: &std::path::Path,
+    file: &str,
+    comment: &str,
+    list: Vec<String>,
+) -> Result<()> {
+    let mut text = format!("{comment}\n");
+    for fp in list {
+        text.push_str(&fp);
+        text.push('\n');
+    }
+    std::fs::write(dir.join(file), text)?;
+    Ok(())
 }
 
 /// Send one file over an open connection, then close it.
@@ -1498,6 +2110,15 @@ mod tests {
         udp: u16,
         other_udp: u16,
     ) -> (Node, mpsc::UnboundedReceiver<NodeEvent>, tempfile::TempDir) {
+        start_asking(name, udp, other_udp, false).await
+    }
+
+    async fn start_asking(
+        name: &str,
+        udp: u16,
+        other_udp: u16,
+        ask: bool,
+    ) -> (Node, mpsc::UnboundedReceiver<NodeEvent>, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let mut config = NodeConfig::new(
             dir.path().join("id"),
@@ -1506,7 +2127,7 @@ mod tests {
             "android",
         );
         config.port = Some(0);
-        config.ask_before_receiving = false;
+        config.ask_before_receiving = ask;
         config.bind = Ipv4Addr::LOCALHOST.into();
         config.discovery = DiscoveryConfig {
             mdns: false,
@@ -1592,5 +2213,193 @@ mod tests {
         }
         let got = std::fs::read(phone_dir.path().join("downloads").join("note.txt")).unwrap();
         assert_eq!(got, b"hello from the laptop");
+    }
+
+    /// A laptop and a phone, paired; the phone asks before taking files.
+    async fn paired_pair() -> (
+        (Node, mpsc::UnboundedReceiver<NodeEvent>, tempfile::TempDir),
+        (Node, mpsc::UnboundedReceiver<NodeEvent>, tempfile::TempDir),
+    ) {
+        let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+        let laptop = start_asking("Laptop", udp_a, udp_b, false).await;
+        let phone = start_asking("Phone", udp_b, udp_a, true).await;
+        let (l, p) = (&laptop.0, &phone.0);
+        until(|| p.peers().iter().any(|x| x.fingerprint == l.fingerprint())).await;
+        until(|| l.peers().iter().any(|x| x.fingerprint == p.fingerprint())).await;
+        p.pair(&l.start_pairing()).await.unwrap();
+        until(|| l.peers().iter().any(|x| x.paired)).await;
+        (laptop, phone)
+    }
+
+    /// The next event matching `want`, failing on a transfer failure.
+    async fn next(
+        events: &mut mpsc::UnboundedReceiver<NodeEvent>,
+        mut want: impl FnMut(&NodeEvent) -> bool,
+    ) -> NodeEvent {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let event = events.recv().await.expect("node stopped");
+                if want(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for an event")
+    }
+
+    fn names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .collect()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Files go before the answer; accepting makes them appear at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sends_first_and_keeps_on_accept() {
+        let ((laptop, mut laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_pair().await;
+        let src = laptop_dir.path().join("photo.jpg");
+        std::fs::write(&src, vec![7u8; 300_000]).unwrap();
+        let ids = laptop.send_files(phone.fingerprint(), vec![src]);
+
+        let NodeEvent::OfferReceived { id: question, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::OfferReceived { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        // Everything arrives while the question is open, unseen.
+        next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::TransferDelivered { .. })
+        })
+        .await;
+        next(
+            &mut laptop_events,
+            |e| matches!(e, NodeEvent::TransferDelivered { id } if *id == ids[0]),
+        )
+        .await;
+        let downloads = phone_dir.path().join("downloads");
+        assert!(!names_in(&downloads).contains(&"photo.jpg".to_owned()));
+
+        phone.answer_offer(question, true, false).unwrap();
+        next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::TransferDone { .. })
+        })
+        .await;
+        assert_eq!(names_in(&downloads), ["photo.jpg"]);
+        next(
+            &mut laptop_events,
+            |e| matches!(e, NodeEvent::TransferAccepted { id } if *id == ids[0]),
+        )
+        .await;
+        next(
+            &mut laptop_events,
+            |e| matches!(e, NodeEvent::TransferDone { id, .. } if *id == ids[0]),
+        )
+        .await;
+    }
+
+    /// Declining deletes what already arrived, and the sender hears it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn declined_files_are_deleted() {
+        let ((laptop, mut laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_pair().await;
+        let a = laptop_dir.path().join("a.bin");
+        let b = laptop_dir.path().join("b.bin");
+        std::fs::write(&a, vec![1u8; 100_000]).unwrap();
+        std::fs::write(&b, vec![2u8; 100_000]).unwrap();
+        let ids = laptop.send_files(phone.fingerprint(), vec![a, b]);
+
+        let NodeEvent::OfferReceived { id: question, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::OfferReceived { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        next(
+            &mut laptop_events,
+            |e| matches!(e, NodeEvent::TransferDelivered { id } if *id == ids[1]),
+        )
+        .await;
+        phone.answer_offer(question, false, false).unwrap();
+        for want in &ids {
+            let NodeEvent::TransferFailed { error, .. } = next(
+                &mut laptop_events,
+                |e| matches!(e, NodeEvent::TransferFailed { id, .. } if id == want),
+            )
+            .await
+            else {
+                unreachable!()
+            };
+            assert_eq!(error, "they declined");
+        }
+        until(|| names_in(&phone_dir.path().join("downloads")).is_empty()).await;
+    }
+
+    /// Clipboard text lands without a question, unless sync is off there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn clipboard_goes_across() {
+        let ((laptop, _laptop_events, _l), (phone, mut phone_events, _p)) = paired_pair().await;
+        laptop
+            .send_clipboard(phone.fingerprint(), "https://example.com".into())
+            .await
+            .unwrap();
+        let NodeEvent::ClipboardReceived { text, peer } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::ClipboardReceived { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(text, "https://example.com");
+        assert_eq!(peer, laptop.fingerprint());
+
+        phone
+            .set_clipboard_sync(&laptop.fingerprint(), false)
+            .unwrap();
+        let refused = laptop
+            .send_clipboard(phone.fingerprint(), "nope".into())
+            .await;
+        assert!(matches!(refused, Err(Error::Rejected)));
+    }
+
+    /// Addresses on a faster kind of network come first.
+    #[tokio::test]
+    async fn fastest_address_first() {
+        let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+        let (node, _events, _dir) = start("Laptop", udp_a, udp_b).await;
+        let peer = Fingerprint::from_bytes([9; 32]);
+        let nets = crate::link::local_nets();
+        // Pretend the peer is reachable on every network this machine has,
+        // and that one of them measured much faster.
+        let ips: Vec<IpAddr> = nets.iter().map(|n| IpAddr::V4(n.ip)).collect();
+        if ips.len() < 2 {
+            return; // one network here: nothing to rank
+        }
+        node.shared.state().last_seen.insert(
+            peer,
+            DiscoveredPeer {
+                fingerprint: peer,
+                device_name: "Phone".into(),
+                platform: "android".into(),
+                addrs: ips.clone(),
+                port: 1,
+            },
+        );
+        let fast = nets.last().unwrap().kind;
+        node.shared
+            .speeds
+            .record(peer, fast, 1 << 30, Duration::from_secs(1));
+        let first = node.shared.addrs_of(&peer)[0].ip();
+        assert_eq!(crate::link::kind_toward(&nets, first), Some(fast));
     }
 }

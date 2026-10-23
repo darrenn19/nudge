@@ -88,7 +88,7 @@ impl Partial {
         with_suffix(&self.base, META_SUFFIX)
     }
 
-    fn remove(&self) {
+    pub(crate) fn remove(&self) {
         let _ = fs::remove_file(self.part_path());
         let _ = fs::remove_file(self.meta_path());
     }

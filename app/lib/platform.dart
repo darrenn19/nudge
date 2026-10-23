@@ -135,6 +135,7 @@ const _activity = MethodChannel('nudge/activity');
 Future<void> listenForShares(
   void Function(List<OutgoingFile> files, {bool byQr}) onFiles, {
   void Function()? onStarting,
+  void Function(String text)? onText,
 }) async {
   if (!Platform.isAndroid) return;
   Future<void> take() async {
@@ -163,6 +164,8 @@ Future<void> listenForShares(
         onStarting?.call();
       case 'sharedAvailable':
         await take();
+      case 'sharedText':
+        if (call.arguments is String) onText?.call(call.arguments as String);
     }
   });
   await take();
@@ -178,6 +181,23 @@ Future<void> askToRunInBackground() async {
   } on MissingPluginException {
     // No window; ask another time.
   }
+}
+
+/// Android: ask once for what the hotspot (the direct link for big
+/// transfers) needs: "nearby devices", or location on older versions.
+Future<void> askForDirectLink() async {
+  if (!Platform.isAndroid) return;
+  try {
+    await _activity.invokeMethod('askForDirectLink');
+  } on MissingPluginException {
+    // No window; ask another time.
+  }
+}
+
+/// Android: keep the CPU awake and Wi-Fi out of power saving while files
+/// move, on screen or not. Call again every few minutes to keep it.
+Future<void> holdNetwork(bool on) async {
+  if (Platform.isAndroid) await _channel.invokeMethod('holdNetwork', {'on': on});
 }
 
 /// Go back to the app the user shared from. Transfers carry on.
@@ -244,4 +264,38 @@ Future<void> notifyReceived({required String path, required String from}) async 
   if (Platform.isAndroid) {
     await _channel.invokeMethod('notifyReceived', {'path': path, 'from': from});
   }
+}
+
+// Clipboard.
+
+/// Put clipboard text that came from another device on this one's
+/// clipboard. Android does it natively: it works with no window open.
+Future<void> setClipboardText(String text) async {
+  if (Platform.isAndroid) {
+    await _channel.invokeMethod('setClipboard', {'text': text});
+  } else {
+    await Clipboard.setData(ClipboardData(text: text));
+  }
+}
+
+/// Android: the clipboard's text if it changed since last asked (and wasn't
+/// put there by Nudge). Android only lets an app read it while on screen.
+Future<String?> newClipboardText() async {
+  if (!Platform.isAndroid) return null;
+  try {
+    return await _channel.invokeMethod<String>('clipboardIfNew');
+  } on PlatformException {
+    return null;
+  }
+}
+
+const _clipboard = MethodChannel('nudge/clipboard');
+
+/// Windows: calls [onCopy] with the text whenever something is copied,
+/// except what password managers mark as private.
+void listenForCopies(void Function(String text) onCopy) {
+  if (!Platform.isWindows) return;
+  _clipboard.setMethodCallHandler((call) async {
+    if (call.method == 'copied' && call.arguments is String) onCopy(call.arguments as String);
+  });
 }

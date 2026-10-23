@@ -57,6 +57,7 @@ class NudgeService : Service() {
         @Volatile private var running = false
         private var wakeLock: PowerManager.WakeLock? = null
         private var wifiLock: WifiManager.WifiLock? = null
+        private var lowLatencyLock: WifiManager.WifiLock? = null
 
         /** Start (or keep) running. Safe to call any time. */
         fun start(context: Context) {
@@ -67,6 +68,15 @@ class NudgeService : Service() {
                 // Not allowed from the background right now; the app tries
                 // again when it opens.
             }
+        }
+
+        /**
+         * Files are moving (or not): keep the CPU awake and Wi-Fi out of
+         * power saving for the whole transfer, on screen or off. Power-save
+         * Wi-Fi alone can cut throughput several times over.
+         */
+        fun holdNetwork(context: Context, on: Boolean) {
+            if (on) holdLocks(context) else releaseLocks()
         }
 
         /** Files are moving: show progress, and keep the CPU and Wi-Fi awake. */
@@ -85,7 +95,6 @@ class NudgeService : Service() {
         /** Nothing moving: back to "Ready to receive". */
         fun idle(context: Context) {
             progress = null
-            releaseLocks()
             if (running) {
                 Notifications.notify(context, Notifications.SERVICE_ID, current(context))
             } else {
@@ -120,12 +129,22 @@ class NudgeService : Service() {
                 ?.apply { setReferenceCounted(false) }
                 ?.also { wifiLock = it }
             if (wifi?.isHeld == false) wifi.acquire()
+            // Android 10+: the lowest-latency mode, which also stops power
+            // saving; it applies while Nudge is on screen.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val fast = lowLatencyLock ?: (app.getSystemService(Context.WIFI_SERVICE) as? WifiManager)
+                    ?.createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "nudge:fast")
+                    ?.apply { setReferenceCounted(false) }
+                    ?.also { lowLatencyLock = it }
+                if (fast?.isHeld == false) fast.acquire()
+            }
         }
 
         @Synchronized
         private fun releaseLocks() {
             wakeLock?.takeIf { it.isHeld }?.release()
             wifiLock?.takeIf { it.isHeld }?.release()
+            lowLatencyLock?.takeIf { it.isHeld }?.release()
         }
 
         private const val LOCK_TIMEOUT_MS = 10 * 60 * 1000L

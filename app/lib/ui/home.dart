@@ -35,6 +35,8 @@ class _HomeScreenState extends State<HomeScreen> {
   late final StreamSubscription<FilesToSend> _incoming;
   late final StreamSubscription<void> _questions;
   late final StreamSubscription<(DeviceInfo?, String, Answer)> _answers;
+  late final StreamSubscription<(String, String)> _clips;
+  late final StreamSubscription<String> _notes;
   final _pages = PageController(viewportFraction: 0.74);
 
   /// The device on screen; null on the "add a device" page.
@@ -72,6 +74,12 @@ class _HomeScreenState extends State<HomeScreen> {
         case Answer.noAnswer:
           showToast(context, "$name didn't answer", icon: CupertinoIcons.clock);
       }
+    });
+    _clips = controller.clipsReceived.listen((c) {
+      if (mounted) showToast(context, 'Copied from ${c.$1}', icon: CupertinoIcons.doc_on_clipboard);
+    });
+    _notes = controller.notes.listen((note) {
+      if (mounted) showToast(context, note, icon: CupertinoIcons.doc_on_clipboard);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _askNext());
   }
@@ -111,6 +119,8 @@ class _HomeScreenState extends State<HomeScreen> {
     _incoming.cancel();
     _questions.cancel();
     _answers.cancel();
+    _clips.cancel();
+    _notes.cancel();
     controller.removeListener(_onChange);
     _pages.dispose();
     super.dispose();
@@ -175,8 +185,9 @@ class _HomeScreenState extends State<HomeScreen> {
       _focusId = device.id;
       WidgetsBinding.instance.addPostFrameCallback((_) => _goTo(device.id));
       // Now that there's somewhere to send, make sure Android won't stop
-      // Nudge mid-transfer or while waiting to receive. Asked once.
-      unawaited(askToRunInBackground());
+      // Nudge mid-transfer or while waiting to receive, and can start the
+      // hotspot for big transfers. Each asked once.
+      unawaited(askToRunInBackground().then((_) => askForDirectLink()));
     }
   }
 
@@ -226,7 +237,7 @@ class _HomeScreenState extends State<HomeScreen> {
       showToast(context, 'Paired with ${paired.name}');
       _focusId = paired.id;
       WidgetsBinding.instance.addPostFrameCallback((_) => _goTo(paired.id));
-      unawaited(askToRunInBackground());
+      unawaited(askToRunInBackground().then((_) => askForDirectLink()));
     }
   }
 
@@ -261,7 +272,18 @@ class _HomeScreenState extends State<HomeScreen> {
       subtitle:
           'Your other devices see this one as "${controller.deviceName}". '
           '${isPhone ? 'To change it, go to Settings → About phone → Device name.' : 'To change it, go to Settings → System → About → Rename this PC.'}',
-      items: const [],
+      items: [
+        // USB cables and Ethernet are always used when faster; the hotspot
+        // takes the PC off its usual Wi-Fi for a while, so it can be refused.
+        MenuItem(
+          label: isPhone
+              ? 'Start a hotspot for big transfers'
+              : "Join the phone's hotspot for big transfers",
+          icon: CupertinoIcons.bolt,
+          toggle: controller.directLink,
+          onToggle: controller.setDirectLink,
+        ),
+      ],
     );
   }
 
@@ -282,6 +304,12 @@ class _HomeScreenState extends State<HomeScreen> {
           icon: CupertinoIcons.checkmark_shield,
           toggle: d.autoAccept,
           onToggle: (on) => controller.setAutoAccept(d, on),
+        ),
+        MenuItem(
+          label: 'Share clipboard',
+          icon: CupertinoIcons.doc_on_clipboard,
+          toggle: d.clipboard,
+          onToggle: (on) => controller.setClipboardSync(d, on),
         ),
         if (controller.pairedDevices.length > 1)
           MenuItem(
@@ -620,6 +648,29 @@ class _QuestionSheetState extends State<_QuestionSheet> {
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: Fonts.small,
+          ),
+          // They're already coming: accepting just keeps them.
+          ListenableBuilder(
+            listenable: widget.controller,
+            builder: (context, _) {
+              final arriving = [
+                for (final t in widget.controller.transfers)
+                  if (t.incoming && t.deviceId == o.deviceId && t.state == TransferState.running) t,
+              ];
+              if (arriving.isEmpty) return const SizedBox(height: 4);
+              final bytes = arriving.fold<int>(0, (s, t) => s + t.bytes);
+              final all = arriving.every((t) => t.waitingForYou) && bytes >= o.size;
+              return Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  all
+                      ? 'Already here · accept to keep'
+                      : 'Already arriving · ${(100 * bytes / (o.size == 0 ? 1 : o.size)).clamp(0, 100).floor()}%',
+                  textAlign: TextAlign.center,
+                  style: Fonts.small.copyWith(color: Palette.good),
+                ),
+              );
+            },
           ),
           const SizedBox(height: 18),
           Pressable(
@@ -1017,7 +1068,7 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
   /// Sends already shown as delivered-and-pending.
   late final Set<int> _seenPending = {
     for (final t in widget.transfers)
-      if (t.pending) t.id,
+      if (t.awaitingAnswer) t.id,
   };
 
   /// A short message after something happens ("Sent", "Declined"), its
@@ -1053,11 +1104,11 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
   @override
   void didUpdateWidget(_DevicePage old) {
     super.didUpdateWidget(old);
-    // Delivered, and they're being asked: that's "sent" from here.
+    // All there, and they're being asked: that's "sent" from here.
     for (final t in widget.transfers) {
-      if (t.deviceId == widget.device.id && t.pending && _seenPending.add(t.id) && !t.accepted) {
+      if (t.deviceId == widget.device.id && t.awaitingAnswer && _seenPending.add(t.id)) {
         // Neutral: it's with them, but they haven't said yes.
-        _show('Waiting for an answer', Palette.text);
+        _show('Sent · waiting for an answer', Palette.text);
         return;
       }
     }
@@ -1095,14 +1146,21 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
     final away = (d.paired || d.isBrowser) && !d.online;
     final flash = running.isEmpty ? _flash : null;
 
+    // Going over something faster than Wi-Fi: say so.
+    final via = running
+        .map((t) => t.via)
+        .whereType<String>()
+        .where((v) => v != 'Wi-Fi')
+        .firstOrNull;
     final (String sub, Color? subColor) = switch (()) {
       _ when running.isNotEmpty => (
         '${running.every((t) => t.incoming) ? 'Receiving' : 'Sending'}'
-            '${progress == null ? '…' : ' ${(progress * 100).floor()}%'}',
+            '${progress == null ? '…' : ' ${(progress * 100).floor()}%'}'
+            '${via == null ? '' : ' · $via'}',
         null,
       ),
       _ when flash != null => (flash.$1, flash.$2),
-      _ when waiting => ('Waiting for an answer', Palette.muted),
+      _ when waiting => ('Sent · waiting for an answer', Palette.muted),
       _ when !d.paired && !d.isBrowser => ('Tap to pair', Palette.accent),
       _ when away => ('', null),
       _ when widget.dragging && widget.focused => ('Drop to send', Palette.text),
@@ -1506,14 +1564,49 @@ IconData deviceIcon(DeviceInfo d) => switch (d.platform) {
 };
 
 /// The latest transfer, as a small pill. Tap for all of them.
-class _ActivityPill extends StatelessWidget {
+/// Once it finishes, the pill fades away after a few seconds; the transfer
+/// stays in the Activity sheet.
+class _ActivityPill extends StatefulWidget {
   const _ActivityPill({required this.controller});
 
   final NudgeController controller;
 
   @override
+  State<_ActivityPill> createState() => _ActivityPillState();
+}
+
+class _ActivityPillState extends State<_ActivityPill> {
+  static const _linger = Duration(seconds: 4);
+
+  Timer? _timer;
+  String? _timerFor;
+  String? _hidden;
+
+  NudgeController get controller => widget.controller;
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final t = controller.transfers.firstOrNull;
+    var t = controller.transfers.firstOrNull;
+    final key = t == null ? null : '${t.id}-${t.state}';
+    final finished = t != null && t.state != TransferState.running;
+    if (!finished) {
+      // Running or waiting on someone: keep showing it.
+      _timer?.cancel();
+      _timerFor = null;
+    } else if (_timerFor != key) {
+      _timer?.cancel();
+      _timerFor = key;
+      _timer = Timer(_linger, () {
+        if (mounted) setState(() => _hidden = key);
+      });
+    }
+    if (key == _hidden) t = null;
     return AnimatedSwitcher(
       duration: const Duration(milliseconds: 350),
       transitionBuilder: (child, a) => FadeTransition(
@@ -1565,7 +1658,7 @@ class _TransferIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = transfer;
     final (icon, color) = switch (t.state) {
-      _ when t.awaitingAnswer => (CupertinoIcons.hourglass, Palette.warn),
+      _ when t.awaitingAnswer || t.waitingForYou => (CupertinoIcons.hourglass, Palette.warn),
       TransferState.done => (CupertinoIcons.checkmark_alt, Palette.good),
       TransferState.failed => (
         t.error == 'they declined' ? CupertinoIcons.xmark : CupertinoIcons.exclamationmark,
@@ -1671,12 +1764,14 @@ class _TransferRow extends StatelessWidget {
     final device = controller.deviceById(t.deviceId);
     final peer = t.peerName ?? device?.name ?? 'device';
     final detail = switch (t.state) {
-      _ when t.awaitingAnswer => 'Pending · waiting for $peer to accept or decline',
+      _ when t.awaitingAnswer => 'Sent · waiting for $peer to accept or decline',
+      _ when t.waitingForYou => 'Here · accept to keep it',
       TransferState.running => [
-        if (t.pending) 'Accepted',
+        if (t.accepted && t.pending) 'Accepted',
         '${t.incoming ? 'From' : 'To'} $peer',
         if (t.bytesPerSec > 0) formatSpeed(t.bytesPerSec),
         if (t.remaining case final left?) '${formatDuration(left)} left',
+        if (t.via case final via?) 'via $via',
       ].join(' · '),
       TransferState.done =>
         '${t.outcome} · ${t.incoming ? 'from' : 'to'} $peer · ${formatSize(t.size)}',
@@ -1707,7 +1802,7 @@ class _TransferRow extends StatelessWidget {
                   style: Fonts.small.copyWith(
                     color: t.state == TransferState.failed
                         ? Palette.bad
-                        : t.awaitingAnswer
+                        : t.awaitingAnswer || t.waitingForYou
                         ? Palette.warn
                         : Palette.muted,
                   ),

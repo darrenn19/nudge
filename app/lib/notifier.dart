@@ -107,7 +107,14 @@ class TransferNotifier {
     await showReceivedToast(path: path, from: from);
   }
 
+  bool _holding = false;
+
   void _update() {
+    // Wi-Fi at full speed for as long as anything moves, on screen or not
+    // (re-asked each time, which keeps the CPU lock from timing out).
+    final moving = controller.transfers.any((t) => t.active);
+    if (moving || _holding) unawaited(holdNetwork(moving));
+    _holding = moving;
     // Moving files only: a send waiting on an answer isn't "in progress".
     // On screen, the app shows progress itself, so the notification goes
     // back to its quiet "ready" state (it can't go away: it keeps Nudge

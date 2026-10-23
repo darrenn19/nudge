@@ -15,6 +15,7 @@ import 'src/rust/api/nudge.dart';
 import 'src/rust/frb_generated.dart';
 import 'ui/home.dart';
 import 'ui/style.dart';
+import 'wifi.dart';
 
 Future<void> main(List<String> args) async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -57,8 +58,30 @@ Future<NudgeController> _start(SingleInstance? instance, List<String> files) asy
   );
   final controller = NudgeController(app, dataDir: dir);
   TransferNotifier(controller);
-  // Android: files shared to Nudge (share sheet, quick settings tile).
-  unawaited(listenForShares(controller.offer, onStarting: controller.warmUp));
+  // Android: files shared to Nudge (share sheet, quick settings tile); text
+  // shared to it goes to the other devices' clipboards.
+  unawaited(
+    listenForShares(
+      controller.offer,
+      onStarting: controller.warmUp,
+      onText: (text) => unawaited(controller.shareClipboardAndSay(text, leave: true)),
+    ),
+  );
+  // Clipboard sync. Windows: whatever is copied goes across as it's copied.
+  // Android only lets apps read the clipboard on screen: what was copied
+  // goes when Nudge opens.
+  listenForCopies((text) => unawaited(controller.shareClipboard(text)));
+  if (Platform.isAndroid) {
+    Future<void> sendCopied() async {
+      final text = await newClipboardText();
+      if (text != null) await controller.shareClipboardAndSay(text);
+    }
+
+    AppLifecycleListener(onResume: () => unawaited(sendCopied()));
+    unawaited(sendCopied());
+  }
+  // A direct link left over from a run that stopped while joined.
+  unawaited(forgetHotspot());
   // Windows: tray icon, Explorer menu, start at login, and files from other
   // launches.
   if (Platform.isWindows) {

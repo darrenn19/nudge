@@ -66,6 +66,10 @@ class MainActivity : FlutterActivity() {
                         askToRunInBackground()
                         result.success(null)
                     }
+                    "askForDirectLink" -> {
+                        askForDirectLink()
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -94,6 +98,8 @@ class MainActivity : FlutterActivity() {
                 val text = intent.getStringExtra(Intent.EXTRA_TEXT)
                 when {
                     uri != null -> open(listOf(uri), byQr)
+                    // A link or a note: onto the other devices' clipboards.
+                    !text.isNullOrBlank() && !byQr -> channel?.invokeMethod("sharedText", text)
                     !text.isNullOrBlank() -> worker.execute { deliver(listOf(SharedFiles.text(this, text)), byQr) }
                 }
             }
@@ -178,6 +184,24 @@ class MainActivity : FlutterActivity() {
             // Some builds hide the direct prompt; the settings list still works.
             runCatching { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
         }
+    }
+
+    /**
+     * The hotspot for big transfers needs "nearby devices" (Android 13+) or
+     * location (older). Asked once; without it transfers just stay on the
+     * usual Wi-Fi.
+     */
+    private fun askForDirectLink() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || Hotspot.allowed(this)) return
+        val prefs = getSharedPreferences("nudge", MODE_PRIVATE)
+        if (prefs.getBoolean("askedDirectLink", false)) return
+        prefs.edit().putBoolean("askedDirectLink", true).apply()
+        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            Manifest.permission.NEARBY_WIFI_DEVICES
+        } else {
+            Manifest.permission.ACCESS_FINE_LOCATION
+        }
+        requestPermissions(arrayOf(permission), 2)
     }
 
     override fun onDestroy() {

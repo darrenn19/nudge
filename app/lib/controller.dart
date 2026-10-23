@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 
 import 'platform.dart';
 import 'src/rust/api/nudge.dart';
+import 'wifi.dart';
 
 enum TransferState { running, done, failed }
 
@@ -24,6 +25,7 @@ class Transfer {
     required this.fileName,
     required this.size,
     this.peerName,
+    this.toBrowser = false,
   });
 
   final int id;
@@ -35,6 +37,9 @@ class Transfer {
   /// The other device's name when the transfer started; a browser tab may
   /// be gone by the time it's shown.
   final String? peerName;
+
+  /// Sent to a web page. Pages still download only after accepting.
+  final bool toBrowser;
 
   TransferState state = TransferState.running;
   int bytes = 0;
@@ -49,30 +54,56 @@ class Transfer {
   /// Outgoing: the receiver said yes.
   bool accepted = false;
 
-  /// Outgoing: delivered, and the receiver is asking its user. A browser
-  /// tab asks too, until it accepts.
+  /// Outgoing: the receiver is asking its user. The bytes go meanwhile
+  /// (a browser tab waits for its answer first).
   bool pending = false;
 
-  /// Outgoing, delivered, and waiting for the receiver's answer. Nothing is
+  /// Every byte is there, held until the receiver's user answers.
+  bool delivered = false;
+
+  /// The network it's going over: "usb", "wired", "hotspot", "wifi".
+  String? route;
+
+  /// Outgoing, all there, waiting for the receiver's answer. Nothing is
   /// moving, so it isn't shown as busy.
-  bool get awaitingAnswer => !incoming && pending && !accepted && state == TransferState.running;
+  bool get awaitingAnswer =>
+      !incoming &&
+      pending &&
+      !accepted &&
+      state == TransferState.running &&
+      (delivered || toBrowser);
+
+  /// Incoming, all here, waiting for this device's user to accept.
+  bool get waitingForYou => incoming && delivered && state == TransferState.running;
 
   /// Something is actually happening: bytes moving or about to.
-  bool get active => state == TransferState.running && !awaitingAnswer;
+  bool get active => state == TransferState.running && !awaitingAnswer && !waitingForYou;
+
+  /// How it's travelling, for people: "USB cable", "direct Wi-Fi"...
+  String? get via => switch (route) {
+    'usb' => 'USB cable',
+    'wired' => 'cable',
+    'hotspot' => 'direct Wi-Fi',
+    'wifi' => 'Wi-Fi',
+    _ => null,
+  };
 
   /// What happened, in a word or two, from this side.
   String get outcome {
     if (state == TransferState.failed) {
       return switch (error) {
-        'they declined' => 'Declined',
+        'they declined' || 'you declined' => 'Declined',
         'no answer' => 'No answer',
         _ => error ?? 'Failed',
       };
     }
-    if (incoming) return state == TransferState.done ? 'Received' : 'Receiving';
-    if (awaitingAnswer) return 'Pending';
+    if (incoming) {
+      if (waitingForYou) return 'Waiting for you';
+      return state == TransferState.done ? 'Received' : 'Receiving';
+    }
+    if (awaitingAnswer) return 'Sent · waiting';
     if (state == TransferState.done) return pending ? 'Accepted · delivered' : 'Delivered';
-    return pending ? 'Accepted · sending' : 'Sending';
+    return accepted && pending ? 'Accepted · sending' : 'Sending';
   }
 
   double get fraction => size == 0 ? 1 : (bytes / size).clamp(0, 1);
@@ -392,6 +423,7 @@ class NudgeController extends ChangeNotifier {
             fileName: fileName,
             size: size,
             peerName: deviceById(deviceId)?.name,
+            toBrowser: deviceById(deviceId)?.isBrowser ?? false,
           ),
         );
         if (transfers.length > 50) transfers.removeLast();
@@ -442,6 +474,31 @@ class NudgeController extends ChangeNotifier {
       case AppEvent_PairAsked(:final id, :final deviceId, :final deviceName, :final code):
         pairAsks.add(PairAsk(id: id, deviceId: deviceId, deviceName: deviceName, code: code));
         _offerChanges.add(null);
+      case AppEvent_TransferDelivered(:final id):
+        final t = _transfer(id);
+        if (t == null) return;
+        t
+          ..delivered = true
+          ..bytes = t.size;
+      case AppEvent_TransferRoute(:final id, :final route):
+        final t = _transfer(id);
+        if (t == null) return;
+        t.route = route;
+      case AppEvent_ClipboardReceived(:final deviceId, :final text):
+        _clipboardArrived(deviceId, text);
+        return;
+      case AppEvent_HotspotWanted(:final id):
+        unawaited(_startHotspot(id));
+        return;
+      case AppEvent_HotspotDone():
+        unawaited(stopHotspot());
+        return;
+      case AppEvent_JoinWanted(:final id, :final ssid, :final passphrase, :final wpa3):
+        unawaited(_joinHotspot(id, ssid, passphrase, wpa3));
+        return;
+      case AppEvent_LeaveWanted():
+        unawaited(leaveHotspot());
+        return;
       case AppEvent_TransferAccepted(:final id):
         final t = _transfer(id);
         if (t == null) return;
@@ -462,6 +519,98 @@ class NudgeController extends ChangeNotifier {
     notifyListeners();
   }
 
+  // Faster paths. USB cables and Ethernet are used by themselves; the
+  // phone's hotspot needs each app to do its part.
+
+  /// Big transfers may move to the phone's hotspot (the user can say no).
+  bool get directLink => app.directLink();
+
+  void setDirectLink(bool on) {
+    app.setDirectLink(on_: on);
+    notifyListeners();
+  }
+
+  Future<void> _startHotspot(int id) async {
+    final hotspot = await startHotspot();
+    app.hotspotReady(
+      id: id,
+      ssid: hotspot?.ssid,
+      passphrase: hotspot?.passphrase ?? '',
+      wpa3: hotspot?.wpa3 ?? false,
+    );
+  }
+
+  Future<void> _joinHotspot(int id, String ssid, String passphrase, bool wpa3) async {
+    final ok = await joinHotspot(ssid: ssid, passphrase: passphrase, wpa3: wpa3);
+    app.joined(id: id, ok: ok);
+  }
+
+  // Clipboard: text copied on one device lands on the others' clipboards,
+  // with no question. Each paired device can be left out.
+
+  final _clips = StreamController<(String, String)>.broadcast();
+
+  /// Clipboard text that arrived: (from device name, text).
+  Stream<(String, String)> get clipsReceived => _clips.stream;
+
+  /// The text on the clipboard as last sent or received, so text that
+  /// arrived isn't sent straight back.
+  String? _lastClip;
+
+  void setClipboardSync(DeviceInfo device, bool on) {
+    try {
+      app.setClipboardSync(deviceId: device.id, on_: on);
+    } finally {
+      devices = app.devices();
+      notifyListeners();
+    }
+  }
+
+  /// Send clipboard text to every paired device that syncs it. Returns the
+  /// names of the devices it reached. Text that just arrived from one of
+  /// them isn't sent back.
+  /// With [again], it goes even if it's what was sent or received last
+  /// (the user shared it on purpose).
+  Future<List<String>> shareClipboard(String text, {bool again = false}) async {
+    if (text.isEmpty) return const [];
+    // What just arrived (and so is on the clipboard now) isn't news.
+    if (text == _lastClip && !again) return const [];
+    _lastClip = text;
+    final targets = pairedDevices.where((d) => d.clipboard && d.reachable).toList();
+    final reached = <String>[];
+    await Future.wait([
+      for (final d in targets)
+        app
+            .sendClipboard(deviceId: d.id, text: text)
+            .then((_) => reached.add(d.name))
+            .catchError((_) {}),
+    ]);
+    return reached;
+  }
+
+  final _notes = StreamController<String>.broadcast();
+
+  /// Short messages for the user ("Copied to Laptop").
+  Stream<String> get notes => _notes.stream;
+
+  /// [shareClipboard], and say where it went. With [leave], go back to the
+  /// app it was shared from.
+  Future<void> shareClipboardAndSay(String text, {bool leave = false}) async {
+    final reached = await shareClipboard(text, again: leave);
+    if (reached.isNotEmpty) {
+      _notes.add('Copied to ${reached.join(', ')}');
+      if (leave) await leaveApp();
+    } else if (leave) {
+      _notes.add("Couldn't reach a device to copy to");
+    }
+  }
+
+  Future<void> _clipboardArrived(String deviceId, String text) async {
+    _lastClip = text;
+    await setClipboardText(text);
+    _clips.add((deviceById(deviceId)?.name ?? 'A paired device', text));
+  }
+
   /// Devices (and when) an answer was last passed on, so a batch of files
   /// gives one alert, not one per file.
   final _told = <String, DateTime>{};
@@ -479,6 +628,8 @@ class NudgeController extends ChangeNotifier {
   void dispose() {
     _subscription.cancel();
     _answers.close();
+    _clips.close();
+    _notes.close();
     _offerChanges.close();
     _pairing.close();
     _toSend.close();

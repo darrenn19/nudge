@@ -7,6 +7,7 @@ pub mod bench;
 pub mod discovery;
 pub mod error;
 pub mod identity;
+pub mod link;
 pub mod node;
 pub mod pairing;
 pub mod protocol;
@@ -16,12 +17,13 @@ pub mod transfer;
 
 pub use error::{Error, Result};
 pub use identity::{Fingerprint, Identity, TrustedPeers};
-pub use node::{Direction, Node, NodeConfig, NodeEvent, Outgoing, Peer};
+pub use link::LinkKind;
+pub use node::{Direction, HotspotInfo, Node, NodeConfig, NodeEvent, Outgoing, Peer};
 pub use tls::Tls;
 pub use transfer::{ReceivedFile, TransferStats, receive_file, send_file};
 
 /// Protocol version spoken by this build. Bumped on any wire-format change.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// Crate version, for logs and the `--version` output of tools.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

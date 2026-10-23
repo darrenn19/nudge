@@ -68,6 +68,20 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 call.argument<Number>("id")?.toLong()?.let { Notifications.cancelOffer(context, it) }
                 result.success(null)
             }
+            "startHotspot" -> Hotspot.start(context) { result.success(it) }
+            "stopHotspot" -> {
+                Hotspot.stop()
+                result.success(null)
+            }
+            "setClipboard" -> {
+                call.argument<String>("text")?.let { ClipSync.set(context, it) }
+                result.success(null)
+            }
+            "clipboardIfNew" -> result.success(ClipSync.ifNew(context))
+            "holdNetwork" -> {
+                NudgeService.holdNetwork(context, call.argument<Boolean>("on") == true)
+                result.success(null)
+            }
             "closeFiles" -> {
                 // Shared files the user decided not to send.
                 call.argument<List<Int>>("fds")?.forEach { fd ->
