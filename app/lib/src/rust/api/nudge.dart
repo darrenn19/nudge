@@ -16,7 +16,11 @@ part 'nudge.freezed.dart';
 abstract class NudgeApp implements RustOpaqueInterface {
   /// Answer `AppEvent::OfferReceived`. With `always`, that device's files
   /// are accepted without asking from now on.
-  void answerOffer({required PlatformInt64 id, required bool accept, required bool always});
+  void answerOffer({
+    required PlatformInt64 id,
+    required bool accept,
+    required bool always,
+  });
 
   /// Answer `AppEvent::PairAsked`.
   void answerPair({required PlatformInt64 id, required bool accept});
@@ -76,7 +80,10 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Send files the platform has already opened (Android shares arrive
   /// as open descriptors, not paths). Takes ownership of each descriptor
   /// and closes it when its transfer ends. Unix only.
-  Int64List sendOpenFiles({required String deviceId, required List<OpenFile> files});
+  Int64List sendOpenFiles({
+    required String deviceId,
+    required List<OpenFile> files,
+  });
 
   /// Accept files from a paired device without asking, or ask again.
   void setAutoAccept({required String deviceId, required bool on_});
@@ -156,8 +163,10 @@ sealed class AppEvent with _$AppEvent {
     required double seconds,
     required PlatformInt64 resumedFrom,
   }) = AppEvent_TransferDone;
-  const factory AppEvent.transferFailed({required PlatformInt64 id, required String error}) =
-      AppEvent_TransferFailed;
+  const factory AppEvent.transferFailed({
+    required PlatformInt64 id,
+    required String error,
+  }) = AppEvent_TransferFailed;
 
   /// Sharing with browsers stopped (see `NudgeApp::start_web_share`).
   const factory AppEvent.webShareStopped() = AppEvent_WebShareStopped;
@@ -175,13 +184,16 @@ sealed class AppEvent with _$AppEvent {
   }) = AppEvent_OfferReceived;
 
   /// Stop showing that question (answered, or it timed out).
-  const factory AppEvent.offerClosed({required PlatformInt64 id}) = AppEvent_OfferClosed;
+  const factory AppEvent.offerClosed({required PlatformInt64 id}) =
+      AppEvent_OfferClosed;
 
   /// The receiver said yes to an outgoing transfer.
-  const factory AppEvent.transferAccepted({required PlatformInt64 id}) = AppEvent_TransferAccepted;
+  const factory AppEvent.transferAccepted({required PlatformInt64 id}) =
+      AppEvent_TransferAccepted;
 
   /// The receiver has it and is asking its user: delivered, answer to come.
-  const factory AppEvent.transferPending({required PlatformInt64 id}) = AppEvent_TransferPending;
+  const factory AppEvent.transferPending({required PlatformInt64 id}) =
+      AppEvent_TransferPending;
 
   /// Every byte is there, held until the receiver's user answers.
   /// Outgoing: sent, waiting for them. Incoming: here, waiting for the
@@ -191,15 +203,20 @@ sealed class AppEvent with _$AppEvent {
 
   /// The network an outgoing transfer is using: "usb", "wired",
   /// "hotspot", "wifi" or "other". Can change mid-file.
-  const factory AppEvent.transferRoute({required PlatformInt64 id, required String route}) =
-      AppEvent_TransferRoute;
+  const factory AppEvent.transferRoute({
+    required PlatformInt64 id,
+    required String route,
+  }) = AppEvent_TransferRoute;
 
   /// Clipboard text from a paired device: put it on the clipboard.
-  const factory AppEvent.clipboardReceived({required String deviceId, required String text}) =
-      AppEvent_ClipboardReceived;
+  const factory AppEvent.clipboardReceived({
+    required String deviceId,
+    required String text,
+  }) = AppEvent_ClipboardReceived;
 
   /// Android: start the hotspot for a direct link, then `hotspot_ready`.
-  const factory AppEvent.hotspotWanted({required PlatformInt64 id}) = AppEvent_HotspotWanted;
+  const factory AppEvent.hotspotWanted({required PlatformInt64 id}) =
+      AppEvent_HotspotWanted;
 
   /// Android: stop that hotspot.
   const factory AppEvent.hotspotDone() = AppEvent_HotspotDone;
@@ -312,5 +329,8 @@ class OpenFile {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is OpenFile && runtimeType == other.runtimeType && fd == other.fd && name == other.name;
+      other is OpenFile &&
+          runtimeType == other.runtimeType &&
+          fd == other.fd &&
+          name == other.name;
 }

@@ -1827,13 +1827,16 @@ impl Shared {
         if !yes {
             return reject(stream).await;
         }
+        // Trust before replying, so the asker can use the pairing as soon
+        // as it hears yes.
+        self.trust(peer, &name)?;
         PairReply::Accept {
             device_name: self.device_name.clone(),
         }
         .write_to(&mut stream)
         .await?;
         let _ = stream.shutdown().await;
-        self.trust(peer, &name)
+        Ok(())
     }
 
     /// What a paired device said about accepting our files.
@@ -1901,13 +1904,14 @@ impl Shared {
             return Err(Error::PairingRejected);
         }
         self.close_pairing();
+        self.trust(peer, &request.device_name)?;
         PairReply::Accept {
             device_name: self.device_name.clone(),
         }
         .write_to(&mut stream)
         .await?;
         let _ = stream.shutdown().await;
-        self.trust(peer, &request.device_name)
+        Ok(())
     }
 }
 
