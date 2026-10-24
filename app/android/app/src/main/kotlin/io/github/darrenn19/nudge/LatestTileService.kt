@@ -11,10 +11,11 @@ import android.service.quicksettings.TileService
  * Quick settings tile, "Send latest": sends the newest photo or video
  * (a picture just taken, a screenshot, an image or video just downloaded;
  * see [Latest]) to your device. Under the label it names the file it
- * would send.
+ * would send. It goes to the default device if one is set, else the one
+ * nearby, else the current device (last swiped to in the app).
  *
  * From the lock screen only if the user allowed it (off by default: then
- * Android asks to unlock first). When there's no single obvious device, or
+ * Android asks to unlock first). When there's still no device, or
  * Nudge can't read photos yet, it opens the app (after unlocking).
  *
  * Everything is decided during the tap: Android only lets a tile open an

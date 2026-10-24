@@ -156,6 +156,13 @@ pub enum AppEvent {
         device_id: String,
         text: String,
     },
+    /// A copied image from a paired device, saved at `path`: put it on the
+    /// clipboard.
+    ClipboardImageReceived {
+        device_id: String,
+        path: String,
+        mime: String,
+    },
     /// Android: start the hotspot for a direct link, then `hotspot_ready`.
     HotspotWanted {
         id: i64,
@@ -250,6 +257,13 @@ impl From<NodeEvent> for AppEvent {
                 device_id: peer.to_string(),
                 text,
             },
+            NodeEvent::ClipboardImageReceived { peer, path, mime } => {
+                Self::ClipboardImageReceived {
+                    device_id: peer.to_string(),
+                    path: path.to_string_lossy().into_owned(),
+                    mime,
+                }
+            }
             NodeEvent::HotspotWanted { id } => Self::HotspotWanted { id: id as i64 },
             NodeEvent::HotspotDone => Self::HotspotDone,
             NodeEvent::JoinWanted {
@@ -548,6 +562,23 @@ impl NudgeApp {
         let node = self.node.clone();
         runtime()
             .spawn(async move { node.send_clipboard(peer, text).await })
+            .await
+            .context("Nudge runtime stopped")??;
+        Ok(())
+    }
+
+    /// Put a copied image on a paired device's clipboard (`mime` like
+    /// "image/png"). No question on its side.
+    pub async fn send_clipboard_image(
+        &self,
+        device_id: String,
+        mime: String,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        let peer = parse_id(&device_id)?;
+        let node = self.node.clone();
+        runtime()
+            .spawn(async move { node.send_clipboard_image(peer, mime, data).await })
             .await
             .context("Nudge runtime stopped")??;
         Ok(())

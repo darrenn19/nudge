@@ -23,6 +23,8 @@ object Notifications {
     private const val RECEIVED_GROUP = "io.github.darrenn19.nudge.RECEIVED"
     /** The service's ongoing notification: "ready" or progress. */
     const val SERVICE_ID = 1
+    /** "Instant clipboard is paused" (see [clipboardPaused]). */
+    private const val CLIP_PAUSED_ID = 2
     private val nextId = AtomicInteger(1000)
 
     fun createChannels(context: Context) {
@@ -55,7 +57,17 @@ object Notifications {
             .setPriority(NotificationCompat.PRIORITY_MIN)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(openApp(context))
+            // Android won't let Nudge read the clipboard in the background:
+            // one tap here sends it (see ClipActivity).
+            .addAction(0, "Send clipboard", sendClipboard(context))
             .build()
+
+    private fun sendClipboard(context: Context): PendingIntent = PendingIntent.getActivity(
+        context,
+        3,
+        Intent(context, ClipActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+        PendingIntent.FLAG_IMMUTABLE,
+    )
 
     /** The ongoing notification shown while files are moving. [progress] is 0–100, or -1 if unknown. */
     fun progress(context: Context, title: String, text: String, progress: Int): Notification =
@@ -144,6 +156,24 @@ object Notifications {
     }
 
     fun cancel(context: Context, id: Int) = NotificationManagerCompat.from(context).cancel(id)
+
+    /**
+     * Instant clipboard stopped (Nudge restarted: a reboot, an update) and
+     * Android only lets it start again while Nudge is on screen. Quiet.
+     */
+    fun clipboardPaused(context: Context) {
+        val notification = NotificationCompat.Builder(context, TRANSFERS)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Instant clipboard is paused")
+            .setContentText("Tap to turn it back on")
+            .setSilent(true)
+            .setAutoCancel(true)
+            .setContentIntent(openApp(context))
+            .build()
+        runCatching { NotificationManagerCompat.from(context).notify(CLIP_PAUSED_ID, notification) }
+    }
+
+    fun clipboardResumed(context: Context) = cancel(context, CLIP_PAUSED_ID)
 
     private fun openApp(context: Context): PendingIntent = PendingIntent.getActivity(
         context,

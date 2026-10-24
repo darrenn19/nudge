@@ -10,6 +10,7 @@
 
 #pragma comment(lib, "wtsapi32.lib")
 
+#include "clipboard_image.h"
 #include "flutter/generated_plugin_registrant.h"
 #include "packaged.h"
 #include "utils.h"
@@ -43,6 +44,24 @@ bool FlutterWindow::OnCreate() {
       flutter_controller_->engine()->messenger(), "nudge/clipboard",
       &flutter::StandardMethodCodec::GetInstance());
   AddClipboardFormatListener(GetHandle());
+  // Images from other devices go on the clipboard from here (Flutter's
+  // clipboard API is text only).
+  clipboard_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        if (call.method_name() != "setImage") {
+          result->NotImplemented();
+          return;
+        }
+        const auto* bytes = std::get_if<std::vector<uint8_t>>(call.arguments());
+        if (!bytes) {
+          result->Error("bad_args", "expected image bytes");
+          return;
+        }
+        // Not sent straight back when the clipboard reports the change.
+        ignore_copies_until_ = GetTickCount64() + 1000;
+        result->Success(flutter::EncodableValue(WriteClipboardImage(GetHandle(), *bytes)));
+      });
 
   // Locking and unlocking (Win+L), even with the window hidden.
   session_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -213,7 +232,7 @@ bool FormatSaysNo(UINT format) {
 }  // namespace
 
 void FlutterWindow::ReportCopy() {
-  if (!clipboard_) return;
+  if (!clipboard_ || GetTickCount64() < ignore_copies_until_) return;
   static const UINT exclude =
       RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
   static const UINT history = RegisterClipboardFormatW(L"CanIncludeInClipboardHistory");
@@ -237,8 +256,15 @@ void FlutterWindow::ReportCopy() {
       GlobalUnlock(data);
     }
   }
+  // No text: maybe an image (a screenshot, "Copy image").
+  std::vector<uint8_t> image;
+  if (!keep_private && text.empty()) image = ReadClipboardImagePng();
   CloseClipboard();
-  // Text only, and nothing huge (the other side takes up to 1 MB).
+  if (!image.empty()) {
+    clipboard_->InvokeMethod("copiedImage", std::make_unique<flutter::EncodableValue>(image));
+    return;
+  }
+  // Nothing huge (the other side takes up to 1 MB of text).
   if (keep_private || text.empty() || text.size() > (1 << 18)) return;
   clipboard_->InvokeMethod("copied",
                            std::make_unique<flutter::EncodableValue>(Utf8FromUtf16(text.c_str())));

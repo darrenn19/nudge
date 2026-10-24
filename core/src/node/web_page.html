@@ -124,6 +124,27 @@
   .item .what { color: var(--muted); font-size: 13px; white-space: nowrap; }
   @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 
+  /* "Temporary": this page is a visit, not a pairing. */
+  .me .temp {
+    display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 12px;
+    font-size: 11px; font-weight: 600; letter-spacing: 1px; text-transform: uppercase;
+    color: var(--warn); background: rgba(255,196,107,.12); border: 1px solid rgba(255,196,107,.35);
+  }
+  .tools { display: flex; gap: 10px; margin-top: 18px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 22px; cursor: pointer;
+    background: var(--glass); border: 1px solid var(--line); font-size: 14px; font-weight: 500; transition: transform .15s;
+  }
+  .pill:active { transform: scale(.96); }
+  .pill svg { width: 16px; height: 16px; }
+  .pill:disabled { opacity: .4; cursor: default; }
+  .sheet textarea, .sheet .text {
+    width: 100%; margin: 16px 0 18px; padding: 12px 14px; border-radius: 18px; border: 1px solid var(--line);
+    background: rgba(0,0,0,.2); color: var(--text); font: inherit; font-size: 15px;
+  }
+  .sheet textarea { min-height: 120px; max-height: 40vh; resize: vertical; }
+  .sheet textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .sheet .text { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
   .fine { margin-top: 28px; font-size: 12px; color: var(--faint); text-align: center; max-width: 360px; }
 
   /* An offer slides up from the bottom. */
@@ -197,14 +218,21 @@
     <div class="me">
       <div class="bubble" id="bubble"></div>
       <span id="meName">This device</span>
+      <span class="temp" title="Ends when you close this page">Temporary</span>
     </div>
 
     <p class="hint" id="hint">Opening a connection…</p>
+    <div class="tools">
+      <button class="pill" id="sendText" disabled>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M9 10h6M9 14h6"/></svg>
+        Send text or a link
+      </button>
+    </div>
   </section>
 
   <section class="list" id="list" hidden></section>
 
-  <p class="fine">Files go straight between the two devices over this Wi-Fi. Nothing is uploaded to the internet.</p>
+  <p class="fine">This is a temporary connection: it ends soon after you close this page, and nothing is installed or paired. Files go straight between the two devices over this Wi-Fi; nothing is uploaded to the internet.</p>
 </main>
 
 <div class="backdrop" id="backdrop"></div>
@@ -216,6 +244,19 @@
   <div class="actions">
     <button class="btn" id="decline">Decline</button>
     <button class="btn primary" id="accept">Accept</button>
+  </div>
+</div>
+
+<!-- Text: what came from the other device (with Copy), or what to send. -->
+<div class="sheet" id="textSheet" role="dialog" aria-modal="true" aria-labelledby="textTitle">
+  <div class="handle"></div>
+  <h2 id="textTitle"></h2>
+  <div class="total" id="textNote"></div>
+  <div class="text" id="textShown" hidden></div>
+  <textarea id="textInput" placeholder="Paste or type here" hidden></textarea>
+  <div class="actions">
+    <button class="btn" id="textCancel">Close</button>
+    <button class="btn primary" id="textGo">Copy</button>
   </div>
 </div>
 
@@ -320,6 +361,7 @@ function flash(text, tone) {
 
 function setStatus(connected, text) {
   state.connected = connected;
+  $("sendText").disabled = !connected;
   $("status").textContent = text;
   $("dot").classList.toggle("on", connected);
   render();
@@ -349,7 +391,7 @@ function connect() {
     $("orbIcon").innerHTML = phoneHost ? ICONS.phone : ICONS.laptop;
     $("orb").setAttribute("aria-label", "Send files to " + d.from);
     $("meName").textContent = "You · " + d.name;
-    setStatus(true, "Connected");
+    setStatus(true, "Connected · temporary");
   });
   source.addEventListener("offer", (e) => queueOffer(JSON.parse(e.data)));
   source.addEventListener("withdrawn", (e) => {
@@ -359,6 +401,7 @@ function connect() {
   });
   source.addEventListener("download", (e) => fetchFile(JSON.parse(e.data)));
   source.addEventListener("delivered", (e) => delivered(JSON.parse(e.data).id));
+  source.addEventListener("clip", (e) => showText(JSON.parse(e.data).text));
   source.onerror = () => {
     setStatus(false, "Reconnecting…");
     source.close();
@@ -506,6 +549,86 @@ function upload(file, onProgress) {
     xhr.send(file);
   });
 }
+
+/* Text both ways. A page on plain http can't use the clipboard API, so
+   received text is copied with the older copy command on a tap, and text
+   to send is pasted into a box. */
+let textMode = null; // "show" or "send"
+let shownText = "";
+function openTextSheet(mode) {
+  textMode = mode;
+  const show = mode === "show";
+  $("textShown").hidden = !show;
+  $("textInput").hidden = show;
+  $("textGo").textContent = show ? "Copy" : "Send";
+  $("textCancel").textContent = show ? "Close" : "Cancel";
+  $("backdrop").classList.add("on");
+  $("textSheet").classList.add("on");
+}
+function closeTextSheet() {
+  $("textSheet").classList.remove("on");
+  if (!shown) $("backdrop").classList.remove("on");
+  textMode = null;
+}
+function showText(text) {
+  shownText = text;
+  $("textTitle").textContent = "Text from " + state.from;
+  $("textNote").textContent = "Tap Copy to put it on this device's clipboard.";
+  $("textShown").textContent = text;
+  openTextSheet("show");
+  replay($("orb"), "pop");
+  addItem(text.length > 60 ? text.slice(0, 60) + "…" : text, "Text received", true);
+}
+function copy(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+  }
+  return Promise.resolve(legacyCopy(text));
+}
+function legacyCopy(text) {
+  const area = el("textarea");
+  area.value = text;
+  area.setAttribute("readonly", "");
+  area.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.append(area);
+  area.select();
+  area.setSelectionRange(0, text.length);
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (err) {}
+  area.remove();
+  return ok;
+}
+$("sendText").onclick = () => {
+  if (!state.connected) return;
+  $("textTitle").textContent = "Send text to " + state.from;
+  $("textNote").textContent = "It goes onto " + state.from + "'s clipboard.";
+  $("textInput").value = "";
+  openTextSheet("send");
+  setTimeout(() => $("textInput").focus(), 350);
+};
+$("textCancel").onclick = closeTextSheet;
+$("textGo").onclick = async () => {
+  if (textMode === "show") {
+    const ok = await copy(shownText);
+    closeTextSheet();
+    toast(ok ? "Copied" : "Couldn't copy: select the text and copy it instead");
+    return;
+  }
+  const text = $("textInput").value;
+  if (!text) return;
+  $("textGo").disabled = true;
+  let ok = false;
+  try {
+    const res = await fetch(base + "/clip?s=" + session, { method: "POST", body: text });
+    ok = res.ok;
+  } catch (err) {}
+  $("textGo").disabled = false;
+  if (!ok) { toast("Couldn't send it: try again"); return; }
+  closeTextSheet();
+  addItem(text.length > 60 ? text.slice(0, 60) + "…" : text, "Copied there", true);
+  flash("Text sent", "good");
+};
+$("backdrop").onclick = () => { if (textMode) closeTextSheet(); };
 
 // Phones pause background tabs; reconnect as soon as this one is back.
 document.addEventListener("visibilitychange", () => {

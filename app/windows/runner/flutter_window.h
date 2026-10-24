@@ -44,8 +44,12 @@ class FlutterWindow : public Win32Window {
   // Tells Dart about each copy ("nudge/clipboard"), for clipboard sync.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> clipboard_;
 
-  // Reads what was just copied and passes it on, unless it's marked private.
+  // Reads what was just copied (text or an image) and passes it on, unless
+  // it's marked private.
   void ReportCopy();
+
+  // Until then, clipboard changes are Nudge's own (an image it was sent).
+  ULONGLONG ignore_copies_until_ = 0;
 
   // Tells Dart about later launches ("nudge/instance"): their arguments, so
   // files sent from Explorer arrive and the window comes back.

@@ -25,7 +25,8 @@
 //! connection.
 //!
 //! Clipboard text between paired devices: `Clip` → `Response::Done` (or
-//! `Reject` if that device doesn't sync its clipboard with this one).
+//! `Reject` if that device doesn't sync its clipboard with this one). A
+//! copied image the same way, with `ClipImage`.
 //!
 //! Flow for pairing:
 //! 1. Scanner → `PairRequest` (header, proof of the QR secret, device name)
@@ -52,6 +53,13 @@ pub const MAX_DEVICE_NAME_LEN: usize = 255;
 /// Longest clipboard text accepted on the wire, in bytes.
 pub const MAX_CLIP_LEN: usize = 1 << 20;
 
+/// Biggest copied image accepted on the wire, in bytes (a large PNG
+/// screenshot is a few MB).
+pub const MAX_CLIP_IMAGE_LEN: usize = 48 << 20;
+
+/// Longest image type ("image/png") accepted on the wire, in bytes.
+const MAX_MIME_LEN: usize = 64;
+
 const KIND_FILE: u8 = 1;
 const KIND_PAIR: u8 = 2;
 const KIND_PAIR_ASK: u8 = 3;
@@ -61,6 +69,7 @@ const KIND_CLIP: u8 = 6;
 const KIND_LINK: u8 = 7;
 /// A file offer whose data is a pack of files (see `pack`).
 const KIND_PACK: u8 = 8;
+const KIND_CLIP_IMAGE: u8 = 9;
 
 /// Header that opens every connection.
 fn put_header(buf: &mut Vec<u8>, kind: u8) {
@@ -131,6 +140,8 @@ pub enum Request {
     AwaitAnswer(AwaitAnswer),
     /// Put this text on your clipboard.
     Clip(Clip),
+    /// Put this image on your clipboard.
+    ClipImage(ClipImage),
     /// Move to a faster, direct network (the phone's hotspot).
     Link(Link),
 }
@@ -147,6 +158,7 @@ impl Request {
                 batch: r.read_u64().await?,
             })),
             KIND_CLIP => Ok(Self::Clip(Clip::read_body(r).await?)),
+            KIND_CLIP_IMAGE => Ok(Self::ClipImage(ClipImage::read_body(r).await?)),
             KIND_LINK => match r.read_u8().await? {
                 1 => Ok(Self::Link(Link::Ask)),
                 2 => Ok(Self::Link(Link::Offer)),
@@ -361,6 +373,45 @@ impl Clip {
         r.read_exact(&mut bytes).await?;
         let text = String::from_utf8(bytes).map_err(|_| Error::Protocol("text is not UTF-8"))?;
         Ok(Self { text })
+    }
+}
+
+/// A copied image for a paired device's clipboard: its type ("image/png",
+/// "image/jpeg") and bytes. Applied at once, without asking, like `Clip`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipImage {
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+impl ClipImage {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        if self.data.len() > MAX_CLIP_IMAGE_LEN {
+            return Err(Error::Protocol("clipboard image too big"));
+        }
+        let mime = truncate(&self.mime, MAX_MIME_LEN);
+        let mut head = Vec::with_capacity(7 + 2 + mime.len() + 4);
+        put_header(&mut head, KIND_CLIP_IMAGE);
+        put_string(&mut head, mime);
+        head.extend_from_slice(&(self.data.len() as u32).to_be_bytes());
+        w.write_all(&head).await?;
+        w.write_all(&self.data).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        let mime = read_string(r, MAX_MIME_LEN, "image type too long").await?;
+        if !mime.starts_with("image/") {
+            return Err(Error::Protocol("clipboard item is not an image"));
+        }
+        let len = r.read_u32().await? as usize;
+        if len > MAX_CLIP_IMAGE_LEN {
+            return Err(Error::Protocol("clipboard image too big"));
+        }
+        let mut data = vec![0u8; len];
+        r.read_exact(&mut data).await?;
+        Ok(Self { mime, data })
     }
 }
 
@@ -690,6 +741,30 @@ mod tests {
             Request::read_from(&mut buf.as_slice()).await.unwrap(),
             Request::AwaitAnswer(ask)
         );
+    }
+
+    #[tokio::test]
+    async fn clip_image_round_trips() {
+        let image = ClipImage {
+            mime: "image/png".into(),
+            data: (0..100_000u32).map(|i| i as u8).collect(),
+        };
+        let mut buf = Vec::new();
+        image.write_to(&mut buf).await.unwrap();
+        assert_eq!(
+            Request::read_from(&mut buf.as_slice()).await.unwrap(),
+            Request::ClipImage(image)
+        );
+        // Only images.
+        let mut buf = Vec::new();
+        ClipImage {
+            mime: "text/html".into(),
+            data: vec![1],
+        }
+        .write_to(&mut buf)
+        .await
+        .unwrap();
+        assert!(Request::read_from(&mut buf.as_slice()).await.is_err());
     }
 
     #[tokio::test]

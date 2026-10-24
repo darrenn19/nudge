@@ -4,8 +4,9 @@
 //! who scans the QR code opens it, and while the tab stays open they appear
 //! as a device. Files sent to them wait for them to tap Accept, then
 //! download straight from this device. They can send files back from the
-//! same page; those are accepted without asking, since the user invited
-//! them by showing the code.
+//! same page (the user here accepts or declines each batch), and clipboard
+//! text both ways. A tab is temporary: it's gone soon after the page closes,
+//! and is never paired.
 //!
 //! Plain HTTP: a browser can't trust Nudge's self-signed certificate
 //! without a scary warning. The only protection is the unguessable secret
@@ -83,10 +84,9 @@ pub(super) struct Browser {
     queue: VecDeque<Download>,
     current: Option<Download>,
     /// Files this tab may still send: granted when the user accepts its
-    /// "can I send you these?" question.
+    /// "can I send you these?" question. Every send is asked about: a tab
+    /// is temporary, so there's no "always accept".
     allowance: u32,
-    /// The user chose "always accept" for this tab.
-    always: bool,
 }
 
 impl Browser {
@@ -188,25 +188,21 @@ pub(super) fn stop(shared: &Shared) {
     }
 }
 
-/// "Always accept" for a tab: for as long as it's open.
-pub(super) fn always_accept(shared: &Shared, id: &Fingerprint) {
-    if let Some(tab) = shared
-        .state()
-        .web
-        .as_mut()
-        .and_then(|w| w.browsers.get_mut(id))
-    {
-        tab.always = true;
-    }
-}
+/// Longest clipboard text a tab may send (about the same as paired devices).
+const MAX_CLIP: u64 = 1 << 20;
 
-pub(super) fn always_accepts(shared: &Shared, id: &Fingerprint) -> bool {
-    shared
-        .state()
+/// Show clipboard text in a tab, with a button to copy it. (A page can't
+/// write to the clipboard by itself, so the person taps Copy.)
+pub(super) fn send_text(shared: &Shared, id: &Fingerprint, text: &str) -> Result<()> {
+    let state = shared.state();
+    let tab = state
         .web
         .as_ref()
         .and_then(|w| w.browsers.get(id))
-        .is_some_and(|tab| tab.always)
+        .filter(|tab| tab.connected())
+        .ok_or(Error::BrowserGone)?;
+    tab.push("clip", &format!("{{\"text\":{}}}", json_str(text)));
+    Ok(())
 }
 
 pub(super) fn is_browser(shared: &Shared, id: &Fingerprint) -> bool {
@@ -465,12 +461,15 @@ async fn handle(shared: &Arc<Shared>, token: &str, mut tcp: TcpStream) -> std::i
             Some(s) => upload(shared, &mut tcp, s, req).await,
             None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
         },
+        ("POST", ["clip"]) => match session {
+            Some(s) => clip(shared, &mut tcp, s, req).await,
+            None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
+        },
         _ => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
     }
 }
 
-/// "Can I send you these?" from a tab: the user here accepts or declines
-/// (or it's accepted at once, for a tab set to always accept). The reply,
+/// "Can I send you these?" from a tab: the user here accepts or declines. The reply,
 /// `{"answer":"accepted"|"declined"|"none"}`, comes when they do.
 async fn ask(
     shared: &Arc<Shared>,
@@ -562,7 +561,6 @@ async fn events(
                         queue: VecDeque::new(),
                         current: None,
                         allowance: 0,
-                        always: false,
                     },
                 );
                 id
@@ -834,6 +832,46 @@ async fn upload(
     } else {
         respond(tcp, "500 Internal Server Error", "text/plain", b"Not saved").await
     }
+}
+
+/// Text the tab sends: onto this device's clipboard, as from a paired
+/// device. The person here invited the tab by showing the code.
+async fn clip(
+    shared: &Arc<Shared>,
+    tcp: &mut TcpStream,
+    session: Fingerprint,
+    req: Request,
+) -> std::io::Result<()> {
+    if !is_browser(shared, &session) {
+        return respond(tcp, "404 Not Found", "text/plain", b"Not found").await;
+    }
+    let size = match req.content_length {
+        Some(n) if n <= MAX_CLIP => n as usize,
+        Some(_) => return respond(tcp, "413 Payload Too Large", "text/plain", b"Too long").await,
+        None => return respond(tcp, "411 Length Required", "text/plain", b"Length required").await,
+    };
+    let mut body = req.body_start;
+    body.truncate(size);
+    let mut chunk = vec![0u8; 16 * 1024];
+    while body.len() < size {
+        let want = chunk.len().min(size - body.len());
+        let n = tokio::time::timeout(Duration::from_secs(15), tcp.read(&mut chunk[..want]))
+            .await
+            .map_err(|_| std::io::Error::other("body timed out"))??;
+        if n == 0 {
+            return Ok(());
+        }
+        body.extend_from_slice(&chunk[..n]);
+    }
+    let text = String::from_utf8_lossy(&body).into_owned();
+    if text.is_empty() {
+        return respond(tcp, "400 Bad Request", "text/plain", b"Empty").await;
+    }
+    shared.emit(NodeEvent::ClipboardReceived {
+        peer: session,
+        text,
+    });
+    respond(tcp, "200 OK", "application/json", b"{}").await
 }
 
 async fn receive_body(

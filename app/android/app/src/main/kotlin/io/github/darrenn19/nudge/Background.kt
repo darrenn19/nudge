@@ -107,6 +107,7 @@ object Background : Core.Listener {
             }
             "offerClosed" -> Notifications.cancelOffer(context, id)
             "clipboard" -> ClipSync.set(context, e.getString("text"))
+            "clipboardImage" -> ClipSync.setImage(context, java.io.File(e.getString("path")), e.getString("mime"))
             "hotspotWanted" -> Hotspot.start(context) { h ->
                 Core.hotspotReady(
                     id,

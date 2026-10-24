@@ -49,6 +49,9 @@ class MainActivity : FlutterActivity() {
     override fun onResume() {
         super.onResume()
         Background.inFront = true
+        // Android asks before letting an app read the log, and only while
+        // it's on screen: so (re)start the clipboard watcher from here too.
+        window.decorView.postDelayed({ ClipWatch.start(this) }, 500)
     }
 
     override fun onPause() {

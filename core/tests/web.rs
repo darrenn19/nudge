@@ -287,6 +287,54 @@ async fn browser_receives_and_sends() {
     assert!(closed.is_ok(), "event stream still open");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn clipboard_goes_both_ways_and_every_send_is_asked() {
+    let (node, mut events, _dir) = start().await;
+    let url = node.start_web_share().await.unwrap();
+    let (addr, path) = split(&url);
+    let mut tab = Events::open(&addr, &path, None).await;
+    let session = field(&tab.next("hello").await, "session");
+    let id: Fingerprint = session.parse().unwrap();
+
+    // App -> tab: shown on the page.
+    node.send_clipboard(id, "https://example.com/\"x\"".into())
+        .await
+        .unwrap();
+    let clip = tab.next("clip").await;
+    assert!(clip.contains("https://example.com/\\\"x\\\""), "{clip}");
+
+    // Tab -> app: onto the clipboard, from the tab.
+    let clip_path = format!("{path}/clip?s={session}");
+    assert_eq!(
+        http(&addr, "POST", &clip_path, "héllo".as_bytes()).await.0,
+        200
+    );
+    let (from, text) = wait_for(&mut events, |e| match e {
+        NodeEvent::ClipboardReceived { peer, text } => Some((*peer, text.clone())),
+        _ => None,
+    })
+    .await;
+    assert_eq!((from, text.as_str()), (id, "héllo"));
+    // Not empty, and not without a session.
+    assert_eq!(http(&addr, "POST", &clip_path, b"").await.0, 400);
+    let stranger = format!("{path}/clip?s={}", "1".repeat(64));
+    assert_eq!(http(&addr, "POST", &stranger, b"x").await.0, 404);
+
+    // "Always accept" doesn't stick for a tab: it's temporary.
+    let ask_path = format!("{path}/ask?s={session}&count=1&size=1&name=x.txt");
+    for round in 0..2 {
+        let (ask_addr, ask) = (addr.clone(), ask_path.clone());
+        let asking = tokio::spawn(async move { http(&ask_addr, "POST", &ask, b"").await });
+        let question = wait_for(&mut events, |e| match e {
+            NodeEvent::OfferReceived { id, .. } => Some(*id),
+            _ => None,
+        })
+        .await;
+        node.answer_offer(question, true, round == 0).unwrap();
+        assert!(String::from_utf8_lossy(&asking.await.unwrap().1).contains("accepted"));
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tab_keeps_its_place_when_it_reconnects() {
     let (node, _events, _dir) = start().await;

@@ -25,7 +25,8 @@ use crate::link::{LinkKind, Speeds};
 use crate::pack::{self, PACK_FILE_MAX, PACK_MAX_BYTES, PACK_MAX_FILES, PACK_MIN_FILES, Pack};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
 use crate::protocol::{
-    AwaitAnswer, Batch, Clip, Offer, PairAsk, PairReply, PairRequest, Request, Response, Status,
+    AwaitAnswer, Batch, Clip, ClipImage, Offer, PairAsk, PairReply, PairRequest, Request, Response,
+    Status,
 };
 use crate::transfer::{
     Landed, Progress, TransferStats, land, receive_offered, send_file_tracked, send_from_tracked,
@@ -440,6 +441,13 @@ pub enum NodeEvent {
     ClipboardReceived {
         peer: Fingerprint,
         text: String,
+    },
+    /// A copied image from a paired device, saved at `path` (only the
+    /// newest is kept): put it on this device's clipboard. Never asked about.
+    ClipboardImageReceived {
+        peer: Fingerprint,
+        path: PathBuf,
+        mime: String,
     },
     /// A nearby device wants to pair without a QR code. Check both screens
     /// show `code`, then answer with `Node::answer_pair` (closed with
@@ -1083,7 +1091,8 @@ impl Node {
     }
 
     /// Answer `NodeEvent::OfferReceived`. With `always`, files from that
-    /// device are accepted without asking from now on.
+    /// device are accepted without asking from now on. Not for browser
+    /// tabs: they're temporary, so each send is asked about.
     pub fn answer_offer(&self, id: u64, accept: bool, always: bool) -> Result<()> {
         let question = self.shared.state().questions.remove(&id);
         let Some(((peer, _), answer)) = question else {
@@ -1091,13 +1100,8 @@ impl Node {
         };
         let _ = answer.send(Some(if accept { Verdict::Yes } else { Verdict::No }));
         self.shared.emit(NodeEvent::OfferClosed { id });
-        if accept && always {
-            if web::is_browser(&self.shared, &peer) {
-                // A browser tab: for as long as it's open.
-                web::always_accept(&self.shared, &peer);
-            } else {
-                self.set_auto_accept(&peer, true)?;
-            }
+        if accept && always && !web::is_browser(&self.shared, &peer) {
+            self.set_auto_accept(&peer, true)?;
         }
         Ok(())
     }
@@ -1171,8 +1175,12 @@ impl Node {
 
     /// Put `text` on a paired device's clipboard. No question on the other
     /// side; fails if it doesn't sync its clipboard with this device.
+    /// A browser tab (see `start_web_share`) shows the text with a Copy button.
     pub async fn send_clipboard(&self, peer: Fingerprint, text: String) -> Result<()> {
         let shared = &self.shared;
+        if web::is_browser(shared, &peer) {
+            return web::send_text(shared, &peer, &text);
+        }
         if !shared.trusted.contains(&peer) {
             return Err(Error::UntrustedPeer(peer));
         }
@@ -1187,6 +1195,32 @@ impl Node {
             Response::Reject => Err(Error::Rejected),
             Response::NotPaired => Err(Error::NotTrustedByPeer),
             _ => Err(Error::Protocol("unexpected reply to clipboard text")),
+        }
+    }
+
+    /// Put a copied image on a paired device's clipboard, like
+    /// [`Node::send_clipboard`]. `mime` is "image/png", "image/jpeg"...
+    pub async fn send_clipboard_image(
+        &self,
+        peer: Fingerprint,
+        mime: String,
+        data: Vec<u8>,
+    ) -> Result<()> {
+        let shared = &self.shared;
+        if !shared.trusted.contains(&peer) {
+            return Err(Error::UntrustedPeer(peer));
+        }
+        let mut stream = connect_any(&shared.tls, &shared.addrs_of(&peer), peer).await?;
+        ClipImage { mime, data }.write_to(&mut stream).await?;
+        let reply = tokio::time::timeout(REQUEST_TIMEOUT, Response::read_from(&mut stream))
+            .await
+            .map_err(|_| Error::Unreachable)??;
+        let _ = stream.shutdown().await;
+        match reply {
+            Response::Done => Ok(()),
+            Response::Reject => Err(Error::Rejected),
+            Response::NotPaired => Err(Error::NotTrustedByPeer),
+            _ => Err(Error::Protocol("unexpected reply to clipboard image")),
         }
     }
 
@@ -1394,6 +1428,34 @@ impl Shared {
         Ok(())
     }
 
+    /// Keep a copied image from another device where the platform can put
+    /// it on the clipboard: `<data dir>/clipboard/`, newest only.
+    async fn save_clip_image(&self, image: &ClipImage) -> Result<PathBuf> {
+        let dir = self.data_dir.join(CLIP_DIR);
+        tokio::fs::create_dir_all(&dir).await?;
+        let ext = match image.mime.as_str() {
+            "image/jpeg" => "jpg",
+            "image/gif" => "gif",
+            "image/webp" => "webp",
+            "image/bmp" => "bmp",
+            _ => "png",
+        };
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let path = dir.join(format!("clip-{stamp}.{ext}"));
+        tokio::fs::write(&path, &image.data).await?;
+        // Older ones are off the clipboard by now.
+        if let Ok(mut entries) = tokio::fs::read_dir(&dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.path() != path {
+                    let _ = tokio::fs::remove_file(entry.path()).await;
+                }
+            }
+        }
+        Ok(path)
+    }
+
     fn syncs_clipboard(&self, peer: &Fingerprint) -> bool {
         !self
             .clip_off
@@ -1419,9 +1481,7 @@ impl Shared {
             return Asking::Now(Verdict::No);
         }
         let ask_anyway = receiving == Receiving::Ask;
-        if !ask_anyway
-            && (!self.ask || self.auto_accepts(&peer) || web::always_accepts(self, &peer))
-        {
+        if !ask_anyway && (!self.ask || self.auto_accepts(&peer)) {
             return Asking::Now(Verdict::Yes);
         }
         let key = match batch {
@@ -1796,8 +1856,31 @@ impl Shared {
                 let _ = stream.shutdown().await;
                 Ok(())
             }
+            Request::ClipImage(image) if trusted => {
+                let reply = if !self.syncs_clipboard(&peer) {
+                    Response::Reject
+                } else {
+                    match self.save_clip_image(&image).await {
+                        Ok(path) => {
+                            self.emit(NodeEvent::ClipboardImageReceived {
+                                peer,
+                                path,
+                                mime: image.mime,
+                            });
+                            Response::Done
+                        }
+                        Err(_) => Response::Reject,
+                    }
+                };
+                reply.write_to(&mut stream).await?;
+                let _ = stream.shutdown().await;
+                Ok(())
+            }
             Request::Link(request) if trusted => self.answer_link(stream, peer, request).await,
-            Request::AwaitAnswer(_) | Request::Clip(_) | Request::Link(_) => {
+            Request::AwaitAnswer(_)
+            | Request::Clip(_)
+            | Request::ClipImage(_)
+            | Request::Link(_) => {
                 let _ = Response::NotPaired.write_to(&mut stream).await;
                 Err(Error::UntrustedPeer(peer))
             }
@@ -2218,6 +2301,9 @@ fn progress_update(id: u64, active: &mut Active, now: Instant) -> Option<NodeEve
 
 const AUTO_ACCEPT_FILE: &str = "auto_accept.txt";
 const CLIP_OFF_FILE: &str = "clipboard_off.txt";
+
+/// Where copied images from other devices are kept (see `save_clip_image`).
+const CLIP_DIR: &str = "clipboard";
 const DIRECT_LINK_OFF_FILE: &str = "direct_link_off.txt";
 
 /// A list of devices kept beside the identity, one fingerprint per line.
@@ -2628,6 +2714,45 @@ mod tests {
             .unwrap();
         let refused = laptop
             .send_clipboard(phone.fingerprint(), "nope".into())
+            .await;
+        assert!(matches!(refused, Err(Error::Rejected)));
+    }
+
+    /// A copied image lands as a file, newest only, unless sync is off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn clipboard_images_go_across() {
+        let ((laptop, _laptop_events, _l), (phone, mut phone_events, _p)) = paired_pair().await;
+        let mut last = None;
+        for (mime, ext) in [("image/png", "png"), ("image/jpeg", "jpg")] {
+            let data: Vec<u8> = (0..300_000u32).map(|i| (i % 253) as u8).collect();
+            laptop
+                .send_clipboard_image(phone.fingerprint(), mime.into(), data.clone())
+                .await
+                .unwrap();
+            let NodeEvent::ClipboardImageReceived {
+                peer,
+                path,
+                mime: got,
+            } = next(&mut phone_events, |e| {
+                matches!(e, NodeEvent::ClipboardImageReceived { .. })
+            })
+            .await
+            else {
+                unreachable!()
+            };
+            assert_eq!((peer, got.as_str()), (laptop.fingerprint(), mime));
+            assert_eq!(path.extension().unwrap(), ext);
+            assert_eq!(std::fs::read(&path).unwrap(), data);
+            if let Some(old) = last.replace(path) {
+                assert!(!std::path::Path::new(&old).exists(), "older image kept");
+            }
+        }
+
+        phone
+            .set_clipboard_sync(&laptop.fingerprint(), false)
+            .unwrap();
+        let refused = laptop
+            .send_clipboard_image(phone.fingerprint(), "image/png".into(), vec![1, 2, 3])
             .await;
         assert!(matches!(refused, Err(Error::Rejected)));
     }

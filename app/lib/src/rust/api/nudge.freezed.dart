@@ -56,7 +56,7 @@ extension AppEventPatterns on AppEvent {
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult Function( AppEvent_Paired value)?  paired,TResult Function( AppEvent_PairingClosed value)?  pairingClosed,TResult Function( AppEvent_TransferStarted value)?  transferStarted,TResult Function( AppEvent_TransferProgress value)?  transferProgress,TResult Function( AppEvent_TransferDone value)?  transferDone,TResult Function( AppEvent_TransferFailed value)?  transferFailed,TResult Function( AppEvent_WebShareStopped value)?  webShareStopped,TResult Function( AppEvent_OfferReceived value)?  offerReceived,TResult Function( AppEvent_OfferClosed value)?  offerClosed,TResult Function( AppEvent_TransferAccepted value)?  transferAccepted,TResult Function( AppEvent_TransferPending value)?  transferPending,TResult Function( AppEvent_TransferDelivered value)?  transferDelivered,TResult Function( AppEvent_TransferRoute value)?  transferRoute,TResult Function( AppEvent_ClipboardReceived value)?  clipboardReceived,TResult Function( AppEvent_HotspotWanted value)?  hotspotWanted,TResult Function( AppEvent_HotspotDone value)?  hotspotDone,TResult Function( AppEvent_JoinWanted value)?  joinWanted,TResult Function( AppEvent_LeaveWanted value)?  leaveWanted,TResult Function( AppEvent_PairAsked value)?  pairAsked,required TResult orElse(),}){
+@optionalTypeArgs TResult maybeMap<TResult extends Object?>({TResult Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult Function( AppEvent_Paired value)?  paired,TResult Function( AppEvent_PairingClosed value)?  pairingClosed,TResult Function( AppEvent_TransferStarted value)?  transferStarted,TResult Function( AppEvent_TransferProgress value)?  transferProgress,TResult Function( AppEvent_TransferDone value)?  transferDone,TResult Function( AppEvent_TransferFailed value)?  transferFailed,TResult Function( AppEvent_WebShareStopped value)?  webShareStopped,TResult Function( AppEvent_OfferReceived value)?  offerReceived,TResult Function( AppEvent_OfferClosed value)?  offerClosed,TResult Function( AppEvent_TransferAccepted value)?  transferAccepted,TResult Function( AppEvent_TransferPending value)?  transferPending,TResult Function( AppEvent_TransferDelivered value)?  transferDelivered,TResult Function( AppEvent_TransferRoute value)?  transferRoute,TResult Function( AppEvent_ClipboardReceived value)?  clipboardReceived,TResult Function( AppEvent_ClipboardImageReceived value)?  clipboardImageReceived,TResult Function( AppEvent_HotspotWanted value)?  hotspotWanted,TResult Function( AppEvent_HotspotDone value)?  hotspotDone,TResult Function( AppEvent_JoinWanted value)?  joinWanted,TResult Function( AppEvent_LeaveWanted value)?  leaveWanted,TResult Function( AppEvent_PairAsked value)?  pairAsked,required TResult orElse(),}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
@@ -74,7 +74,8 @@ return transferAccepted(_that);case AppEvent_TransferPending() when transferPend
 return transferPending(_that);case AppEvent_TransferDelivered() when transferDelivered != null:
 return transferDelivered(_that);case AppEvent_TransferRoute() when transferRoute != null:
 return transferRoute(_that);case AppEvent_ClipboardReceived() when clipboardReceived != null:
-return clipboardReceived(_that);case AppEvent_HotspotWanted() when hotspotWanted != null:
+return clipboardReceived(_that);case AppEvent_ClipboardImageReceived() when clipboardImageReceived != null:
+return clipboardImageReceived(_that);case AppEvent_HotspotWanted() when hotspotWanted != null:
 return hotspotWanted(_that);case AppEvent_HotspotDone() when hotspotDone != null:
 return hotspotDone(_that);case AppEvent_JoinWanted() when joinWanted != null:
 return joinWanted(_that);case AppEvent_LeaveWanted() when leaveWanted != null:
@@ -97,7 +98,7 @@ return pairAsked(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_DevicesChanged value)  devicesChanged,required TResult Function( AppEvent_Paired value)  paired,required TResult Function( AppEvent_PairingClosed value)  pairingClosed,required TResult Function( AppEvent_TransferStarted value)  transferStarted,required TResult Function( AppEvent_TransferProgress value)  transferProgress,required TResult Function( AppEvent_TransferDone value)  transferDone,required TResult Function( AppEvent_TransferFailed value)  transferFailed,required TResult Function( AppEvent_WebShareStopped value)  webShareStopped,required TResult Function( AppEvent_OfferReceived value)  offerReceived,required TResult Function( AppEvent_OfferClosed value)  offerClosed,required TResult Function( AppEvent_TransferAccepted value)  transferAccepted,required TResult Function( AppEvent_TransferPending value)  transferPending,required TResult Function( AppEvent_TransferDelivered value)  transferDelivered,required TResult Function( AppEvent_TransferRoute value)  transferRoute,required TResult Function( AppEvent_ClipboardReceived value)  clipboardReceived,required TResult Function( AppEvent_HotspotWanted value)  hotspotWanted,required TResult Function( AppEvent_HotspotDone value)  hotspotDone,required TResult Function( AppEvent_JoinWanted value)  joinWanted,required TResult Function( AppEvent_LeaveWanted value)  leaveWanted,required TResult Function( AppEvent_PairAsked value)  pairAsked,}){
+@optionalTypeArgs TResult map<TResult extends Object?>({required TResult Function( AppEvent_DevicesChanged value)  devicesChanged,required TResult Function( AppEvent_Paired value)  paired,required TResult Function( AppEvent_PairingClosed value)  pairingClosed,required TResult Function( AppEvent_TransferStarted value)  transferStarted,required TResult Function( AppEvent_TransferProgress value)  transferProgress,required TResult Function( AppEvent_TransferDone value)  transferDone,required TResult Function( AppEvent_TransferFailed value)  transferFailed,required TResult Function( AppEvent_WebShareStopped value)  webShareStopped,required TResult Function( AppEvent_OfferReceived value)  offerReceived,required TResult Function( AppEvent_OfferClosed value)  offerClosed,required TResult Function( AppEvent_TransferAccepted value)  transferAccepted,required TResult Function( AppEvent_TransferPending value)  transferPending,required TResult Function( AppEvent_TransferDelivered value)  transferDelivered,required TResult Function( AppEvent_TransferRoute value)  transferRoute,required TResult Function( AppEvent_ClipboardReceived value)  clipboardReceived,required TResult Function( AppEvent_ClipboardImageReceived value)  clipboardImageReceived,required TResult Function( AppEvent_HotspotWanted value)  hotspotWanted,required TResult Function( AppEvent_HotspotDone value)  hotspotDone,required TResult Function( AppEvent_JoinWanted value)  joinWanted,required TResult Function( AppEvent_LeaveWanted value)  leaveWanted,required TResult Function( AppEvent_PairAsked value)  pairAsked,}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged():
@@ -115,7 +116,8 @@ return transferAccepted(_that);case AppEvent_TransferPending():
 return transferPending(_that);case AppEvent_TransferDelivered():
 return transferDelivered(_that);case AppEvent_TransferRoute():
 return transferRoute(_that);case AppEvent_ClipboardReceived():
-return clipboardReceived(_that);case AppEvent_HotspotWanted():
+return clipboardReceived(_that);case AppEvent_ClipboardImageReceived():
+return clipboardImageReceived(_that);case AppEvent_HotspotWanted():
 return hotspotWanted(_that);case AppEvent_HotspotDone():
 return hotspotDone(_that);case AppEvent_JoinWanted():
 return joinWanted(_that);case AppEvent_LeaveWanted():
@@ -134,7 +136,7 @@ return pairAsked(_that);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult? Function( AppEvent_Paired value)?  paired,TResult? Function( AppEvent_PairingClosed value)?  pairingClosed,TResult? Function( AppEvent_TransferStarted value)?  transferStarted,TResult? Function( AppEvent_TransferProgress value)?  transferProgress,TResult? Function( AppEvent_TransferDone value)?  transferDone,TResult? Function( AppEvent_TransferFailed value)?  transferFailed,TResult? Function( AppEvent_WebShareStopped value)?  webShareStopped,TResult? Function( AppEvent_OfferReceived value)?  offerReceived,TResult? Function( AppEvent_OfferClosed value)?  offerClosed,TResult? Function( AppEvent_TransferAccepted value)?  transferAccepted,TResult? Function( AppEvent_TransferPending value)?  transferPending,TResult? Function( AppEvent_TransferDelivered value)?  transferDelivered,TResult? Function( AppEvent_TransferRoute value)?  transferRoute,TResult? Function( AppEvent_ClipboardReceived value)?  clipboardReceived,TResult? Function( AppEvent_HotspotWanted value)?  hotspotWanted,TResult? Function( AppEvent_HotspotDone value)?  hotspotDone,TResult? Function( AppEvent_JoinWanted value)?  joinWanted,TResult? Function( AppEvent_LeaveWanted value)?  leaveWanted,TResult? Function( AppEvent_PairAsked value)?  pairAsked,}){
+@optionalTypeArgs TResult? mapOrNull<TResult extends Object?>({TResult? Function( AppEvent_DevicesChanged value)?  devicesChanged,TResult? Function( AppEvent_Paired value)?  paired,TResult? Function( AppEvent_PairingClosed value)?  pairingClosed,TResult? Function( AppEvent_TransferStarted value)?  transferStarted,TResult? Function( AppEvent_TransferProgress value)?  transferProgress,TResult? Function( AppEvent_TransferDone value)?  transferDone,TResult? Function( AppEvent_TransferFailed value)?  transferFailed,TResult? Function( AppEvent_WebShareStopped value)?  webShareStopped,TResult? Function( AppEvent_OfferReceived value)?  offerReceived,TResult? Function( AppEvent_OfferClosed value)?  offerClosed,TResult? Function( AppEvent_TransferAccepted value)?  transferAccepted,TResult? Function( AppEvent_TransferPending value)?  transferPending,TResult? Function( AppEvent_TransferDelivered value)?  transferDelivered,TResult? Function( AppEvent_TransferRoute value)?  transferRoute,TResult? Function( AppEvent_ClipboardReceived value)?  clipboardReceived,TResult? Function( AppEvent_ClipboardImageReceived value)?  clipboardImageReceived,TResult? Function( AppEvent_HotspotWanted value)?  hotspotWanted,TResult? Function( AppEvent_HotspotDone value)?  hotspotDone,TResult? Function( AppEvent_JoinWanted value)?  joinWanted,TResult? Function( AppEvent_LeaveWanted value)?  leaveWanted,TResult? Function( AppEvent_PairAsked value)?  pairAsked,}){
 final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
@@ -152,7 +154,8 @@ return transferAccepted(_that);case AppEvent_TransferPending() when transferPend
 return transferPending(_that);case AppEvent_TransferDelivered() when transferDelivered != null:
 return transferDelivered(_that);case AppEvent_TransferRoute() when transferRoute != null:
 return transferRoute(_that);case AppEvent_ClipboardReceived() when clipboardReceived != null:
-return clipboardReceived(_that);case AppEvent_HotspotWanted() when hotspotWanted != null:
+return clipboardReceived(_that);case AppEvent_ClipboardImageReceived() when clipboardImageReceived != null:
+return clipboardImageReceived(_that);case AppEvent_HotspotWanted() when hotspotWanted != null:
 return hotspotWanted(_that);case AppEvent_HotspotDone() when hotspotDone != null:
 return hotspotDone(_that);case AppEvent_JoinWanted() when joinWanted != null:
 return joinWanted(_that);case AppEvent_LeaveWanted() when leaveWanted != null:
@@ -174,7 +177,7 @@ return pairAsked(_that);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  devicesChanged,TResult Function( DeviceInfo device)?  paired,TResult Function()?  pairingClosed,TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult Function( PlatformInt64 id,  String error)?  transferFailed,TResult Function()?  webShareStopped,TResult Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)?  offerReceived,TResult Function( PlatformInt64 id)?  offerClosed,TResult Function( PlatformInt64 id)?  transferAccepted,TResult Function( PlatformInt64 id)?  transferPending,TResult Function( PlatformInt64 id)?  transferDelivered,TResult Function( PlatformInt64 id,  String route)?  transferRoute,TResult Function( String deviceId,  String text)?  clipboardReceived,TResult Function( PlatformInt64 id)?  hotspotWanted,TResult Function()?  hotspotDone,TResult Function( PlatformInt64 id,  String ssid,  String passphrase,  bool wpa3)?  joinWanted,TResult Function()?  leaveWanted,TResult Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)?  pairAsked,required TResult orElse(),}) {final _that = this;
+@optionalTypeArgs TResult maybeWhen<TResult extends Object?>({TResult Function()?  devicesChanged,TResult Function( DeviceInfo device)?  paired,TResult Function()?  pairingClosed,TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult Function( PlatformInt64 id,  String error)?  transferFailed,TResult Function()?  webShareStopped,TResult Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)?  offerReceived,TResult Function( PlatformInt64 id)?  offerClosed,TResult Function( PlatformInt64 id)?  transferAccepted,TResult Function( PlatformInt64 id)?  transferPending,TResult Function( PlatformInt64 id)?  transferDelivered,TResult Function( PlatformInt64 id,  String route)?  transferRoute,TResult Function( String deviceId,  String text)?  clipboardReceived,TResult Function( String deviceId,  String path,  String mime)?  clipboardImageReceived,TResult Function( PlatformInt64 id)?  hotspotWanted,TResult Function()?  hotspotDone,TResult Function( PlatformInt64 id,  String ssid,  String passphrase,  bool wpa3)?  joinWanted,TResult Function()?  leaveWanted,TResult Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)?  pairAsked,required TResult orElse(),}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
 return devicesChanged();case AppEvent_Paired() when paired != null:
@@ -191,7 +194,8 @@ return transferAccepted(_that.id);case AppEvent_TransferPending() when transferP
 return transferPending(_that.id);case AppEvent_TransferDelivered() when transferDelivered != null:
 return transferDelivered(_that.id);case AppEvent_TransferRoute() when transferRoute != null:
 return transferRoute(_that.id,_that.route);case AppEvent_ClipboardReceived() when clipboardReceived != null:
-return clipboardReceived(_that.deviceId,_that.text);case AppEvent_HotspotWanted() when hotspotWanted != null:
+return clipboardReceived(_that.deviceId,_that.text);case AppEvent_ClipboardImageReceived() when clipboardImageReceived != null:
+return clipboardImageReceived(_that.deviceId,_that.path,_that.mime);case AppEvent_HotspotWanted() when hotspotWanted != null:
 return hotspotWanted(_that.id);case AppEvent_HotspotDone() when hotspotDone != null:
 return hotspotDone();case AppEvent_JoinWanted() when joinWanted != null:
 return joinWanted(_that.id,_that.ssid,_that.passphrase,_that.wpa3);case AppEvent_LeaveWanted() when leaveWanted != null:
@@ -214,7 +218,7 @@ return pairAsked(_that.id,_that.deviceId,_that.deviceName,_that.code);case _:
 /// }
 /// ```
 
-@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  devicesChanged,required TResult Function( DeviceInfo device)  paired,required TResult Function()  pairingClosed,required TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)  transferStarted,required TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)  transferProgress,required TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)  transferDone,required TResult Function( PlatformInt64 id,  String error)  transferFailed,required TResult Function()  webShareStopped,required TResult Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)  offerReceived,required TResult Function( PlatformInt64 id)  offerClosed,required TResult Function( PlatformInt64 id)  transferAccepted,required TResult Function( PlatformInt64 id)  transferPending,required TResult Function( PlatformInt64 id)  transferDelivered,required TResult Function( PlatformInt64 id,  String route)  transferRoute,required TResult Function( String deviceId,  String text)  clipboardReceived,required TResult Function( PlatformInt64 id)  hotspotWanted,required TResult Function()  hotspotDone,required TResult Function( PlatformInt64 id,  String ssid,  String passphrase,  bool wpa3)  joinWanted,required TResult Function()  leaveWanted,required TResult Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)  pairAsked,}) {final _that = this;
+@optionalTypeArgs TResult when<TResult extends Object?>({required TResult Function()  devicesChanged,required TResult Function( DeviceInfo device)  paired,required TResult Function()  pairingClosed,required TResult Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)  transferStarted,required TResult Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)  transferProgress,required TResult Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)  transferDone,required TResult Function( PlatformInt64 id,  String error)  transferFailed,required TResult Function()  webShareStopped,required TResult Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)  offerReceived,required TResult Function( PlatformInt64 id)  offerClosed,required TResult Function( PlatformInt64 id)  transferAccepted,required TResult Function( PlatformInt64 id)  transferPending,required TResult Function( PlatformInt64 id)  transferDelivered,required TResult Function( PlatformInt64 id,  String route)  transferRoute,required TResult Function( String deviceId,  String text)  clipboardReceived,required TResult Function( String deviceId,  String path,  String mime)  clipboardImageReceived,required TResult Function( PlatformInt64 id)  hotspotWanted,required TResult Function()  hotspotDone,required TResult Function( PlatformInt64 id,  String ssid,  String passphrase,  bool wpa3)  joinWanted,required TResult Function()  leaveWanted,required TResult Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)  pairAsked,}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged():
 return devicesChanged();case AppEvent_Paired():
@@ -231,7 +235,8 @@ return transferAccepted(_that.id);case AppEvent_TransferPending():
 return transferPending(_that.id);case AppEvent_TransferDelivered():
 return transferDelivered(_that.id);case AppEvent_TransferRoute():
 return transferRoute(_that.id,_that.route);case AppEvent_ClipboardReceived():
-return clipboardReceived(_that.deviceId,_that.text);case AppEvent_HotspotWanted():
+return clipboardReceived(_that.deviceId,_that.text);case AppEvent_ClipboardImageReceived():
+return clipboardImageReceived(_that.deviceId,_that.path,_that.mime);case AppEvent_HotspotWanted():
 return hotspotWanted(_that.id);case AppEvent_HotspotDone():
 return hotspotDone();case AppEvent_JoinWanted():
 return joinWanted(_that.id,_that.ssid,_that.passphrase,_that.wpa3);case AppEvent_LeaveWanted():
@@ -250,7 +255,7 @@ return pairAsked(_that.id,_that.deviceId,_that.deviceName,_that.code);}
 /// }
 /// ```
 
-@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  devicesChanged,TResult? Function( DeviceInfo device)?  paired,TResult? Function()?  pairingClosed,TResult? Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult? Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult? Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult? Function( PlatformInt64 id,  String error)?  transferFailed,TResult? Function()?  webShareStopped,TResult? Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)?  offerReceived,TResult? Function( PlatformInt64 id)?  offerClosed,TResult? Function( PlatformInt64 id)?  transferAccepted,TResult? Function( PlatformInt64 id)?  transferPending,TResult? Function( PlatformInt64 id)?  transferDelivered,TResult? Function( PlatformInt64 id,  String route)?  transferRoute,TResult? Function( String deviceId,  String text)?  clipboardReceived,TResult? Function( PlatformInt64 id)?  hotspotWanted,TResult? Function()?  hotspotDone,TResult? Function( PlatformInt64 id,  String ssid,  String passphrase,  bool wpa3)?  joinWanted,TResult? Function()?  leaveWanted,TResult? Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)?  pairAsked,}) {final _that = this;
+@optionalTypeArgs TResult? whenOrNull<TResult extends Object?>({TResult? Function()?  devicesChanged,TResult? Function( DeviceInfo device)?  paired,TResult? Function()?  pairingClosed,TResult? Function( PlatformInt64 id,  String deviceId,  bool incoming,  String fileName,  PlatformInt64 size)?  transferStarted,TResult? Function( PlatformInt64 id,  PlatformInt64 bytes,  PlatformInt64 size,  double bytesPerSec)?  transferProgress,TResult? Function( PlatformInt64 id,  String path,  PlatformInt64 bytes,  double seconds,  PlatformInt64 resumedFrom)?  transferDone,TResult? Function( PlatformInt64 id,  String error)?  transferFailed,TResult? Function()?  webShareStopped,TResult? Function( PlatformInt64 id,  String deviceId,  String fileName,  PlatformInt64 count,  PlatformInt64 size)?  offerReceived,TResult? Function( PlatformInt64 id)?  offerClosed,TResult? Function( PlatformInt64 id)?  transferAccepted,TResult? Function( PlatformInt64 id)?  transferPending,TResult? Function( PlatformInt64 id)?  transferDelivered,TResult? Function( PlatformInt64 id,  String route)?  transferRoute,TResult? Function( String deviceId,  String text)?  clipboardReceived,TResult? Function( String deviceId,  String path,  String mime)?  clipboardImageReceived,TResult? Function( PlatformInt64 id)?  hotspotWanted,TResult? Function()?  hotspotDone,TResult? Function( PlatformInt64 id,  String ssid,  String passphrase,  bool wpa3)?  joinWanted,TResult? Function()?  leaveWanted,TResult? Function( PlatformInt64 id,  String deviceId,  String deviceName,  String code)?  pairAsked,}) {final _that = this;
 switch (_that) {
 case AppEvent_DevicesChanged() when devicesChanged != null:
 return devicesChanged();case AppEvent_Paired() when paired != null:
@@ -267,7 +272,8 @@ return transferAccepted(_that.id);case AppEvent_TransferPending() when transferP
 return transferPending(_that.id);case AppEvent_TransferDelivered() when transferDelivered != null:
 return transferDelivered(_that.id);case AppEvent_TransferRoute() when transferRoute != null:
 return transferRoute(_that.id,_that.route);case AppEvent_ClipboardReceived() when clipboardReceived != null:
-return clipboardReceived(_that.deviceId,_that.text);case AppEvent_HotspotWanted() when hotspotWanted != null:
+return clipboardReceived(_that.deviceId,_that.text);case AppEvent_ClipboardImageReceived() when clipboardImageReceived != null:
+return clipboardImageReceived(_that.deviceId,_that.path,_that.mime);case AppEvent_HotspotWanted() when hotspotWanted != null:
 return hotspotWanted(_that.id);case AppEvent_HotspotDone() when hotspotDone != null:
 return hotspotDone();case AppEvent_JoinWanted() when joinWanted != null:
 return joinWanted(_that.id,_that.ssid,_that.passphrase,_that.wpa3);case AppEvent_LeaveWanted() when leaveWanted != null:
@@ -1223,6 +1229,78 @@ class _$AppEvent_ClipboardReceivedCopyWithImpl<$Res>
   return _then(AppEvent_ClipboardReceived(
 deviceId: null == deviceId ? _self.deviceId : deviceId // ignore: cast_nullable_to_non_nullable
 as String,text: null == text ? _self.text : text // ignore: cast_nullable_to_non_nullable
+as String,
+  ));
+}
+
+
+}
+
+/// @nodoc
+
+
+class AppEvent_ClipboardImageReceived extends AppEvent {
+  const AppEvent_ClipboardImageReceived({required this.deviceId, required this.path, required this.mime}): super._();
+  
+
+ final  String deviceId;
+ final  String path;
+ final  String mime;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@JsonKey(includeFromJson: false, includeToJson: false)
+@pragma('vm:prefer-inline')
+$AppEvent_ClipboardImageReceivedCopyWith<AppEvent_ClipboardImageReceived> get copyWith => _$AppEvent_ClipboardImageReceivedCopyWithImpl<AppEvent_ClipboardImageReceived>(this, _$identity);
+
+
+
+@override
+bool operator ==(Object other) {
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AppEvent_ClipboardImageReceived&&(identical(other.deviceId, deviceId) || other.deviceId == deviceId)&&(identical(other.path, path) || other.path == path)&&(identical(other.mime, mime) || other.mime == mime));
+}
+
+
+@override
+int get hashCode {
+    return Object.hash(runtimeType,deviceId,path,mime);
+}
+
+@override
+String toString() {
+    return 'AppEvent.clipboardImageReceived(deviceId: $deviceId, path: $path, mime: $mime)';
+}
+
+
+}
+
+/// @nodoc
+abstract mixin class $AppEvent_ClipboardImageReceivedCopyWith<$Res> implements $AppEventCopyWith<$Res> {
+  factory $AppEvent_ClipboardImageReceivedCopyWith(AppEvent_ClipboardImageReceived value, $Res Function(AppEvent_ClipboardImageReceived) _then) = _$AppEvent_ClipboardImageReceivedCopyWithImpl;
+@useResult
+$Res call({
+ String deviceId, String path, String mime
+});
+
+
+
+
+}
+/// @nodoc
+class _$AppEvent_ClipboardImageReceivedCopyWithImpl<$Res>
+    implements $AppEvent_ClipboardImageReceivedCopyWith<$Res> {
+  _$AppEvent_ClipboardImageReceivedCopyWithImpl(this._self, this._then);
+
+  final AppEvent_ClipboardImageReceived _self;
+  final $Res Function(AppEvent_ClipboardImageReceived) _then;
+
+/// Create a copy of AppEvent
+/// with the given fields replaced by the non-null parameter values.
+@pragma('vm:prefer-inline') $Res call({Object? deviceId = null,Object? path = null,Object? mime = null,}) {
+  return _then(AppEvent_ClipboardImageReceived(
+deviceId: null == deviceId ? _self.deviceId : deviceId // ignore: cast_nullable_to_non_nullable
+as String,path: null == path ? _self.path : path // ignore: cast_nullable_to_non_nullable
+as String,mime: null == mime ? _self.mime : mime // ignore: cast_nullable_to_non_nullable
 as String,
   ));
 }

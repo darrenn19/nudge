@@ -12,7 +12,7 @@ import android.provider.MediaStore
 import android.widget.Toast
 
 /**
- * The newest photo or video on the phone, sent to the obvious device (the
+ * The newest photo or video on the phone, sent to your device (the
  * "Send latest" tile): a picture just taken, a screenshot, or an image or
  * video just downloaded. Android lets apps see other apps' photos and
  * videos, not their other files, so a downloaded PDF isn't included.
@@ -41,14 +41,15 @@ object Latest {
     enum class Result { SENT, CHOOSE, NONE }
 
     /**
-     * Send the newest photo or video to the one obvious device: [Result.CHOOSE]
-     * when there's a choice to make (the caller opens the window), or
+     * Send the newest photo or video to the default, obvious or current
+     * device ([Targets.forLatest]): [Result.CHOOSE] when there's still a
+     * choice to make (the caller opens the window), or
      * [Result.NONE] with nothing to send. Quick (two media queries); the
      * sending happens in the core.
      */
     fun send(context: Context): Result {
         val file = find(context) ?: return Result.NONE
-        val target = Targets.onlyChoice() ?: return Result.CHOOSE
+        val target = Targets.forLatest(context) ?: return Result.CHOOSE
         val pfd = runCatching { context.contentResolver.openFileDescriptor(file.uri, "r") }.getOrNull()
             ?: return Result.NONE
         val fd = pfd.detachFd()

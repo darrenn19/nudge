@@ -10,7 +10,9 @@ use std::sync::Arc;
 
 use jni::JNIEnv;
 use jni::JavaVM;
-use jni::objects::{GlobalRef, JClass, JIntArray, JObject, JObjectArray, JString, JValue};
+use jni::objects::{
+    GlobalRef, JByteArray, JClass, JIntArray, JObject, JObjectArray, JString, JValue,
+};
 use jni::sys::{jboolean, jlong, jstring};
 use nudge_core::{HotspotInfo, NodeConfig, Outgoing, Receiving};
 use serde_json::{Value, json};
@@ -27,11 +29,17 @@ fn string(env: &mut JNIEnv, s: &JString) -> String {
 }
 
 fn optional_string(env: &mut JNIEnv, s: &JString) -> Option<String> {
-    if s.is_null() { None } else { Some(string(env, s)) }
+    if s.is_null() {
+        None
+    } else {
+        Some(string(env, s))
+    }
 }
 
 fn new_string(env: &mut JNIEnv, s: &str) -> jstring {
-    env.new_string(s).map(|s| s.into_raw()).unwrap_or(std::ptr::null_mut())
+    env.new_string(s)
+        .map(|s| s.into_raw())
+        .unwrap_or(std::ptr::null_mut())
 }
 
 /// Start the core (or attach to it) and send every event to `listener`'s
@@ -65,10 +73,16 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_start<'l>(
 }
 
 fn tell(vm: &JavaVM, listener: &GlobalRef, event: &AppEvent) {
-    let Some(json) = event_json(event) else { return };
+    let Some(json) = event_json(event) else {
+        return;
+    };
     // Core threads stay attached for their whole life.
-    let Ok(mut env) = vm.attach_current_thread_as_daemon() else { return };
-    let Ok(text) = env.new_string(json.to_string()) else { return };
+    let Ok(mut env) = vm.attach_current_thread_as_daemon() else {
+        return;
+    };
+    let Ok(text) = env.new_string(json.to_string()) else {
+        return;
+    };
     let _ = env.call_method(
         listener,
         "onEvent",
@@ -124,6 +138,11 @@ fn event_json(event: &AppEvent) -> Option<Value> {
         AppEvent::ClipboardReceived { device_id, text } => {
             json!({"type": "clipboard", "device": device_id, "text": text})
         }
+        AppEvent::ClipboardImageReceived {
+            device_id,
+            path,
+            mime,
+        } => json!({"type": "clipboardImage", "device": device_id, "path": path, "mime": mime}),
         AppEvent::HotspotWanted { id } => json!({"type": "hotspotWanted", "id": id}),
         AppEvent::HotspotDone => json!({"type": "hotspotDone"}),
         _ => return None,
@@ -142,7 +161,13 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_devices<'l>(
     _: JClass<'l>,
 ) -> jstring {
     let devices: Vec<Value> = core()
-        .map(|c| c.node.peers().into_iter().map(DeviceInfo::from).collect::<Vec<_>>())
+        .map(|c| {
+            c.node
+                .peers()
+                .into_iter()
+                .map(DeviceInfo::from)
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default()
         .iter()
         .map(device_json)
@@ -274,6 +299,55 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_sendOpenFiles<'l>(
     1
 }
 
+/// What goes onto other devices' clipboards.
+#[derive(Clone)]
+enum ClipItem {
+    Text(String),
+    Image { mime: String, data: Vec<u8> },
+}
+
+/// Put `item` on a device's clipboard, or (with no `device`) on every paired
+/// device that syncs it and is around. Returns the names of the devices it
+/// reached. Blocks.
+fn send_clip(device: Option<String>, item: ClipItem) -> Vec<String> {
+    let Some(c) = core() else {
+        return vec![];
+    };
+    let targets: Vec<DeviceInfo> = c
+        .node
+        .peers()
+        .into_iter()
+        .map(DeviceInfo::from)
+        .filter(|d| match &device {
+            Some(id) => d.paired && &d.id == id,
+            None => d.paired && d.clipboard && d.reachable,
+        })
+        .collect();
+    runtime().block_on(async {
+        let mut reached = vec![];
+        let mut sends = tokio::task::JoinSet::new();
+        for d in targets {
+            let (node, item) = (c.node.clone(), item.clone());
+            sends.spawn(async move {
+                let peer = parse_id(&d.id).ok()?;
+                match item {
+                    ClipItem::Text(text) => node.send_clipboard(peer, text).await.ok()?,
+                    ClipItem::Image { mime, data } => {
+                        node.send_clipboard_image(peer, mime, data).await.ok()?
+                    }
+                }
+                Some(d.name)
+            });
+        }
+        while let Some(done) = sends.join_next().await {
+            if let Ok(Some(name)) = done {
+                reached.push(name);
+            }
+        }
+        reached
+    })
+}
+
 /// Put text on a device's clipboard, or (with a null `device`) on every
 /// paired device that syncs it and is around. Returns the names of the
 /// devices it reached, as a JSON array. Blocks: call off the main thread.
@@ -286,38 +360,26 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_sendClipboard<'l>(
 ) -> jstring {
     let device = optional_string(&mut env, &device);
     let text = string(&mut env, &text);
-    let reached: Vec<String> = match core() {
-        None => vec![],
-        Some(c) => {
-            let targets: Vec<DeviceInfo> = c
-                .node
-                .peers()
-                .into_iter()
-                .map(DeviceInfo::from)
-                .filter(|d| match &device {
-                    Some(id) => d.paired && &d.id == id,
-                    None => d.paired && d.clipboard && d.reachable,
-                })
-                .collect();
-            runtime().block_on(async {
-                let mut reached = vec![];
-                let mut sends = tokio::task::JoinSet::new();
-                for d in targets {
-                    let (node, text) = (c.node.clone(), text.clone());
-                    sends.spawn(async move {
-                        let peer = parse_id(&d.id).ok()?;
-                        node.send_clipboard(peer, text).await.ok()?;
-                        Some(d.name)
-                    });
-                }
-                while let Some(done) = sends.join_next().await {
-                    if let Ok(Some(name)) = done {
-                        reached.push(name);
-                    }
-                }
-                reached
-            })
-        }
+    let reached = send_clip(device, ClipItem::Text(text));
+    new_string(&mut env, &json!(reached).to_string())
+}
+
+/// The same for a copied image (`mime` like "image/png").
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_sendClipboardImage<'l>(
+    mut env: JNIEnv<'l>,
+    _: JClass<'l>,
+    device: JString<'l>,
+    mime: JString<'l>,
+    data: JByteArray<'l>,
+) -> jstring {
+    let device = optional_string(&mut env, &device);
+    let mime = string(&mut env, &mime);
+    let data = env.convert_byte_array(&data).unwrap_or_default();
+    let reached = if data.is_empty() {
+        vec![]
+    } else {
+        send_clip(device, ClipItem::Image { mime, data })
     };
     new_string(&mut env, &json!(reached).to_string())
 }

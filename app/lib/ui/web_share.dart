@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -78,6 +80,27 @@ class _WebShareScreenState extends State<WebShareScreen> {
     if (files.isNotEmpty) controller.send(device, files);
   }
 
+  /// Files or the clipboard, to someone on the page.
+  void _choose(DeviceInfo device) {
+    showMenuSheet(
+      context,
+      title: '${device.name} · temporary',
+      subtitle: 'On the web page until they close it. Not paired.',
+      items: [
+        MenuItem(
+          label: 'Send files',
+          icon: CupertinoIcons.paperplane,
+          onTap: () => unawaited(_send(device)),
+        ),
+        MenuItem(
+          label: 'Send clipboard',
+          icon: CupertinoIcons.doc_on_clipboard,
+          onTap: () => unawaited(controller.sendClipboardTo(device)),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return NudgePage(
@@ -116,7 +139,7 @@ class _WebShareScreenState extends State<WebShareScreen> {
                         waiting: _waiting,
                         sentTo: _sentTo,
                         browsers: controller.browserDevices,
-                        onSend: _send,
+                        onSend: _choose,
                         onStop: () {
                           controller.stopWebShare();
                           Navigator.of(context).pop();
@@ -201,6 +224,12 @@ class _Sharing extends StatelessWidget {
               textAlign: TextAlign.center,
               style: Fonts.small,
             ),
+            const SizedBox(height: 4),
+            const Text(
+              "A temporary connection: they're here while the page is open, never paired.",
+              textAlign: TextAlign.center,
+              style: Fonts.small,
+            ),
             const SizedBox(height: 28),
             AnimatedSize(
               duration: const Duration(milliseconds: 300),
@@ -239,6 +268,10 @@ class _Sharing extends StatelessWidget {
                                       maxLines: 1,
                                       overflow: TextOverflow.ellipsis,
                                       style: Fonts.label,
+                                    ),
+                                    const Text(
+                                      'Temporary',
+                                      style: TextStyle(color: Palette.warn, fontSize: 11),
                                     ),
                                   ],
                                 ),

@@ -117,6 +117,7 @@ class _DevicePicker extends StatelessWidget {
                     _Choice(
                       icon: deviceIcon(d),
                       label: d.name,
+                      note: d.isBrowser ? 'Temporary' : null,
                       dim: !d.reachable,
                       onTap: d.reachable ? () => Navigator.of(context).pop(d) : null,
                     ),
@@ -140,10 +141,13 @@ class _DevicePicker extends StatelessWidget {
 }
 
 class _Choice extends StatelessWidget {
-  const _Choice({required this.icon, required this.label, this.onTap, this.dim = false});
+  const _Choice({required this.icon, required this.label, this.note, this.onTap, this.dim = false});
 
   final IconData icon;
   final String label;
+
+  /// Under the name: "Temporary" for a web page.
+  final String? note;
   final VoidCallback? onTap;
   final bool dim;
 
@@ -175,6 +179,8 @@ class _Choice extends StatelessWidget {
                 textAlign: TextAlign.center,
                 style: Fonts.label,
               ),
+              if (note != null)
+                Text(note!, style: const TextStyle(color: Palette.warn, fontSize: 11)),
             ],
           ),
         ),

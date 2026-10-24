@@ -34,6 +34,7 @@ class NudgeService : Service() {
         try {
             ServiceCompat.startForeground(this, Notifications.SERVICE_ID, current(this), type)
             running = true
+            ClipWatch.serviceStarted(this)
         } catch (e: Exception) {
             // Android refused (started from the background without the
             // battery exemption). Try again next time the app opens.

@@ -69,7 +69,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1159783562;
+  int get rustContentHash => 446545271;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -145,6 +145,13 @@ abstract class RustLibApi extends BaseApi {
     required NudgeApp that,
     required String deviceId,
     required String text,
+  });
+
+  Future<void> crateApiNudgeNudgeAppSendClipboardImage({
+    required NudgeApp that,
+    required String deviceId,
+    required String mime,
+    required List<int> data,
   });
 
   Int64List crateApiNudgeNudgeAppSendFiles({
@@ -787,6 +794,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiNudgeNudgeAppSendClipboardImage({
+    required NudgeApp that,
+    required String deviceId,
+    required String mime,
+    required List<int> data,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          sse_encode_String(deviceId, serializer);
+          sse_encode_String(mime, serializer);
+          sse_encode_list_prim_u_8_loose(data, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 18,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiNudgeNudgeAppSendClipboardImageConstMeta,
+        argValues: [that, deviceId, mime, data],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNudgeNudgeAppSendClipboardImageConstMeta =>
+      const TaskConstMeta(
+        debugName: "NudgeApp_send_clipboard_image",
+        argNames: ["that", "deviceId", "mime", "data"],
+      );
+
+  @override
   Int64List crateApiNudgeNudgeAppSendFiles({
     required NudgeApp that,
     required String deviceId,
@@ -802,7 +851,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(deviceId, serializer);
           sse_encode_list_String(paths, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 18)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_i_64_strict,
@@ -837,7 +886,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(deviceId, serializer);
           sse_encode_list_open_file(files, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 19)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_list_prim_i_64_strict,
@@ -872,7 +921,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(deviceId, serializer);
           sse_encode_bool(on_, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 20)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -907,7 +956,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_String(deviceId, serializer);
           sse_encode_bool(on_, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 21)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 22)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -940,7 +989,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_bool(on_, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 22)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 23)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -973,7 +1022,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(dir, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 23)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1006,7 +1055,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(mode, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 25)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1043,7 +1092,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 26,
             port: port_,
           );
         },
@@ -1074,7 +1123,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 27)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -1106,7 +1155,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1137,7 +1186,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 28)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 29)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1170,7 +1219,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(deviceId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 29)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 30)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1203,7 +1252,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(deviceId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 30)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1231,7 +1280,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 32)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -1259,7 +1308,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 33,
             port: port_,
           );
         },
@@ -1399,19 +1448,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           text: dco_decode_String(raw[2]),
         );
       case 15:
-        return AppEvent_HotspotWanted(id: dco_decode_i_64(raw[1]));
+        return AppEvent_ClipboardImageReceived(
+          deviceId: dco_decode_String(raw[1]),
+          path: dco_decode_String(raw[2]),
+          mime: dco_decode_String(raw[3]),
+        );
       case 16:
-        return AppEvent_HotspotDone();
+        return AppEvent_HotspotWanted(id: dco_decode_i_64(raw[1]));
       case 17:
+        return AppEvent_HotspotDone();
+      case 18:
         return AppEvent_JoinWanted(
           id: dco_decode_i_64(raw[1]),
           ssid: dco_decode_String(raw[2]),
           passphrase: dco_decode_String(raw[3]),
           wpa3: dco_decode_bool(raw[4]),
         );
-      case 18:
-        return AppEvent_LeaveWanted();
       case 19:
+        return AppEvent_LeaveWanted();
+      case 20:
         return AppEvent_PairAsked(
           id: dco_decode_i_64(raw[1]),
           deviceId: dco_decode_String(raw[2]),
@@ -1501,6 +1556,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Int64List dco_decode_list_prim_i_64_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dcoDecodeInt64List(raw);
+  }
+
+  @protected
+  List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw as List<int>;
   }
 
   @protected
@@ -1702,11 +1763,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           text: var_text,
         );
       case 15:
+        var var_deviceId = sse_decode_String(deserializer);
+        var var_path = sse_decode_String(deserializer);
+        var var_mime = sse_decode_String(deserializer);
+        return AppEvent_ClipboardImageReceived(
+          deviceId: var_deviceId,
+          path: var_path,
+          mime: var_mime,
+        );
+      case 16:
         var var_id = sse_decode_i_64(deserializer);
         return AppEvent_HotspotWanted(id: var_id);
-      case 16:
-        return AppEvent_HotspotDone();
       case 17:
+        return AppEvent_HotspotDone();
+      case 18:
         var var_id = sse_decode_i_64(deserializer);
         var var_ssid = sse_decode_String(deserializer);
         var var_passphrase = sse_decode_String(deserializer);
@@ -1717,9 +1787,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           passphrase: var_passphrase,
           wpa3: var_wpa3,
         );
-      case 18:
-        return AppEvent_LeaveWanted();
       case 19:
+        return AppEvent_LeaveWanted();
+      case 20:
         var var_id = sse_decode_i_64(deserializer);
         var var_deviceId = sse_decode_String(deserializer);
         var var_deviceName = sse_decode_String(deserializer);
@@ -1839,6 +1909,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getInt64List(len_);
+  }
+
+  @protected
+  List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var len_ = sse_decode_i_32(deserializer);
+    return deserializer.buffer.getUint8List(len_);
   }
 
   @protected
@@ -2056,31 +2133,40 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_i_32(14, serializer);
         sse_encode_String(deviceId, serializer);
         sse_encode_String(text, serializer);
-      case AppEvent_HotspotWanted(id: final id):
+      case AppEvent_ClipboardImageReceived(
+        deviceId: final deviceId,
+        path: final path,
+        mime: final mime,
+      ):
         sse_encode_i_32(15, serializer);
+        sse_encode_String(deviceId, serializer);
+        sse_encode_String(path, serializer);
+        sse_encode_String(mime, serializer);
+      case AppEvent_HotspotWanted(id: final id):
+        sse_encode_i_32(16, serializer);
         sse_encode_i_64(id, serializer);
       case AppEvent_HotspotDone():
-        sse_encode_i_32(16, serializer);
+        sse_encode_i_32(17, serializer);
       case AppEvent_JoinWanted(
         id: final id,
         ssid: final ssid,
         passphrase: final passphrase,
         wpa3: final wpa3,
       ):
-        sse_encode_i_32(17, serializer);
+        sse_encode_i_32(18, serializer);
         sse_encode_i_64(id, serializer);
         sse_encode_String(ssid, serializer);
         sse_encode_String(passphrase, serializer);
         sse_encode_bool(wpa3, serializer);
       case AppEvent_LeaveWanted():
-        sse_encode_i_32(18, serializer);
+        sse_encode_i_32(19, serializer);
       case AppEvent_PairAsked(
         id: final id,
         deviceId: final deviceId,
         deviceName: final deviceName,
         code: final code,
       ):
-        sse_encode_i_32(19, serializer);
+        sse_encode_i_32(20, serializer);
         sse_encode_i_64(id, serializer);
         sse_encode_String(deviceId, serializer);
         sse_encode_String(deviceName, serializer);
@@ -2183,6 +2269,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putInt64List(self);
+  }
+
+  @protected
+  void sse_encode_list_prim_u_8_loose(
+    List<int> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    serializer.buffer.putUint8List(
+      self is Uint8List ? self : Uint8List.fromList(self),
+    );
   }
 
   @protected
@@ -2355,6 +2453,19 @@ class NudgeAppImpl extends RustOpaque implements NudgeApp {
     that: this,
     deviceId: deviceId,
     text: text,
+  );
+
+  /// Put a copied image on a paired device's clipboard (`mime` like
+  /// "image/png"). No question on its side.
+  Future<void> sendClipboardImage({
+    required String deviceId,
+    required String mime,
+    required List<int> data,
+  }) => RustLib.instance.api.crateApiNudgeNudgeAppSendClipboardImage(
+    that: this,
+    deviceId: deviceId,
+    mime: mime,
+    data: data,
   );
 
   /// Send files to a paired device in the background. Returns one

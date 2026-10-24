@@ -79,6 +79,9 @@ A device that sees another nearby (by discovery) can ask to pair. The asker conn
 ### Settings between paired devices (kind 4)
 **Status**: one byte, `auto_accepts_you` (1 = files from the receiving device are accepted without asking). The reply is the other side's own Status byte. Sent when a paired device first shows up in discovery, when the setting changes, and inferred from transfers (an Asking reply means "asks").
 
+### Clipboard (kinds 6 and 9)
+Paired devices only, applied without a question. **Clip** (kind 6): `len` (u32, ≤ 1 MiB) and UTF-8 text. **ClipImage** (kind 9): `mime_len` (u16, ≤ 64) and the image type (must start with `image/`: `image/png`, `image/jpeg`...), then `len` (u32, ≤ 48 MiB) and the image bytes. The reply is `Done`, or `Reject` if the receiver doesn't sync its clipboard with the sender. A received image is saved as `<data dir>/clipboard/clip-<ms>.<ext>` (only the newest is kept) and put on the clipboard from there. Windows sends copied images as PNG; Android sends what was copied, as is.
+
 ### Pairing (kind 2)
 Code: `core/src/pairing.rs`, `core/src/node.rs`.
 
@@ -170,12 +173,13 @@ Code: `core/src/node/web.rs`, page: `core/src/node/web_page.html`. For people wi
 | Route | Purpose |
 |---|---|
 | `GET /` | The page. |
-| `GET /events[?s=]` | Server-sent events. Opening it makes the tab a device; an unknown or missing `s` starts a new session. Events: `hello` (`session`, `from` = this device's name, `platform` = its platform tag, `name` = what the tab appears as), `offer` (`batch`, `files[]` of `id`, `name`, `size`), `withdrawn` (`batch`; no answer in 5 minutes), `download` (`id`, `name`: fetch this file now), `delivered` (`id`: that file has been streamed in full). A `: ping` comment every 15 s. |
+| `GET /events[?s=]` | Server-sent events. Opening it makes the tab a device; an unknown or missing `s` starts a new session. Events: `hello` (`session`, `from` = this device's name, `platform` = its platform tag, `name` = what the tab appears as), `offer` (`batch`, `files[]` of `id`, `name`, `size`), `withdrawn` (`batch`; no answer in 5 minutes), `download` (`id`, `name`: fetch this file now), `delivered` (`id`: that file has been streamed in full), `clip` (`text`: clipboard text from the app; the page shows it with a Copy button, since a page can't write the clipboard by itself). A `: ping` comment every 15 s. |
 | `POST /answer?s=&batch=&accept=1\|0` | Accept or decline an offer. |
 | `GET /f/<id>?s=` | Download an accepted file (`Content-Disposition: attachment`). Only the file the last `download` event named, once. |
 | `POST /ask?s=&count=&size=&name=` | "Can I send you these?": asks the user here (like a file offer). Replies when they answer: `{"answer":"accepted"|"declined"|"none"}`. Accepting allows `count` uploads. |
 | `POST /u?s=&name=` | Send a file to this device. Needs `Content-Length`; the body is the file. Only as many as accepted through `/ask` (else 403); the name is sanitized like an `Offer` name. |
+| `POST /clip?s=` | Clipboard text for this device (UTF-8 body, at most 1 MiB, needs `Content-Length`). Lands on the clipboard like text from a paired device, without a question. |
 
-**Sessions.** A tab is listed while its event stream is open. When the stream drops (phone locked, tab in the background) it keeps its place for 30 s; reconnecting with its `s` within that time restores it, including any unanswered offer and the pending download. Tabs are named after the device type from the User-Agent ("iPhone", "Android phone", ...), with " 2", " 3" for repeats. Apps see them as peers with platform `browser`.
+**Sessions.** A tab is listed while its event stream is open. When the stream drops (phone locked, tab in the background) it keeps its place for 30 s; reconnecting with its `s` within that time restores it, including any unanswered offer and the pending download. Tabs are named after the device type from the User-Agent ("iPhone", "Android phone", ...), with " 2", " 3" for repeats. Apps see them as peers with platform `browser`. A tab is temporary: it's never paired or remembered, and there's no "always accept" for it.
 
 **Sending to a tab.** One offer per send (all its files). After Accept, files download one at a time: the server sends `download` for the next file when the previous one has been streamed.

@@ -60,7 +60,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // Anything that already happened isn't news.
     _announced.addAll(controller.transfers.map((t) => t.id));
     _followed.addAll(controller.transfers.map((t) => t.id));
-    _focusId = _targets.firstOrNull?.id;
+    // Open on the device "Send latest" goes to.
+    _focusId = controller.sendTarget?.id ?? _targets.firstOrNull?.id;
+    WidgetsBinding.instance.addPostFrameCallback((_) => _adoptFocus());
     controller.addListener(_onChange);
     _questions = controller.offerChanges.listen((_) => _askNext());
     _answers = controller.answers.listen((a) {
@@ -160,24 +162,48 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  /// Nudge is moving the pages itself (say, to show who's sending): that
+  /// doesn't change the current device. Only the user's own moves do.
+  bool _moving = false;
+
+  /// Show page [i]. With [byUser], the device there becomes current.
+  Future<void> _moveTo(int i, {required bool byUser, int ms = 420}) async {
+    if (!_pages.hasClients) return;
+    _moving = true;
+    try {
+      await _pages.animateToPage(
+        i,
+        duration: Duration(milliseconds: ms),
+        curve: Curves.easeOutCubic,
+      );
+    } finally {
+      _moving = false;
+    }
+    if (byUser) _makeCurrent(i);
+  }
+
+  /// The user chose page [i] (a swipe, arrow or dot).
+  void _makeCurrent(int i) {
+    final targets = _targets;
+    if (i >= 0 && i < targets.length) controller.setCurrent(targets[i]);
+  }
+
+  /// No current device yet (first run, or it was forgotten): the one on
+  /// screen is it.
+  void _adoptFocus() {
+    final d = _focus;
+    if (mounted && controller.sendTarget == null && d != null) controller.setCurrent(d);
+  }
+
   void _goTo(String deviceId) {
     final i = _targets.indexWhere((d) => d.id == deviceId);
-    if (i < 0 || !_pages.hasClients) return;
-    _pages.animateToPage(
-      i,
-      duration: const Duration(milliseconds: 450),
-      curve: Curves.easeOutCubic,
-    );
+    if (i >= 0) _moveTo(i, byUser: false, ms: 450);
   }
 
   void _step(int by) {
     if (!_pages.hasClients) return;
     final next = ((_pages.page ?? 0).round() + by).clamp(0, _targets.length);
-    _pages.animateToPage(
-      next,
-      duration: const Duration(milliseconds: 380),
-      curve: Curves.easeOutCubic,
-    );
+    _moveTo(next, byUser: true, ms: 380);
   }
 
   Future<void> _openPairing() async {
@@ -186,6 +212,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (device != null && mounted) {
       showToast(context, 'Paired with ${device.name}');
       _focusId = device.id;
+      controller.setCurrent(device);
       WidgetsBinding.instance.addPostFrameCallback((_) => _goTo(device.id));
       // Now that there's somewhere to send, make sure Android won't stop
       // Nudge mid-transfer or while waiting to receive, and can start the
@@ -250,6 +277,7 @@ class _HomeScreenState extends State<HomeScreen> {
     if (paired != null && mounted) {
       showToast(context, 'Paired with ${paired.name}');
       _focusId = paired.id;
+      controller.setCurrent(paired);
       WidgetsBinding.instance.addPostFrameCallback((_) => _goTo(paired.id));
       unawaited(
         askToRunInBackground().then((_) => askForDirectLink()).then((_) => _guideKeepAwake()),
@@ -315,6 +343,7 @@ class _HomeScreenState extends State<HomeScreen> {
   /// What this device is called, and where that comes from.
   Future<void> _aboutThisDevice() async {
     final tileWhileLocked = isPhone ? await latestTileWhileLocked() : null;
+    final instant = await instantClipboard();
     if (!mounted) return;
     await showMenuSheet(
       context,
@@ -347,6 +376,167 @@ class _HomeScreenState extends State<HomeScreen> {
           icon: CupertinoIcons.lock,
           onTap: _chooseWhenLocked,
         ),
+        if (instant != null)
+          MenuItem(
+            label:
+                'Instant clipboard: ${instant.overlay && instant.logs && instant.running ? 'On' : 'Set up'}',
+            icon: CupertinoIcons.doc_on_clipboard,
+            onTap: () => unawaited(_setUpInstantClipboard()),
+          ),
+        if (controller.pairedDevices.length > 1)
+          MenuItem(
+            label: 'Default device: ${controller.defaultDevice?.name ?? 'None'}',
+            icon: CupertinoIcons.pin,
+            onTap: _chooseDefault,
+          ),
+      ],
+    );
+  }
+
+  /// What the current or default device is for, on this platform.
+  String _targetMeaning(String name, {required bool isDefault}) {
+    if (isPhone) {
+      return isDefault
+          ? '"Send latest" always sends to $name, and Nudge opens on it.'
+          : '"Send latest" sends to $name when more than one device is nearby. '
+                'It\'s the device you last swiped to.';
+    }
+    return isDefault
+        ? 'Nudge always opens on $name.'
+        : 'Nudge opens on $name, the device you last chose.';
+  }
+
+  /// Tapped the "Current device" or "Default device" mark.
+  void _aboutTarget(DeviceInfo d) {
+    final isDefault = controller.defaultDevice?.id == d.id;
+    showMenuSheet(
+      context,
+      title: isDefault ? 'Default device' : 'Current device',
+      subtitle: _targetMeaning(d.name, isDefault: isDefault),
+      items: [
+        if (isDefault)
+          MenuItem(
+            label: 'Stop using as default',
+            icon: CupertinoIcons.pin_slash,
+            onTap: () => controller.setDefault(null),
+          )
+        else
+          MenuItem(
+            label: 'Always use ${d.name}',
+            icon: CupertinoIcons.pin,
+            onTap: () => controller.setDefault(d),
+          ),
+      ],
+    );
+  }
+
+  /// Someone on the web page: what they can be sent, and that it's only for
+  /// now. No "always accept" or clipboard sync: they're never paired.
+  void _browserMenu(DeviceInfo d) {
+    if (DateTime.now().isBefore(_quietUntil)) return;
+    showMenuSheet(
+      context,
+      title: '${d.name} · temporary',
+      subtitle:
+          'Connected through the web page, not paired. It disappears soon after '
+          'they close the page. Anything they send asks you first.',
+      items: [
+        if (d.online) ...[
+          MenuItem(label: 'Send files', icon: CupertinoIcons.paperplane, onTap: () => _sendTo(d)),
+          MenuItem(
+            label: 'Send clipboard',
+            icon: CupertinoIcons.doc_on_clipboard,
+            onTap: () => unawaited(controller.sendClipboardTo(d)),
+          ),
+        ],
+        MenuItem(
+          label: 'Stop sharing without the app',
+          icon: CupertinoIcons.stop_circle,
+          destructive: true,
+          onTap: controller.stopWebShare,
+        ),
+      ],
+    );
+  }
+
+  /// Pick the default device, or none (then the current device is used).
+  void _chooseDefault() {
+    final chosen = controller.defaultDevice;
+    IconData mark(bool on) => on ? CupertinoIcons.checkmark_circle_fill : CupertinoIcons.circle;
+    showMenuSheet(
+      context,
+      title: 'Default device',
+      subtitle: isPhone
+          ? '"Send latest" always sends here. With none, it sends to the current device: '
+                'the one you last swiped to.'
+          : 'Nudge opens on it. With none, it opens on the device you last chose.',
+      items: [
+        MenuItem(
+          label: 'None (use the current device)',
+          icon: mark(chosen == null),
+          onTap: () => controller.setDefault(null),
+        ),
+        for (final d in controller.pairedDevices)
+          MenuItem(
+            label: d.name,
+            icon: mark(chosen?.id == d.id),
+            onTap: () => controller.setDefault(d),
+          ),
+      ],
+    );
+  }
+
+  /// Android: what copying on the phone sending at once (Nudge in the
+  /// background) needs. Android doesn't allow it normally, so two
+  /// permissions: one a switch, one only grantable from a computer, once.
+  Future<void> _setUpInstantClipboard() async {
+    final s = await instantClipboard();
+    if (s == null || !mounted) return;
+    final on = s.overlay && s.logs && s.running;
+    IconData mark(bool done) => done ? CupertinoIcons.checkmark_circle_fill : CupertinoIcons.circle;
+    await showMenuSheet(
+      context,
+      title: 'Instant clipboard',
+      subtitle: on
+          ? 'On: whatever you copy goes straight to your devices that share the clipboard, '
+                'with Nudge in the background. Text only; images and private text '
+                '(like passwords) stay here.'
+          : 'Android only lets the app on screen read the clipboard. Nudge gets around it '
+                'by noticing copies in the system log, then taking focus for a split second '
+                'with an invisible window to read them.',
+      items: [
+        MenuItem(
+          label: '1. Allow "Appear on top"',
+          icon: mark(s.overlay),
+          onTap: () => unawaited(openOverlaySettings()),
+        ),
+        MenuItem(
+          label: s.logs ? '2. Log permission: granted' : '2. Copy the command for a computer',
+          icon: mark(s.logs),
+          onTap: s.logs
+              ? null
+              : () async {
+                  await Clipboard.setData(const ClipboardData(text: instantClipboardCommand));
+                  if (mounted) {
+                    showToast(
+                      context,
+                      'Copied. With the phone plugged into a computer (USB debugging on), '
+                      'run it there once',
+                    );
+                  }
+                },
+        ),
+        if (s.overlay && s.logs)
+          MenuItem(
+            label: s.running ? '3. Log access: allowed' : '3. Allow log access',
+            icon: mark(s.running),
+            onTap: s.running
+                ? null
+                : () {
+                    unawaited(startInstantClipboard());
+                    showToast(context, 'Tap "Allow" when Android asks about device logs');
+                  },
+          ),
       ],
     );
   }
@@ -401,6 +591,13 @@ class _HomeScreenState extends State<HomeScreen> {
           toggle: d.clipboard,
           onToggle: (on) => controller.setClipboardSync(d, on),
         ),
+        if (controller.pairedDevices.length > 1)
+          MenuItem(
+            label: 'Default device',
+            icon: CupertinoIcons.pin,
+            toggle: controller.defaultDevice?.id == d.id,
+            onToggle: (on) => controller.setDefault(on ? d : null),
+          ),
         if (controller.pairedDevices.length > 1)
           MenuItem(
             label: 'Arrange devices',
@@ -488,8 +685,11 @@ class _HomeScreenState extends State<HomeScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!_pages.hasClients) return;
         final target = keep < 0 ? 0 : keep;
+        _moving = true;
         if ((_pages.page ?? 0).round() != target) _pages.jumpToPage(target);
+        _moving = false;
         if (keep < 0) setState(() => _focusId = targets.firstOrNull?.id);
+        _adoptFocus();
       });
     }
 
@@ -537,8 +737,11 @@ class _HomeScreenState extends State<HomeScreen> {
           child: LayoutBuilder(
             builder: (context, box) {
               final orb = math
-                  .min(box.maxWidth * 0.74 - 24, box.maxHeight - _underOrb - 8)
+                  .min(box.maxWidth * 0.74 - 24, box.maxHeight - _aboveOrb - _underOrb - 8)
                   .clamp(140.0, 330.0);
+              // Marked only when there's more than one device to choose from.
+              final target = controller.pairedDevices.length > 1 ? controller.sendTarget : null;
+              final isDefault = target != null && target.id == controller.defaultDevice?.id;
               return Stack(
                 alignment: Alignment.center,
                 children: [
@@ -552,6 +755,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       onPageChanged: (i) {
                         tapFeedback();
                         setState(() => _focusId = i < targets.length ? targets[i].id : null);
+                        if (!_moving) _makeCurrent(i);
                       },
                       itemBuilder: (context, i) => _Carousel(
                         pages: _pages,
@@ -563,8 +767,20 @@ class _HomeScreenState extends State<HomeScreen> {
                                 dragging: _dragging,
                                 transfers: controller.transfers,
                                 size: orb,
+                                mark: targets[i].isBrowser
+                                    ? _Mark.temporary
+                                    : targets[i].id != target?.id
+                                    ? null
+                                    : isDefault
+                                    ? _Mark.defaultDevice
+                                    : _Mark.current,
+                                onMark: () => targets[i].isBrowser
+                                    ? _browserMenu(targets[i])
+                                    : _aboutTarget(targets[i]),
                                 onTap: () => _tapDevice(targets[i]),
-                                onMenu: () => _deviceMenu(targets[i]),
+                                onMenu: () => targets[i].isBrowser
+                                    ? _browserMenu(targets[i])
+                                    : _deviceMenu(targets[i]),
                                 onAway: () => _explainAway(targets[i]),
                               )
                             : _AddPage(size: orb, focused: _focusId == null, onTap: _openPairing),
@@ -595,11 +811,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
         _PageDots(
-          onTap: (i) => _pages.animateToPage(
-            i,
-            duration: const Duration(milliseconds: 420),
-            curve: Curves.easeOutCubic,
-          ),
+          onTap: (i) => _moveTo(i, byUser: true),
           count: targets.length + 1,
           index: _focusId == null
               ? targets.length
@@ -712,6 +924,8 @@ class _QuestionSheetState extends State<_QuestionSheet> {
   @override
   Widget build(BuildContext context) {
     final o = widget.offer;
+    // From the web page: only for now, so no "always accept".
+    final browser = widget.controller.deviceById(o.deviceId)?.isBrowser ?? false;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
       child: Column(
@@ -765,34 +979,57 @@ class _QuestionSheetState extends State<_QuestionSheet> {
             },
           ),
           const SizedBox(height: 18),
-          Pressable(
-            onTap: () => setState(() => _always = !_always),
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
+          if (browser)
+            Container(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
               decoration: BoxDecoration(
-                color: Palette.glass,
+                color: Palette.warn.withValues(alpha: 0.1),
                 borderRadius: BorderRadius.circular(18),
-                border: Border.all(color: Palette.glassBorder),
+                border: Border.all(color: Palette.warn.withValues(alpha: 0.35)),
               ),
               child: Row(
                 children: [
+                  const Icon(CupertinoIcons.clock, size: 18, color: Palette.warn),
+                  const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      'Always accept from ${o.deviceName}',
-                      style: const TextStyle(color: Palette.text, fontSize: 15),
-                    ),
-                  ),
-                  IgnorePointer(
-                    child: CupertinoSwitch(
-                      value: _always,
-                      activeTrackColor: Palette.good,
-                      onChanged: (_) {},
+                      'Temporary connection through the web page: not paired, '
+                      'so each send is asked about.',
+                      style: Fonts.small.copyWith(color: Palette.text),
                     ),
                   ),
                 ],
               ),
+            )
+          else
+            Pressable(
+              onTap: () => setState(() => _always = !_always),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(16, 6, 8, 6),
+                decoration: BoxDecoration(
+                  color: Palette.glass,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: Palette.glassBorder),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        'Always accept from ${o.deviceName}',
+                        style: const TextStyle(color: Palette.text, fontSize: 15),
+                      ),
+                    ),
+                    IgnorePointer(
+                      child: CupertinoSwitch(
+                        value: _always,
+                        activeTrackColor: Palette.good,
+                        onChanged: (_) {},
+                      ),
+                    ),
+                  ],
+                ),
+              ),
             ),
-          ),
           const SizedBox(height: 14),
           Row(
             children: [
@@ -1094,6 +1331,66 @@ class _ArrangeSheetState extends State<_ArrangeSheet> {
 /// Height of what sits under each device's orb: gap, menu, setting line.
 const _underOrb = 10.0 + 34 + 22;
 
+/// Height of what sits above it: the current/default device mark and a gap.
+const _aboveOrb = 28.0 + 6;
+
+/// Over a device's orb: where "Send latest" (and opening Nudge) goes, or
+/// that it's only a web page, here for now.
+enum _Mark { current, defaultDevice, temporary }
+
+/// "Current device" or "Default device", over that device's orb. Tap to
+/// find out what it means, or change it.
+class _MarkChip extends StatelessWidget {
+  const _MarkChip({super.key, required this.mark, required this.onTap});
+
+  final _Mark mark;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, icon, color) = switch (mark) {
+      _Mark.current => ('CURRENT DEVICE', CupertinoIcons.scope, Palette.accent),
+      _Mark.defaultDevice => ('DEFAULT DEVICE', CupertinoIcons.pin_fill, Palette.accent),
+      _Mark.temporary => ('TEMPORARY', CupertinoIcons.clock, Palette.warn),
+    };
+    return Tooltip(
+      message: switch (mark) {
+        _Mark.current => 'Current device',
+        _Mark.defaultDevice => 'Default device',
+        _Mark.temporary => 'Connected through a web page, until it closes',
+      },
+      child: Pressable(
+        onTap: onTap,
+        child: Container(
+          height: 28,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            color: color.withValues(alpha: 0.16),
+            border: Border.all(color: color.withValues(alpha: 0.45)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 13, color: color),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  color: color,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 1.1,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// Scales and fades pages by how far they are from the middle, so the
 /// neighbours peek in, smaller.
 class _Carousel extends StatelessWidget {
@@ -1130,6 +1427,8 @@ class _DevicePage extends StatefulWidget {
     required this.dragging,
     required this.transfers,
     required this.size,
+    required this.mark,
+    required this.onMark,
     required this.onTap,
     required this.onMenu,
     required this.onAway,
@@ -1140,6 +1439,10 @@ class _DevicePage extends StatefulWidget {
   final bool dragging;
   final List<Transfer> transfers;
   final double size;
+
+  /// Shown over the orb when this is where "Send latest" goes.
+  final _Mark? mark;
+  final VoidCallback onMark;
   final VoidCallback onTap;
   final VoidCallback onMenu;
 
@@ -1256,7 +1559,7 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
       _ when !d.paired && !d.isBrowser => ('Tap to pair', Palette.accent),
       _ when away => ('', null),
       _ when widget.dragging && widget.focused => ('Drop to send', Palette.text),
-      _ => (d.isBrowser ? 'In a browser' : 'Tap to send', null),
+      _ => ('Tap to send', null),
     };
 
     final orb = Orb(
@@ -1290,12 +1593,24 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
       dim: away && running.isEmpty && flash == null && !waiting,
       tint: flash?.$3,
       onTap: widget.onTap,
-      onLongPress: d.paired ? widget.onMenu : null,
+      onLongPress: d.paired || d.isBrowser ? widget.onMenu : null,
     );
 
+    final mark = widget.mark;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        // Same height with or without the mark, so nothing jumps.
+        SizedBox(
+          height: 28,
+          child: AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            child: mark == null
+                ? const SizedBox.shrink()
+                : _MarkChip(key: ValueKey(mark), mark: mark, onTap: widget.onMark),
+          ),
+        ),
+        const SizedBox(height: 6),
         AnimatedBuilder(
           animation: Listenable.merge([_pop, _shake]),
           builder: (context, child) {
@@ -1315,9 +1630,9 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
         SizedBox(
           height: 34,
           child: AnimatedOpacity(
-            opacity: widget.focused && d.paired ? 1 : 0,
+            opacity: widget.focused && (d.paired || d.isBrowser) ? 1 : 0,
             duration: const Duration(milliseconds: 250),
-            child: d.paired
+            child: d.paired || d.isBrowser
                 ? Tooltip(
                     message: 'More',
                     child: Pressable(
@@ -1340,7 +1655,7 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
         SizedBox(
           height: 22,
           child: AnimatedOpacity(
-            opacity: widget.focused && d.paired && d.acceptsFromUs != null ? 1 : 0,
+            opacity: widget.focused && (d.isBrowser || d.paired && d.acceptsFromUs != null) ? 1 : 0,
             duration: const Duration(milliseconds: 250),
             child: Padding(
               padding: const EdgeInsets.only(top: 6),
@@ -1348,7 +1663,9 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Icon(
-                    d.acceptsFromUs == true
+                    d.isBrowser
+                        ? CupertinoIcons.clock
+                        : d.acceptsFromUs == true
                         ? CupertinoIcons.checkmark_shield
                         : CupertinoIcons.hand_raised,
                     size: 13,
@@ -1356,7 +1673,9 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
                   ),
                   const SizedBox(width: 5),
                   Text(
-                    d.acceptsFromUs == true
+                    d.isBrowser
+                        ? 'Not paired · gone when the page closes'
+                        : d.acceptsFromUs == true
                         ? 'Accepts your files automatically'
                         : 'Asks before accepting your files',
                     style: Fonts.small.copyWith(fontSize: 12),
@@ -1384,6 +1703,7 @@ class _AddPage extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        const SizedBox(height: _aboveOrb),
         Orb(
           size: size,
           icon: CupertinoIcons.add,

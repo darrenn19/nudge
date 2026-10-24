@@ -21,6 +21,25 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 Device.holdMulticast(context)
                 result.success(null)
             }
+            "instantClipboard" -> result.success(
+                mapOf(
+                    "overlay" to ClipWatch.canDrawOverlay(context),
+                    "logs" to ClipWatch.canReadLogs(context),
+                    "running" to ClipWatch.running(),
+                ),
+            )
+            "openOverlaySettings" -> {
+                val intent = android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:${context.packageName}"),
+                ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                runCatching { context.startActivity(intent) }
+                result.success(null)
+            }
+            "startInstantClipboard" -> {
+                ClipWatch.start(context, again = true)
+                result.success(null)
+            }
             "latestTileWhileLocked" -> result.success(Latest.whileLocked(context))
             "setLatestTileWhileLocked" -> {
                 Latest.setWhileLocked(context, call.argument<Boolean>("on") == true)

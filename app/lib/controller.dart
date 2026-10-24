@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
 import 'platform.dart';
 import 'src/rust/api/nudge.dart';
@@ -194,11 +195,15 @@ class NudgeController extends ChangeNotifier {
     : _orderFile = dataDir == null ? null : File('$dataDir${Platform.pathSeparator}order.json'),
       _lockedFile = dataDir == null
           ? null
-          : File('$dataDir${Platform.pathSeparator}when_locked.txt') {
+          : File('$dataDir${Platform.pathSeparator}when_locked.txt'),
+      _targetFile = dataDir == null
+          ? null
+          : File('$dataDir${Platform.pathSeparator}send_target.json') {
     _subscription = app.events().listen(_onEvent);
     devices = app.devices();
     webShareUrl = app.webShareUrl();
     _loadOrder();
+    _loadTarget();
     _loadWhenLocked();
     // Android's background service applies it as the phone locks.
     if (!Platform.isAndroid) unawaited(listenForLock(_setLocked));
@@ -340,6 +345,60 @@ class NudgeController extends ChangeNotifier {
         return byRank != 0 ? byRank : a.$1.compareTo(b.$1);
       });
     return [for (final (_, d) in indexed) d];
+  }
+
+  // Where "Send latest" goes when more than one device is around: the
+  // default device if the user picked one, else the current device (the
+  // one last swiped to). Kept beside the identity; Android's tile reads
+  // the same file (Targets.kt).
+  final File? _targetFile;
+  String? _currentId;
+  String? _defaultId;
+
+  void _loadTarget() {
+    try {
+      final saved = jsonDecode(_targetFile?.readAsStringSync() ?? '{}') as Map;
+      _currentId = saved['current'] as String?;
+      _defaultId = saved['default'] as String?;
+    } catch (_) {
+      // Nothing chosen yet.
+    }
+  }
+
+  void _saveTarget() {
+    try {
+      _targetFile?.writeAsStringSync(jsonEncode({'current': _currentId, 'default': _defaultId}));
+    } catch (_) {
+      // Applies for now; it just won't stick.
+    }
+  }
+
+  DeviceInfo? _pairedById(String? id) {
+    for (final d in devices) {
+      if (d.id == id && d.paired) return d;
+    }
+    return null;
+  }
+
+  /// The device the user set as default, if it's still paired.
+  DeviceInfo? get defaultDevice => _pairedById(_defaultId);
+
+  /// Where "Send latest" goes: the default device, else the current one.
+  DeviceInfo? get sendTarget => defaultDevice ?? _pairedById(_currentId);
+
+  /// The user swiped to [device]: it's the current device now.
+  void setCurrent(DeviceInfo device) {
+    if (!device.paired || device.id == _currentId) return;
+    _currentId = device.id;
+    _saveTarget();
+    notifyListeners();
+  }
+
+  /// Always use [device] (null: go back to the current device).
+  void setDefault(DeviceInfo? device) {
+    _defaultId = device?.id;
+    _saveTarget();
+    notifyListeners();
   }
 
   /// The link people without Nudge open, while sharing with browsers.
@@ -552,6 +611,9 @@ class NudgeController extends ChangeNotifier {
       case AppEvent_ClipboardReceived(:final deviceId, :final text):
         _clipboardArrived(deviceId, text);
         return;
+      case AppEvent_ClipboardImageReceived(:final deviceId, :final path):
+        unawaited(_clipboardImageArrived(deviceId, path));
+        return;
       // Android's background service runs the hotspot.
       case AppEvent_HotspotWanted(:final id):
         if (!Platform.isAndroid) unawaited(_startHotspot(id));
@@ -616,7 +678,8 @@ class NudgeController extends ChangeNotifier {
 
   final _clips = StreamController<(String, String)>.broadcast();
 
-  /// Clipboard text that arrived: (from device name, text).
+  /// Clipboard text (or an image: empty text) that arrived: (from device
+  /// name, text).
   Stream<(String, String)> get clipsReceived => _clips.stream;
 
   /// The text on the clipboard as last sent or received, so text that
@@ -645,7 +708,7 @@ class NudgeController extends ChangeNotifier {
     if (text == _lastClip && !again) return const [];
     _lastClip = text;
     final targets = to != null
-        ? pairedDevices.where((d) => d.id == to).toList()
+        ? devices.where((d) => d.id == to && (d.paired || d.isBrowser)).toList()
         : pairedDevices.where((d) => d.clipboard && d.reachable).toList();
     final reached = <String>[];
     await Future.wait([
@@ -673,6 +736,53 @@ class NudgeController extends ChangeNotifier {
     } else if (leave) {
       _notes.add("Couldn't reach a device to copy to");
     }
+  }
+
+  /// A copied image to every paired device that syncs the clipboard and is
+  /// around. Returns the names of the devices it reached.
+  Future<List<String>> shareClipboardImage(Uint8List data, String mime) async {
+    if (data.isEmpty) return const [];
+    final targets = pairedDevices.where((d) => d.clipboard && d.reachable).toList();
+    final reached = <String>[];
+    await Future.wait([
+      for (final d in targets)
+        app
+            .sendClipboardImage(deviceId: d.id, mime: mime, data: data)
+            .then((_) => reached.add(d.name))
+            .catchError((_) {}),
+    ]);
+    return reached;
+  }
+
+  /// A copied image arrived (saved at [path]): onto the clipboard. Android's
+  /// background service already put it there.
+  Future<void> _clipboardImageArrived(String deviceId, String path) async {
+    if (!Platform.isAndroid) {
+      try {
+        await setClipboardImage(await File(path).readAsBytes());
+      } catch (_) {
+        return;
+      }
+    }
+    _clips.add((deviceById(deviceId)?.name ?? 'A paired device', ''));
+  }
+
+  /// What's on this device's clipboard, to a web page [device], which
+  /// shows it with a Copy button. Says how it went.
+  Future<void> sendClipboardTo(DeviceInfo device) async {
+    final text = (await Clipboard.getData(Clipboard.kTextPlain))?.text ?? '';
+    if (text.isEmpty) {
+      _notes.add('Nothing to send: the clipboard is empty');
+      return;
+    }
+    final reached = await shareClipboard(text, again: true, to: device.id);
+    _notes.add(
+      reached.isEmpty
+          ? "Couldn't reach ${device.name}"
+          : device.isBrowser
+          ? 'Sent to ${device.name}: they tap Copy'
+          : 'Copied to ${device.name}',
+    );
   }
 
   Future<void> _clipboardArrived(String deviceId, String text) async {

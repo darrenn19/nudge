@@ -51,4 +51,7 @@ object Core {
      * main thread.
      */
     @JvmStatic external fun sendClipboard(deviceId: String?, text: String): String
+
+    /** The same for a copied image (`mime` like "image/png"). Blocks. */
+    @JvmStatic external fun sendClipboardImage(deviceId: String?, mime: String, data: ByteArray): String
 }

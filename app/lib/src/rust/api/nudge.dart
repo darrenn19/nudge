@@ -75,6 +75,14 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Put text on a paired device's clipboard. No question on its side.
   Future<void> sendClipboard({required String deviceId, required String text});
 
+  /// Put a copied image on a paired device's clipboard (`mime` like
+  /// "image/png"). No question on its side.
+  Future<void> sendClipboardImage({
+    required String deviceId,
+    required String mime,
+    required List<int> data,
+  });
+
   /// Send files to a paired device in the background. Returns one
   /// transfer ID per file; progress arrives as events.
   Int64List sendFiles({required String deviceId, required List<String> paths});
@@ -224,6 +232,14 @@ sealed class AppEvent with _$AppEvent {
     required String text,
   }) = AppEvent_ClipboardReceived;
 
+  /// A copied image from a paired device, saved at `path`: put it on the
+  /// clipboard.
+  const factory AppEvent.clipboardImageReceived({
+    required String deviceId,
+    required String path,
+    required String mime,
+  }) = AppEvent_ClipboardImageReceived;
+
   /// Android: start the hotspot for a direct link, then `hotspot_ready`.
   const factory AppEvent.hotspotWanted({required PlatformInt64 id}) =
       AppEvent_HotspotWanted;
@@ -326,7 +342,9 @@ class DeviceInfo {
           clipboard == other.clipboard;
 }
 
-/// A file the platform opened for us: its descriptor and display name.
+/// A file the platform opened for us: its descriptor and display name. A
+/// name with folders ("Trip/a.jpg") arrives in those folders; a name ending
+/// in '/' with no descriptor (-1) is an empty folder.
 class OpenFile {
   final int fd;
   final String name;

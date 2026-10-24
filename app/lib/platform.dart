@@ -255,6 +255,30 @@ Future<void> setLatestTileWhileLocked(bool on) async {
   if (Platform.isAndroid) await _channel.invokeMethod('setLatestTileWhileLocked', {'on': on});
 }
 
+/// Android: what instant clipboard (phone to other devices, with Nudge in
+/// the background) still needs. See ClipWatch.kt.
+typedef InstantClipboard = ({bool overlay, bool logs, bool running});
+
+Future<InstantClipboard?> instantClipboard() async {
+  if (!Platform.isAndroid) return null;
+  final m = await _channel.invokeMapMethod<String, bool>('instantClipboard') ?? const {};
+  return (overlay: m['overlay'] ?? false, logs: m['logs'] ?? false, running: m['running'] ?? false);
+}
+
+/// Android: the "Appear on top" setting for Nudge.
+Future<void> openOverlaySettings() async {
+  if (Platform.isAndroid) await _channel.invokeMethod('openOverlaySettings');
+}
+
+/// Android: start watching the clipboard, once both permissions are there.
+Future<void> startInstantClipboard() async {
+  if (Platform.isAndroid) await _channel.invokeMethod('startInstantClipboard');
+}
+
+/// The one-time command that lets Nudge notice copies (run from a computer).
+const instantClipboardCommand =
+    'adb shell pm grant io.github.darrenn19.nudge android.permission.READ_LOGS';
+
 /// Samsung: whether to show the one-time "keep Nudge awake" guide (Samsung
 /// puts apps to sleep despite the battery exemption; "Never sleeping apps"
 /// stops it).
@@ -404,11 +428,24 @@ Future<String?> newClipboardText() async {
 
 const _clipboard = MethodChannel('nudge/clipboard');
 
-/// Windows: calls [onCopy] with the text whenever something is copied,
-/// except what password managers mark as private.
-void listenForCopies(void Function(String text) onCopy) {
+/// Windows: calls [onCopy] with the text whenever text is copied, and
+/// [onImage] with an image (as PNG) whenever one is, except what password
+/// managers mark as private.
+void listenForCopies(void Function(String text) onCopy, {void Function(Uint8List png)? onImage}) {
   if (!Platform.isWindows) return;
   _clipboard.setMethodCallHandler((call) async {
-    if (call.method == 'copied' && call.arguments is String) onCopy(call.arguments as String);
+    switch (call.method) {
+      case 'copied' when call.arguments is String:
+        onCopy(call.arguments as String);
+      case 'copiedImage' when call.arguments is Uint8List:
+        onImage?.call(call.arguments as Uint8List);
+    }
   });
+}
+
+/// Windows: put an image (PNG, JPEG...) from another device on the
+/// clipboard. Android does it natively (ClipSync.setImage).
+Future<bool> setClipboardImage(Uint8List image) async {
+  if (!Platform.isWindows) return false;
+  return await _clipboard.invokeMethod<bool>('setImage', image) ?? false;
 }

@@ -88,7 +88,10 @@ Future<NudgeController> _start(List<String> files, String? text) async {
   // Clipboard sync. Windows: whatever is copied goes across as it's copied.
   // Android only lets apps read the clipboard on screen: what was copied
   // goes when Nudge opens.
-  listenForCopies((text) => unawaited(controller.shareClipboard(text)));
+  listenForCopies(
+    (text) => unawaited(controller.shareClipboard(text)),
+    onImage: (png) => unawaited(controller.shareClipboardImage(png, 'image/png')),
+  );
   if (Platform.isAndroid) {
     Future<void> sendCopied() async {
       final text = await newClipboardText();
