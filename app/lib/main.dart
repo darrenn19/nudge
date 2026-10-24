@@ -37,7 +37,7 @@ Future<void> main(List<String> args) async {
   // Nudge runs before (and without) any screen: Windows starts it hidden at
   // login, and Android starts it at boot or keeps it after the window closes.
   // Either way it must be ready to receive.
-  final starting = _start(filesFromArgs(args));
+  final starting = _start(filesFromArgs(args), Platform.isWindows ? textFromArgs(args) : null);
   // The core starts in well under a second: wait for it, so the first frame
   // is the device list rather than a placeholder that then fades away.
   NudgeController? ready;
@@ -49,7 +49,7 @@ Future<void> main(List<String> args) async {
   runApp(NudgeRoot(starting: starting, ready: ready));
 }
 
-Future<NudgeController> _start(List<String> files) async {
+Future<NudgeController> _start(List<String> files, String? text) async {
   await enableMulticast();
   final dir = await dataDir();
   final app = await NudgeApp.start(
@@ -59,16 +59,32 @@ Future<NudgeController> _start(List<String> files) async {
     platform: platformTag,
   );
   final controller = NudgeController(app, dataDir: dir);
-  TransferNotifier(controller);
+  // Android's background service shows notifications itself (with or
+  // without this window); Windows shows its toasts from here.
+  if (!Platform.isAndroid) TransferNotifier(controller);
   // Android: files shared to Nudge (share sheet, quick settings tile); text
   // shared to it goes to the other devices' clipboards.
   unawaited(
     listenForShares(
       controller.offer,
       onStarting: controller.warmUp,
-      onText: (text) => unawaited(controller.shareClipboardAndSay(text, leave: true)),
+      onText: (text, {to}) => unawaited(controller.shareClipboardAndSay(text, leave: true, to: to)),
     ),
   );
+  // Android: each paired device in the share sheet's top row.
+  if (Platform.isAndroid) {
+    var published = '';
+    void publish() {
+      final devices = controller.pairedDevices;
+      final key = [for (final d in devices) '${d.id}=${d.name}'].join('|');
+      if (key == published) return;
+      published = key;
+      unawaited(publishShareTargets([for (final d in devices) (id: d.id, name: d.name)]));
+    }
+
+    controller.addListener(publish);
+    publish();
+  }
   // Clipboard sync. Windows: whatever is copied goes across as it's copied.
   // Android only lets apps read the clipboard on screen: what was copied
   // goes when Nudge opens.
@@ -93,13 +109,27 @@ Future<NudgeController> _start(List<String> files) async {
       controller.offer(paths.map(OutgoingFile.fromPath).toList());
     }
 
-    unawaited(listenForLaunches(onFiles: offerPaths, onShow: () => unawaited(showWindow())));
+    // Text from the Share panel: onto the other devices' clipboards.
+    void copyAcross(String text) {
+      unawaited(showWindow());
+      unawaited(controller.shareClipboardAndSay(text, leave: true));
+    }
+
+    unawaited(
+      listenForLaunches(
+        onFiles: offerPaths,
+        onText: copyAcross,
+        onShow: () => unawaited(showWindow()),
+      ),
+    );
     if (files.isNotEmpty) offerPaths(files);
+    if (text != null) copyAcross(text);
     // Housekeeping that can wait until Nudge is up and idle.
     unawaited(
       Future<void>.delayed(const Duration(seconds: 3), () async {
         prepareToasts();
         await registerShell(dir);
+        await installSendTo();
       }),
     );
   }

@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nudge as an MSIX package. Built by package.ps1, which fills in $VERSION$
+  and $PUBLISHER$ (the publisher must match the signing certificate).
+
+  What the package adds over a plain exe:
+  - "Send with Nudge" in Windows 11's top-level right-click menu
+    (shell/nudge_shell.cpp)
+  - Nudge in the Share panel (runner/packaged.cpp takes the files)
+  - start at login, without a registry entry (the "NudgeStartup" task)
+  - firewall rules for receiving, added on install and removed on uninstall
+  - a clean install and uninstall
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10"
+  xmlns:desktop2="http://schemas.microsoft.com/appx/manifest/desktop/windows10/2"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  IgnorableNamespaces="uap rescap desktop desktop2 desktop4 desktop5 com">
+
+  <Identity
+    Name="io.github.darrenn19.Nudge"
+    Publisher="$PUBLISHER$"
+    Version="$VERSION$"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Nudge</DisplayName>
+    <PublisherDisplayName>Nudge</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>Fast, private file transfer between your devices.</Description>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Capabilities>
+    <Capability Name="internetClient" />
+    <Capability Name="privateNetworkClientServer" />
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+  <Applications>
+    <Application Id="Nudge" Executable="nudge.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Nudge"
+        Description="Fast, private file transfer between your devices."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- Start at login, hidden in the tray (runner/packaged.cpp). -->
+        <desktop:Extension Category="windows.startupTask" Executable="nudge.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="NudgeStartup" Enabled="true" DisplayName="Nudge" />
+        </desktop:Extension>
+
+        <!-- The Share panel. -->
+        <uap:Extension Category="windows.shareTarget">
+          <uap:ShareTarget Description="Send with Nudge">
+            <uap:SupportedFileTypes>
+              <uap:SupportsAnyFileType />
+            </uap:SupportedFileTypes>
+            <uap:DataFormat>StorageItems</uap:DataFormat>
+            <!-- Onto the devices' clipboards. -->
+            <uap:DataFormat>Text</uap:DataFormat>
+            <uap:DataFormat>URI</uap:DataFormat>
+          </uap:ShareTarget>
+        </uap:Extension>
+
+        <!-- Windows 11's top-level right-click menu, for any file. -->
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="*">
+              <desktop5:Verb Id="SendWithNudge" Clsid="7ACAB74A-1F6D-4CFD-9F82-A5659C26F25F" />
+            </desktop5:ItemType>
+            <!-- Folders go whole. -->
+            <desktop5:ItemType Type="Directory">
+              <desktop5:Verb Id="SendFolderWithNudge" Clsid="7ACAB74A-1F6D-4CFD-9F82-A5659C26F25F" />
+            </desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer>
+            <com:SurrogateServer DisplayName="Send with Nudge">
+              <com:Class Id="7ACAB74A-1F6D-4CFD-9F82-A5659C26F25F" Path="nudge_shell.dll" ThreadingModel="STA" />
+            </com:SurrogateServer>
+          </com:ComServer>
+        </com:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Extensions>
+    <!-- Receiving, on any network (home Wi-Fi is often marked Public):
+         transfers (TCP 47800), sharing with browsers (TCP 47802), finding
+         devices (UDP 47801, and mDNS on UDP 5353). Only paired devices can
+         send; others can only ask to pair. -->
+
+    <desktop2:Extension Category="windows.firewallRules">
+      <desktop2:FirewallRules Executable="nudge.exe">
+        <desktop2:Rule Direction="in" IPProtocol="TCP" Profile="all" LocalPortMin="47800" LocalPortMax="47800" />
+        <desktop2:Rule Direction="in" IPProtocol="TCP" Profile="all" LocalPortMin="47802" LocalPortMax="47802" />
+        <desktop2:Rule Direction="in" IPProtocol="UDP" Profile="all" LocalPortMin="47801" LocalPortMax="47801" />
+        <desktop2:Rule Direction="in" IPProtocol="UDP" Profile="all" LocalPortMin="5353" LocalPortMax="5353" />
+      </desktop2:FirewallRules>
+    </desktop2:Extension>
+  </Extensions>
+</Package>

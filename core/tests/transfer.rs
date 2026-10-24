@@ -100,6 +100,7 @@ async fn raw_send(
         size: data.len() as u64,
         modified: 0,
         batch: nudge_core::protocol::Batch::single(data.len() as u64),
+        pack: false,
     }
     .write_to(&mut stream)
     .await
@@ -196,6 +197,7 @@ async fn dropped_connection_keeps_partial_file_only() {
         size: 10,
         modified: 0,
         batch: nudge_core::protocol::Batch::single(10),
+        pack: false,
     };
     offer.write_to(&mut stream).await.unwrap();
     assert_eq!(

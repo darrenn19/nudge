@@ -183,6 +183,7 @@ where
         size,
         modified: 0,
         batch: crate::protocol::Batch::single(size),
+        pack: false,
     };
     send_from(stream, Pattern::new(size), offer).await
 }

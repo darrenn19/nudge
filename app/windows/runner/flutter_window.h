@@ -20,7 +20,9 @@ constexpr ULONG_PTR kLaunchMessage = 0x4E554447;  // "NUDG"
 class FlutterWindow : public Win32Window {
  public:
   // Creates a new FlutterWindow hosting a Flutter view running |project|.
-  explicit FlutterWindow(const flutter::DartProject& project);
+  // With |hidden| (started at login), the window stays hidden until Dart
+  // shows it.
+  FlutterWindow(const flutter::DartProject& project, bool hidden);
   virtual ~FlutterWindow();
 
  protected:
@@ -33,6 +35,8 @@ class FlutterWindow : public Win32Window {
  private:
   // The project to run.
   flutter::DartProject project_;
+
+  bool hidden_;
 
   // The Flutter instance hosted by this window.
   std::unique_ptr<flutter::FlutterViewController> flutter_controller_;
@@ -47,9 +51,17 @@ class FlutterWindow : public Win32Window {
   // files sent from Explorer arrive and the window comes back.
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> instance_;
 
+  // Tells Dart when the session locks and unlocks ("nudge/session"), for
+  // the "Accept files while locked" setting.
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> session_;
+
   // Launches that came before Dart was listening.
   std::vector<flutter::EncodableValue> pending_launches_;
   bool dart_listening_ = false;
+
+  // Puts Nudge in Explorer's "Send to" menu (a shortcut in the user's
+  // SendTo folder, pointing at this exe). Returns whether it worked.
+  bool InstallSendTo();
 
   // A later launch's command line arrived.
   void OnLaunch(const std::wstring& command_line);

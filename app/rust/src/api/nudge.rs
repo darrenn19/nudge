@@ -11,15 +11,15 @@ use anyhow::{Context, Result};
 use flutter_rust_bridge::frb;
 use nudge_core::{
     Direction, Fingerprint, HotspotInfo, LinkKind, Node, NodeConfig, NodeEvent, Outgoing, Peer,
+    Receiving,
 };
 use tokio::runtime::Runtime;
-use tokio::sync::mpsc::UnboundedReceiver;
 
 use crate::frb_generated::StreamSink;
 
 /// The core's runtime. Separate from flutter_rust_bridge's own, so the
 /// core's background tasks never depend on how the bridge schedules calls.
-fn runtime() -> &'static Runtime {
+pub(crate) fn runtime() -> &'static Runtime {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
     RUNTIME.get_or_init(|| {
         tokio::runtime::Builder::new_multi_thread()
@@ -283,12 +283,98 @@ impl From<NodeEvent> for AppEvent {
 /// the life of the app.
 pub struct NudgeApp {
     node: Arc<Node>,
-    events: Mutex<Option<UnboundedReceiver<NodeEvent>>>,
+}
+
+/// The one core in this process, shared by whoever started it and whoever
+/// attaches later. On Android the background service starts it (see
+/// `crate::android`) and the window attaches when it opens; on Windows the
+/// window starts it.
+pub(crate) struct Core {
+    pub(crate) node: Arc<Node>,
+    /// The window's event stream, while a window listens.
+    dart: Mutex<Option<StreamSink<AppEvent>>>,
+    /// The platform's own listener (Android's service), for good.
+    native: Mutex<Option<NativeListener>>,
+    /// Events from before anyone listened, handed to the first listener.
+    early: Mutex<Vec<AppEvent>>,
+}
+
+pub(crate) type NativeListener = Box<dyn Fn(&AppEvent) + Send + Sync>;
+
+static CORE: tokio::sync::OnceCell<Arc<Core>> = tokio::sync::OnceCell::const_new();
+
+/// The core, if it's been started.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
+pub(crate) fn running_core() -> Option<Arc<Core>> {
+    CORE.get().cloned()
+}
+
+/// Start the core, or return the one already running (whatever `config`
+/// says: the first start decides).
+pub(crate) async fn start_core(config: NodeConfig) -> Result<Arc<Core>> {
+    let core = CORE
+        .get_or_try_init(|| async move {
+            let (node, mut rx) = runtime()
+                .spawn(Node::start(config))
+                .await
+                .context("Nudge runtime stopped")??;
+            let core = Arc::new(Core {
+                node: Arc::new(node),
+                dart: Mutex::new(None),
+                native: Mutex::new(None),
+                early: Mutex::new(Vec::new()),
+            });
+            let delivering = core.clone();
+            runtime().spawn(async move {
+                while let Some(event) = rx.recv().await {
+                    delivering.deliver(event.into());
+                }
+            });
+            anyhow::Ok(core)
+        })
+        .await?;
+    Ok(core.clone())
+}
+
+impl Core {
+    fn deliver(&self, event: AppEvent) {
+        let native = self.native.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(listener) = native.as_ref() {
+            listener(&event);
+        }
+        let mut dart = self.dart.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(sink) = dart.as_ref()
+            && sink.add(event.clone()).is_err()
+        {
+            *dart = None; // the window closed
+        }
+        if native.is_none() && dart.is_none() {
+            let mut early = self.early.lock().unwrap_or_else(|e| e.into_inner());
+            if early.len() < 1000 {
+                early.push(event);
+            }
+        }
+    }
+
+    /// Events so far nobody heard.
+    fn take_early(&self) -> Vec<AppEvent> {
+        std::mem::take(&mut *self.early.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    pub(crate) fn set_native(&self, listener: NativeListener) {
+        for event in self.take_early() {
+            listener(&event);
+        }
+        *self.native.lock().unwrap_or_else(|e| e.into_inner()) = Some(listener);
+    }
 }
 
 impl NudgeApp {
     /// Start Nudge: load or create this device's identity in `data_dir`,
-    /// listen for connections and start finding nearby devices.
+    /// listen for connections and start finding nearby devices. If it's
+    /// already running in this process (Android's background service
+    /// started it), this attaches to it.
     pub async fn start(
         data_dir: String,
         download_dir: String,
@@ -301,28 +387,20 @@ impl NudgeApp {
             &device_name,
             &platform,
         );
-        let (node, events) = runtime()
-            .spawn(Node::start(config))
-            .await
-            .context("Nudge runtime stopped")??;
+        let core = start_core(config).await?;
         Ok(NudgeApp {
-            node: Arc::new(node),
-            events: Mutex::new(Some(events)),
+            node: core.node.clone(),
         })
     }
 
-    /// Deliver events to Dart. Call once; later calls do nothing.
+    /// Deliver events to this window. A later call (a new window) takes
+    /// over from an earlier one.
     pub fn events(&self, sink: StreamSink<AppEvent>) {
-        let Some(mut rx) = self.events.lock().unwrap_or_else(|e| e.into_inner()).take() else {
-            return;
-        };
-        runtime().spawn(async move {
-            while let Some(event) = rx.recv().await {
-                if sink.add(event.into()).is_err() {
-                    break; // Dart stopped listening
-                }
-            }
-        });
+        let Some(core) = CORE.get() else { return };
+        for event in core.take_early() {
+            let _ = sink.add(event);
+        }
+        *core.dart.lock().unwrap_or_else(|e| e.into_inner()) = Some(sink);
     }
 
     #[frb(sync)]
@@ -488,6 +566,19 @@ impl NudgeApp {
         self.node.direct_link()
     }
 
+    /// How incoming files are treated from now on: "usual" (auto-accepted
+    /// devices send without a question), "ask" (ask about every send) or
+    /// "refuse" (decline without asking). The app sets it as the device
+    /// locks and unlocks.
+    #[frb(sync)]
+    pub fn set_receiving(&self, mode: String) {
+        self.node.set_receiving(match mode.as_str() {
+            "ask" => Receiving::Ask,
+            "refuse" => Receiving::Refuse,
+            _ => Receiving::Usual,
+        });
+    }
+
     #[frb(sync)]
     pub fn set_direct_link(&self, on: bool) -> Result<()> {
         Ok(self.node.set_direct_link(on)?)
@@ -537,7 +628,9 @@ impl NudgeApp {
     }
 }
 
-/// A file the platform opened for us: its descriptor and display name.
+/// A file the platform opened for us: its descriptor and display name. A
+/// name with folders ("Trip/a.jpg") arrives in those folders; a name ending
+/// in '/' with no descriptor (-1) is an empty folder.
 #[derive(Debug, Clone)]
 pub struct OpenFile {
     pub fd: i32,
@@ -548,6 +641,10 @@ impl OpenFile {
     #[cfg(unix)]
     fn into_outgoing(self) -> Result<Outgoing> {
         use std::os::fd::{FromRawFd, OwnedFd};
+        // An empty folder from a picked folder ("Trip/empty/"): no file.
+        if self.fd < 0 && self.name.ends_with('/') {
+            return Ok(Outgoing::EmptyFolder { name: self.name });
+        }
         anyhow::ensure!(self.fd >= 0, "invalid file descriptor for {}", self.name);
         // SAFETY: the caller hands over an open descriptor it no longer uses.
         let fd = unsafe { OwnedFd::from_raw_fd(self.fd) };
@@ -567,6 +664,6 @@ fn route_name(kind: LinkKind) -> &'static str {
     kind.name()
 }
 
-fn parse_id(id: &str) -> Result<Fingerprint> {
+pub(crate) fn parse_id(id: &str) -> Result<Fingerprint> {
     Ok(id.parse()?)
 }

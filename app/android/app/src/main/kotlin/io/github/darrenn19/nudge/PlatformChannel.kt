@@ -2,29 +2,32 @@ package io.github.darrenn19.nudge
 
 import android.content.Context
 import android.media.MediaScannerConnection
-import android.net.wifi.WifiManager
-import android.os.Build
-import android.os.Environment
 import android.os.ParcelFileDescriptor
-import android.provider.Settings
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 
 /**
- * Questions only Android can answer, and things only it can do, that don't
- * need a window: names and folders, the multicast lock, notifications and
- * the background service. Lives as long as the process.
+ * Questions only Android can answer, and things only it can do, for the
+ * window: names and folders, the multicast lock, notifications and the
+ * background service.
  */
 class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHandler {
-    private var multicastLock: WifiManager.MulticastLock? = null
-
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            "deviceName" -> result.success(deviceName())
-            "downloadsDir" -> result.success(downloadsDir())
+            "deviceName" -> result.success(Device.name(context))
+            "downloadsDir" -> result.success(Device.wantedDownloads().path)
             "acquireMulticastLock" -> {
-                acquireMulticastLock()
+                Device.holdMulticast(context)
+                result.success(null)
+            }
+            "latestTileWhileLocked" -> result.success(Latest.whileLocked(context))
+            "setLatestTileWhileLocked" -> {
+                Latest.setWhileLocked(context, call.argument<Boolean>("on") == true)
+                result.success(null)
+            }
+            "whenLockedChanged" -> {
+                LockState.apply(context)
                 result.success(null)
             }
             "scanFile" -> {
@@ -78,6 +81,13 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 result.success(null)
             }
             "clipboardIfNew" -> result.success(ClipSync.ifNew(context))
+            "isLocked" -> result.success(LockState.isLocked(context))
+            "setShareTargets" -> {
+                val devices = call.argument<List<Map<String, String>>>("devices").orEmpty()
+                    .mapNotNull { d -> d["id"]?.let { id -> id to (d["name"] ?: "Device") } }
+                runCatching { ShareTargets.publish(context, devices) }
+                result.success(null)
+            }
             "holdNetwork" -> {
                 NudgeService.holdNetwork(context, call.argument<Boolean>("on") == true)
                 result.success(null)
@@ -90,28 +100,6 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 result.success(null)
             }
             else -> result.notImplemented()
-        }
-    }
-
-    /** The name the user gave the phone (Settings → About phone), else the model. */
-    private fun deviceName(): String {
-        val named = Settings.Global.getString(context.contentResolver, Settings.Global.DEVICE_NAME)
-        if (!named.isNullOrBlank()) return named
-        val model = Build.MODEL ?: "Android phone"
-        val maker = Build.MANUFACTURER ?: ""
-        return if (model.startsWith(maker, ignoreCase = true)) model else "$maker $model".trim()
-    }
-
-    @Suppress("DEPRECATION") // Still the only way to get the shared Downloads path.
-    private fun downloadsDir(): String =
-        File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "Nudge").path
-
-    private fun acquireMulticastLock() {
-        if (multicastLock?.isHeld == true) return
-        val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-        multicastLock = wifi.createMulticastLock("nudge-discovery").apply {
-            setReferenceCounted(false)
-            acquire()
         }
     }
 

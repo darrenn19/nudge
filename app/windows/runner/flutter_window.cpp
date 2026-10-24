@@ -4,12 +4,18 @@
 #include <optional>
 
 #include <flutter/standard_method_codec.h>
+#include <knownfolders.h>
+#include <shlobj.h>
+#include <wtsapi32.h>
+
+#pragma comment(lib, "wtsapi32.lib")
 
 #include "flutter/generated_plugin_registrant.h"
+#include "packaged.h"
 #include "utils.h"
 
-FlutterWindow::FlutterWindow(const flutter::DartProject& project)
-    : project_(project) {}
+FlutterWindow::FlutterWindow(const flutter::DartProject& project, bool hidden)
+    : project_(project), hidden_(hidden) {}
 
 FlutterWindow::~FlutterWindow() {}
 
@@ -38,6 +44,12 @@ bool FlutterWindow::OnCreate() {
       &flutter::StandardMethodCodec::GetInstance());
   AddClipboardFormatListener(GetHandle());
 
+  // Locking and unlocking (Win+L), even with the window hidden.
+  session_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "nudge/session",
+      &flutter::StandardMethodCodec::GetInstance());
+  WTSRegisterSessionNotification(GetHandle(), NOTIFY_FOR_THIS_SESSION);
+
   // Later launches. Dart says "listen" once it's ready, and gets any that
   // came before.
   instance_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
@@ -46,6 +58,23 @@ bool FlutterWindow::OnCreate() {
   instance_->SetMethodCallHandler(
       [this](const flutter::MethodCall<flutter::EncodableValue>& call,
              std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+        const std::string& method = call.method_name();
+        if (method == "installSendTo") {
+          result->Success(flutter::EncodableValue(InstallSendTo()));
+          return;
+        }
+        // Installed as a package: start at login through its startup task.
+        if (method == "packaged") {
+          result->Success(flutter::EncodableValue(IsPackaged()));
+          return;
+        }
+        if (method == "startupTask" || method == "setStartupTask") {
+          auto* on = std::get_if<bool>(call.arguments());
+          std::optional<bool> state =
+              method == "startupTask" ? StartupTaskEnabled() : SetStartupTask(on && *on);
+          result->Success(state ? flutter::EncodableValue(*state) : flutter::EncodableValue());
+          return;
+        }
         if (call.method_name() != "listen") {
           result->NotImplemented();
           return;
@@ -58,7 +87,7 @@ bool FlutterWindow::OnCreate() {
 
   // Started at login (--background): stay in the tray until opened. The
   // Dart side shows the window when the user asks for it.
-  if (!wcsstr(GetCommandLineW(), L" --background")) {
+  if (!hidden_) {
     flutter_controller_->engine()->SetNextFrameCallback([&]() {
       this->Show();
     });
@@ -74,7 +103,9 @@ bool FlutterWindow::OnCreate() {
 
 void FlutterWindow::OnDestroy() {
   RemoveClipboardFormatListener(GetHandle());
+  WTSUnRegisterSessionNotification(GetHandle());
   clipboard_ = nullptr;
+  session_ = nullptr;
   instance_ = nullptr;
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -104,6 +135,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_CLIPBOARDUPDATE:
       ReportCopy();
       return 0;
+    case WM_WTSSESSION_CHANGE:
+      if (session_ && (wparam == WTS_SESSION_LOCK || wparam == WTS_SESSION_UNLOCK)) {
+        session_->InvokeMethod(
+            "locked", std::make_unique<flutter::EncodableValue>(wparam == WTS_SESSION_LOCK));
+      }
+      break;
     case WM_COPYDATA: {
       auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lparam);
       if (data && data->dwData == kLaunchMessage && data->lpData &&
@@ -131,6 +168,32 @@ void FlutterWindow::OnLaunch(const std::wstring& command_line) {
   } else {
     pending_launches_.push_back(std::move(launch));
   }
+}
+
+bool FlutterWindow::InstallSendTo() {
+  wchar_t exe[MAX_PATH];
+  if (!GetModuleFileNameW(nullptr, exe, MAX_PATH)) return false;
+  PWSTR folder = nullptr;
+  if (FAILED(SHGetKnownFolderPath(FOLDERID_SendTo, 0, nullptr, &folder))) return false;
+  std::wstring path = std::wstring(folder) + L"\\Nudge.lnk";
+  CoTaskMemFree(folder);
+
+  IShellLinkW* link = nullptr;
+  if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                              IID_PPV_ARGS(&link)))) {
+    return false;
+  }
+  // Explorer adds the selected files after these arguments, all at once.
+  link->SetPath(exe);
+  link->SetArguments(L"--send");
+  link->SetIconLocation(exe, 0);
+  link->SetDescription(L"Send with Nudge");
+  IPersistFile* file = nullptr;
+  bool saved = SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file))) &&
+               SUCCEEDED(file->Save(path.c_str(), TRUE));
+  if (file) file->Release();
+  link->Release();
+  return saved;
 }
 
 namespace {

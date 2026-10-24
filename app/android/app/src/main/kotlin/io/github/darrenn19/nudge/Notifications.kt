@@ -72,27 +72,40 @@ object Notifications {
             .build()
 
     /** "Received photo.jpg from Laptop", with an action that opens the file. */
-    fun received(context: Context, file: File, from: String) {
+    /**
+     * [title] names what came ("photo.jpg", or for several files at once
+     * "Trip" or "37 files"); [file] is the file, or the folder they went in.
+     */
+    fun received(context: Context, file: File, from: String, title: String = file.name) {
+        // Viewer apps open files, not folders: a folder opens Nudge.
+        val open = if (file.isDirectory) null else openFile(context, file)
         val notification = NotificationCompat.Builder(context, RECEIVED)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Received ${file.name}")
+            .setContentTitle("Received $title")
             .setContentText(if (from.isBlank()) "Saved to ${file.parentFile?.name ?: "Downloads"}" else "From $from")
             .setAutoCancel(true)
             .setGroup(RECEIVED_GROUP)
-            .setContentIntent(openFile(context, file) ?: openApp(context))
-            .apply { openFile(context, file)?.let { addAction(0, "Open", it) } }
+            // On the lock screen: no file or device names until unlocked.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(lockScreen(context, RECEIVED, "File received"))
+            .setContentIntent(open ?: openApp(context))
+            .apply { open?.let { addAction(0, "Open", it) } }
             .build()
         notify(context, nextId.getAndIncrement(), notification)
     }
 
-    /** "Darren's PC wants to send you 3 files", with Accept and Decline. */
-    fun offer(context: Context, id: Long, title: String, text: String) {
+    /**
+     * "Darren's PC wants to send you 3 files", with Accept and Decline; with
+     * [pairing], "Darren's PC wants to pair" instead.
+     */
+    fun offer(context: Context, id: Long, title: String, text: String, pairing: Boolean = false) {
         fun answer(accept: Boolean) = PendingIntent.getBroadcast(
             context,
             (id * 2 + if (accept) 1 else 0).toInt(),
             Intent(context, OfferActionReceiver::class.java)
                 .putExtra(OfferActionReceiver.EXTRA_ID, id)
-                .putExtra(OfferActionReceiver.EXTRA_ACCEPT, accept),
+                .putExtra(OfferActionReceiver.EXTRA_ACCEPT, accept)
+                .putExtra(OfferActionReceiver.EXTRA_PAIRING, pairing),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val notification = NotificationCompat.Builder(context, OFFERS)
@@ -101,17 +114,27 @@ object Notifications {
             .setContentText(text)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            // On the lock screen: no names, and answering needs an unlock.
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(lockScreen(context, OFFERS, "A device wants to send you files"))
             .setAutoCancel(true)
             // The question lapses after a minute anyway.
             .setTimeoutAfter(60_000)
             .setContentIntent(openApp(context))
             .addAction(0, "Decline", answer(false))
-            .addAction(0, "Accept", answer(true))
+            .addAction(0, if (pairing) "Pair" else "Accept", answer(true))
             .build()
         notify(context, offerId(id), notification)
     }
 
     fun cancelOffer(context: Context, id: Long) = cancel(context, offerId(id))
+
+    /** What a private notification shows on the lock screen. */
+    private fun lockScreen(context: Context, channel: String, title: String): Notification =
+        NotificationCompat.Builder(context, channel)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle(title)
+            .build()
 
     private fun offerId(id: Long) = 2000 + (id % 100_000).toInt()
 

@@ -51,3 +51,16 @@ What this says:
 | 2026-10-20 | uncommitted (Phase 1 step 4) | Loopback, TLS + BLAKE3 + resume checkpoints (sync every 256 MiB) | Same Windows PC, release build | 1 × 2 GB random file, 6 runs | 344 / 549 / 439 / 498 / 514 / 433 (mean 463) | not measured | not measured | A/B, alternating runs. |
 | 2026-10-20 | uncommitted (Phase 1 step 4) | Same, checkpoints disabled (A/B control) | Same Windows PC, release build | 1 × 2 GB random file, 6 runs | 535 / 473 / 563 / 467 / 509 / 414 (mean 494) | not measured | not measured | ~6% gap, inside the ±100 MB/s run-to-run noise. Checkpoints kept. |
 | 2026-10-22 | uncommitted (buffer pool) | Loopback, protocol over TLS, memory → memory | Same Windows PC, release build | 2 GB generated, `nudge bench --size 2G` | before 417; after 742 / 569 | before 4.74 CPU s/GB; after 2.67 / 3.60 | not measured | Reused 1 MB buffers instead of allocating and zeroing one per buffer on both sides. Raw TLS on the same runs: 660–787 MB/s, so the protocol now runs close to TLS speed. |
+
+## Many small files (`many_small_files`)
+
+2026-10-23, uncommitted (Phase 4: packs), this Windows PC, two nodes over loopback TLS, 1,000 files × 10 KB, from send until every file is saved:
+`cargo test --release -p nudge-core --lib many_small_files -- --ignored --nocapture`
+
+| Version | Time | Per file |
+|---|---|---|
+| One transfer per file (before) | 8.44 s | 8.4 ms |
+| Packs, each unpacked file synced to disk | 1.63 / 1.65 s | 1.6 ms |
+| Packs, unpacked files not synced one by one (kept) | 0.71 / 0.74 s | 0.7 ms |
+
+Over Wi-Fi the gap widens: each file sent on its own also waits several network round trips.

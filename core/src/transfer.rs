@@ -21,6 +21,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::identity::Fingerprint;
+use crate::pack;
 use crate::protocol::{Batch, HASH_LEN, Offer, Response};
 use crate::resume::{self, MetaWriter, TransferKey, with_suffix};
 use crate::{Error, Result};
@@ -236,6 +237,7 @@ where
         size: metadata.len(),
         modified: modified_time(&metadata),
         batch: batch.unwrap_or(Batch::single(metadata.len())),
+        pack: false,
     };
     send_from_tracked(stream, file, offer, progress).await
 }
@@ -391,12 +393,34 @@ pub struct Landed {
     partial: resume::Partial,
     dir: PathBuf,
     name: String,
+    /// Where it goes under `dir`, for a file from a folder ("Trip/a.txt").
+    parts: Vec<String>,
+    /// A pack of files, unpacked when kept (see `pack`).
+    pack: bool,
     pub stats: TransferStats,
 }
 
 impl Landed {
-    /// Give it its real name: it's received.
+    /// Give it its real name (or unpack it): it's received. For a pack,
+    /// the path is the folder that arrived, or the download folder.
     pub fn keep(self) -> Result<ReceivedFile> {
+        if self.pack {
+            let path = pack::unpack(&self.partial.part_path(), &self.dir);
+            self.partial.remove();
+            return Ok(ReceivedFile {
+                path: path?,
+                stats: self.stats,
+            });
+        }
+        if self.parts.len() > 1 {
+            let final_path = pack::place(&self.dir, &self.parts)?;
+            fs::rename(self.partial.part_path(), &final_path)?;
+            resume::finish(&self.partial);
+            return Ok(ReceivedFile {
+                path: final_path,
+                stats: self.stats,
+            });
+        }
         // Pick the final name now: something may have taken it since we started.
         let final_path = if self.partial.base.exists() {
             unique_path(&self.dir, &self.name)
@@ -437,13 +461,21 @@ where
 {
     let start = Instant::now();
     let size = offer.size;
-    let name = match sanitize_file_name(&offer.name) {
-        Ok(name) => name,
+    // A file from a folder ("Trip/a.txt") lands under a flat name and moves
+    // into its folder when kept. A pack's name is only for showing.
+    let checked = if offer.pack {
+        sanitize_file_name(&offer.name).map(|name| (name, Vec::new()))
+    } else {
+        pack::safe_relative(&offer.name).map(|parts| (parts.join("_"), parts))
+    };
+    let (name, parts) = match checked {
+        Ok(checked) => checked,
         Err(e) => {
             let _ = Response::Reject.write_to(stream).await;
             return Err(e);
         }
     };
+    let pack = offer.pack;
     let key = TransferKey {
         peer: peer.map_or([0; 32], |p| *p.as_bytes()),
         name: offer.name,
@@ -471,6 +503,8 @@ where
         partial,
         dir: dir.to_owned(),
         name,
+        parts,
+        pack,
         stats: TransferStats {
             bytes: pos - offset,
             resumed_from: offset,

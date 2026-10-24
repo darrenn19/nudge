@@ -17,23 +17,21 @@ import io.flutter.plugin.common.MethodChannel
 import java.util.concurrent.Executors
 
 /**
- * The window. Uses the engine [NudgeApplication] started, so closing the
- * window doesn't stop transfers.
+ * The window. Its Flutter engine lives only while it's open: the core runs
+ * without it (see [NudgeApplication]), so closing the window frees the
+ * memory and transfers carry on.
  *
- * Also where files come in to be sent: from the share sheet, the quick
- * settings tile, or the in-app picker. They wait in [incoming] until Dart
- * collects them with `takeShared`.
+ * Files come here to have a device chosen: from [ShareActivity] when there
+ * was a choice, from the quick settings tile, or the in-app picker. They
+ * wait in [Inbox] until Dart collects them with `takeShared`.
  */
 class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
+    private var platform: MethodChannel? = null
     private var pendingPick: MethodChannel.Result? = null
-    private val incoming = mutableListOf<Map<String, Any>>()
+    private var pendingFolder: MethodChannel.Result? = null
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
-
-    override fun getCachedEngineId(): String = NudgeApplication.ENGINE_ID
-
-    override fun shouldDestroyEngineWithHost(): Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -48,16 +46,26 @@ class MainActivity : FlutterActivity() {
         handle(intent)
     }
 
+    override fun onResume() {
+        super.onResume()
+        Background.inFront = true
+    }
+
+    override fun onPause() {
+        Background.inFront = false
+        super.onPause()
+    }
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        platform = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PlatformChannel.NAME)
+            .apply { setMethodCallHandler(PlatformChannel(applicationContext)) }
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).apply {
             setMethodCallHandler { call, result ->
                 when (call.method) {
-                    "takeShared" -> {
-                        result.success(incoming.toList())
-                        incoming.clear()
-                    }
+                    "takeShared" -> result.success(Inbox.take())
                     "pickFiles" -> pick(result)
+                    "pickFolder" -> pickFolder(result)
                     "moveToBack" -> {
                         moveTaskToBack(true)
                         result.success(null)
@@ -70,6 +78,22 @@ class MainActivity : FlutterActivity() {
                         askForDirectLink()
                         result.success(null)
                     }
+                    // Samsung puts apps to sleep even with the battery
+                    // exemption; only "Never sleeping apps" keeps them awake.
+                    "needsSleepGuide" -> {
+                        val prefs = getSharedPreferences("nudge", MODE_PRIVATE)
+                        val samsung = Build.MANUFACTURER.equals("samsung", ignoreCase = true)
+                        result.success(samsung && !prefs.getBoolean("sleepGuided", false))
+                    }
+                    "openSleepSettings" -> {
+                        getSharedPreferences("nudge", MODE_PRIVATE).edit().putBoolean("sleepGuided", true).apply()
+                        openSleepSettings()
+                        result.success(null)
+                    }
+                    "sleepGuideDismissed" -> {
+                        getSharedPreferences("nudge", MODE_PRIVATE).edit().putBoolean("sleepGuided", true).apply()
+                        result.success(null)
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -79,48 +103,75 @@ class MainActivity : FlutterActivity() {
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
         channel?.setMethodCallHandler(null)
         channel = null
+        platform?.setMethodCallHandler(null)
+        platform = null
         super.cleanUpFlutterEngine(flutterEngine)
     }
 
-    /** Files shared with Nudge, or a request from the tile to pick some. */
+    /** Files waiting for a device ([ShareActivity]), or a request from the tile to pick some. */
     private fun handle(intent: Intent?) {
         if (intent == null || intent.flags and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0) return
-        if (intent.action in SEND_ACTIONS) {
-            // Lets Dart open a connection while the files are still being
-            // opened (or picked), so sending starts the moment they're ready.
-            channel?.invokeMethod("shareStarting", null)
-        }
-        // "Share by QR code" in the share sheet: for someone without Nudge.
-        val byQr = intent.component?.className?.endsWith(SHARE_BY_QR) == true
         when (intent.action) {
-            Intent.ACTION_SEND -> {
-                val uri = intent.stream()
-                val text = intent.getStringExtra(Intent.EXTRA_TEXT)
-                when {
-                    uri != null -> open(listOf(uri), byQr)
-                    // A link or a note: onto the other devices' clipboards.
-                    !text.isNullOrBlank() && !byQr -> channel?.invokeMethod("sharedText", text)
-                    !text.isNullOrBlank() -> worker.execute { deliver(listOf(SharedFiles.text(this, text)), byQr) }
-                }
+            ACTION_SHARED -> channel?.invokeMethod("sharedAvailable", null)
+            // From the "Send latest" tile: photo access first, or a device
+            // to choose.
+            ACTION_ASK_PHOTOS -> requestPermissions(Latest.permissions, PHOTOS_REQUEST)
+            ACTION_SEND_LATEST -> latestToWindow()
+            ACTION_PICK_FILES -> {
+                // Lets Dart open connections while the user picks.
+                channel?.invokeMethod("shareStarting", null)
+                pick(null)
             }
-            Intent.ACTION_SEND_MULTIPLE -> open(intent.streams(), byQr)
-            ACTION_PICK_FILES -> pick(null)
         }
-        // Don't handle the same share twice if the activity is recreated.
+        // Don't handle the same request twice if the activity is recreated.
         setIntent(Intent(this, MainActivity::class.java))
     }
 
     /** Opening can mean copying (see [SharedFiles]), so it happens off the UI thread. */
-    private fun open(uris: List<Uri>, byQr: Boolean = false) {
+    private fun open(uris: List<Uri>) {
         if (uris.isEmpty()) return
-        worker.execute { deliver(uris.mapNotNull { SharedFiles.open(this, it) }, byQr) }
+        worker.execute {
+            val files = uris.mapNotNull { SharedFiles.open(this, it) }
+            main.post {
+                if (files.isEmpty()) return@post
+                Inbox.add(files)
+                channel?.invokeMethod("sharedAvailable", null)
+            }
+        }
     }
 
-    /** [byQr] marks files for someone without Nudge (see `takeShared` in Dart). */
-    private fun deliver(files: List<Map<String, Any>>, byQr: Boolean = false) = main.post {
-        if (files.isEmpty()) return@post
-        incoming.addAll(if (byQr) files.map { it + ("byQr" to true) } else files)
-        channel?.invokeMethod("sharedAvailable", null)
+    /** The newest photo or video, waiting for a device to be chosen here. */
+    private fun latestToWindow() = worker.execute {
+        val file = Latest.find(this)?.let { SharedFiles.open(this, it.uri) }
+        main.post {
+            if (file == null) {
+                android.widget.Toast.makeText(this, "No photo or download to send", android.widget.Toast.LENGTH_SHORT).show()
+                return@post
+            }
+            Inbox.add(listOf(file))
+            channel?.invokeMethod("sharedAvailable", null)
+        }
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != PHOTOS_REQUEST || grantResults.none { it == PackageManager.PERMISSION_GRANTED }) return
+        // Allowed: do what the tile was tapped for.
+        worker.execute {
+            when (Latest.send(this)) {
+                Latest.Result.SENT -> main.post { moveTaskToBack(true) }
+                Latest.Result.CHOOSE -> latestToWindow()
+                Latest.Result.NONE -> Latest.say(this, "No photo or download to send")
+            }
+        }
+    }
+
+    /** Pick a folder to send: its files go back to [result] (see [Folders]). */
+    private fun pickFolder(result: MethodChannel.Result) {
+        pendingFolder?.success(emptyList<Any>())
+        pendingFolder = result
+        @Suppress("DEPRECATION") // FlutterActivity isn't a ComponentActivity.
+        startActivityForResult(Intent(Intent.ACTION_OPEN_DOCUMENT_TREE), FOLDER_REQUEST)
     }
 
     /** Pick files to send. With a [result], they go back to that call; otherwise they arrive like a share. */
@@ -139,6 +190,21 @@ class MainActivity : FlutterActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == FOLDER_REQUEST) {
+            val result = pendingFolder
+            pendingFolder = null
+            val tree = data?.data
+            if (result == null || tree == null) {
+                result?.success(emptyList<Any>())
+                return
+            }
+            // Walking and opening every file can take a moment.
+            worker.execute {
+                val files = runCatching { Folders.open(this, tree) }.getOrDefault(emptyList())
+                main.post { result.success(files) }
+            }
+            return
+        }
         if (requestCode != PICK_REQUEST) return
         val result = pendingPick
         pendingPick = null
@@ -204,33 +270,33 @@ class MainActivity : FlutterActivity() {
         requestPermissions(arrayOf(permission), 2)
     }
 
+    /**
+     * Samsung's Settings → Battery → Background usage limits, where "Never
+     * sleeping apps" lives; the app's own settings page if that isn't there.
+     */
+    private fun openSleepSettings() {
+        val samsung = Intent("com.samsung.android.sm.ACTION_START_APP_POWER_MANAGEMENT_SETTING")
+        runCatching { startActivity(samsung) }.onFailure {
+            runCatching {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+            }
+        }
+    }
+
     override fun onDestroy() {
         worker.shutdown()
         super.onDestroy()
     }
 
-    private fun Intent.stream(): Uri? =
-        if (Build.VERSION.SDK_INT >= 33) {
-            getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            getParcelableExtra(Intent.EXTRA_STREAM)
-        }
-
-    private fun Intent.streams(): List<Uri> =
-        if (Build.VERSION.SDK_INT >= 33) {
-            getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)
-        } else {
-            @Suppress("DEPRECATION")
-            getParcelableArrayListExtra(Intent.EXTRA_STREAM)
-        }.orEmpty()
-
     companion object {
         const val CHANNEL = "nudge/activity"
         const val ACTION_PICK_FILES = "io.github.darrenn19.nudge.PICK_FILES"
+        /** Files are waiting in [Inbox] for a device to be chosen. */
+        const val ACTION_SHARED = "io.github.darrenn19.nudge.SHARED"
+        const val ACTION_ASK_PHOTOS = "io.github.darrenn19.nudge.ASK_PHOTOS"
+        const val ACTION_SEND_LATEST = "io.github.darrenn19.nudge.SEND_LATEST"
+        private const val PHOTOS_REQUEST = 3
         private const val PICK_REQUEST = 4201
-        /** The share sheet entry declared as an alias of this activity. */
-        private const val SHARE_BY_QR = ".ShareByQr"
-        private val SEND_ACTIONS = setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE, ACTION_PICK_FILES)
+        private const val FOLDER_REQUEST = 4202
     }
 }

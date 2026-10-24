@@ -86,7 +86,7 @@ class TransferNotifier {
     for (final t in controller.transfers) {
       if (t.incoming && t.state == TransferState.done && _announced.add(t.id)) {
         final from = controller.deviceById(t.deviceId)?.name ?? '';
-        if (t.path case final path?) unawaited(_announce(path, from));
+        if (t.path case final path?) unawaited(_announce(path, from, t.fileName));
       }
     }
     // Progress events arrive many times a second; the notification needs one.
@@ -98,13 +98,13 @@ class TransferNotifier {
 
   /// "Received photo.jpg": a notification or toast, unless Nudge is on
   /// screen and shows it itself.
-  Future<void> _announce(String path, String from) async {
+  Future<void> _announce(String path, String from, String name) async {
     if (await _onScreen()) {
       await indexReceived(path);
       return;
     }
     await notifyReceived(path: path, from: from);
-    await showReceivedToast(path: path, from: from);
+    await showReceivedToast(path: path, from: from, name: name);
   }
 
   bool _holding = false;

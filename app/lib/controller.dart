@@ -120,11 +120,14 @@ class Transfer {
 /// they came from another app, which Nudge then returns to once sending starts.
 /// [byQr] means they're for someone without Nudge: show the QR code.
 class FilesToSend {
-  const FilesToSend(this.files, {required this.fromOutside, this.byQr = false});
+  const FilesToSend(this.files, {required this.fromOutside, this.byQr = false, this.to});
 
   final List<OutgoingFile> files;
   final bool fromOutside;
   final bool byQr;
+
+  /// The device chosen already (a Direct Share target): no need to ask.
+  final String? to;
 }
 
 /// A paired device asking to send files; answer with
@@ -165,16 +168,78 @@ class PairAsk {
   final String code;
 }
 
+/// What happens to files sent while this device is locked.
+enum WhenLocked {
+  /// As when unlocked: devices set to "always accept" send without a
+  /// question, others are asked (only paired devices can send at all).
+  paired('Paired devices', 'usual'),
+
+  /// Ask about every send, even from devices set to "always accept".
+  ask('Ask me', 'ask'),
+
+  /// Decline every send until unlocked.
+  never('Never', 'refuse');
+
+  const WhenLocked(this.label, this._mode);
+
+  final String label;
+  final String _mode;
+}
+
 /// What the sender hears back: the receiver's answer.
 enum Answer { accepted, declined, noAnswer }
 
 class NudgeController extends ChangeNotifier {
   NudgeController(this.app, {String? dataDir})
-    : _orderFile = dataDir == null ? null : File('$dataDir${Platform.pathSeparator}order.json') {
+    : _orderFile = dataDir == null ? null : File('$dataDir${Platform.pathSeparator}order.json'),
+      _lockedFile = dataDir == null
+          ? null
+          : File('$dataDir${Platform.pathSeparator}when_locked.txt') {
     _subscription = app.events().listen(_onEvent);
     devices = app.devices();
     webShareUrl = app.webShareUrl();
     _loadOrder();
+    _loadWhenLocked();
+    // Android's background service applies it as the phone locks.
+    if (!Platform.isAndroid) unawaited(listenForLock(_setLocked));
+  }
+
+  // Files while locked. The choice is kept beside the identity; the core is
+  // told what applies right now each time the lock or the choice changes.
+  final File? _lockedFile;
+  WhenLocked whenLocked = WhenLocked.paired;
+  bool _locked = false;
+
+  void _loadWhenLocked() {
+    try {
+      final saved = _lockedFile?.readAsStringSync().trim();
+      whenLocked = WhenLocked.values.firstWhere((w) => w.name == saved);
+    } catch (_) {
+      whenLocked = WhenLocked.paired;
+    }
+    _applyReceiving();
+  }
+
+  void setWhenLocked(WhenLocked choice) {
+    whenLocked = choice;
+    try {
+      _lockedFile?.writeAsStringSync(choice.name);
+    } catch (_) {
+      // Applies for now; it just won't stick.
+    }
+    _applyReceiving();
+    unawaited(whenLockedChanged());
+    notifyListeners();
+  }
+
+  void _setLocked(bool locked) {
+    _locked = locked;
+    _applyReceiving();
+  }
+
+  void _applyReceiving() {
+    if (Platform.isAndroid) return; // see listenForLock above
+    app.setReceiving(mode: _locked ? whenLocked._mode : WhenLocked.paired._mode);
   }
 
   final NudgeApp app;
@@ -367,10 +432,10 @@ class NudgeController extends ChangeNotifier {
     }
   }
 
-  void offer(List<OutgoingFile> files, {bool fromOutside = true, bool byQr = false}) {
+  void offer(List<OutgoingFile> files, {bool fromOutside = true, bool byQr = false, String? to}) {
     if (files.isEmpty) return;
-    if (!byQr) warmUp();
-    final request = FilesToSend(files, fromOutside: fromOutside, byQr: byQr);
+    if (!byQr) warmUp(to == null ? null : deviceById(to));
+    final request = FilesToSend(files, fromOutside: fromOutside, byQr: byQr, to: to);
     _toSend.hasListener ? _toSend.add(request) : _unclaimed.add(request);
   }
 
@@ -487,11 +552,12 @@ class NudgeController extends ChangeNotifier {
       case AppEvent_ClipboardReceived(:final deviceId, :final text):
         _clipboardArrived(deviceId, text);
         return;
+      // Android's background service runs the hotspot.
       case AppEvent_HotspotWanted(:final id):
-        unawaited(_startHotspot(id));
+        if (!Platform.isAndroid) unawaited(_startHotspot(id));
         return;
       case AppEvent_HotspotDone():
-        unawaited(stopHotspot());
+        if (!Platform.isAndroid) unawaited(stopHotspot());
         return;
       case AppEvent_JoinWanted(:final id, :final ssid, :final passphrase, :final wpa3):
         unawaited(_joinHotspot(id, ssid, passphrase, wpa3));
@@ -571,12 +637,16 @@ class NudgeController extends ChangeNotifier {
   /// them isn't sent back.
   /// With [again], it goes even if it's what was sent or received last
   /// (the user shared it on purpose).
-  Future<List<String>> shareClipboard(String text, {bool again = false}) async {
+  /// With [to], it goes to that device only, whether or not it syncs the
+  /// clipboard (the user picked it).
+  Future<List<String>> shareClipboard(String text, {bool again = false, String? to}) async {
     if (text.isEmpty) return const [];
     // What just arrived (and so is on the clipboard now) isn't news.
     if (text == _lastClip && !again) return const [];
     _lastClip = text;
-    final targets = pairedDevices.where((d) => d.clipboard && d.reachable).toList();
+    final targets = to != null
+        ? pairedDevices.where((d) => d.id == to).toList()
+        : pairedDevices.where((d) => d.clipboard && d.reachable).toList();
     final reached = <String>[];
     await Future.wait([
       for (final d in targets)
@@ -595,8 +665,8 @@ class NudgeController extends ChangeNotifier {
 
   /// [shareClipboard], and say where it went. With [leave], go back to the
   /// app it was shared from.
-  Future<void> shareClipboardAndSay(String text, {bool leave = false}) async {
-    final reached = await shareClipboard(text, again: leave);
+  Future<void> shareClipboardAndSay(String text, {bool leave = false, String? to}) async {
+    final reached = await shareClipboard(text, again: leave, to: to);
     if (reached.isNotEmpty) {
       _notes.add('Copied to ${reached.join(', ')}');
       if (leave) await leaveApp();
@@ -607,7 +677,8 @@ class NudgeController extends ChangeNotifier {
 
   Future<void> _clipboardArrived(String deviceId, String text) async {
     _lastClip = text;
-    await setClipboardText(text);
+    // Android's background service already put it there.
+    if (!Platform.isAndroid) await setClipboardText(text);
     _clips.add((deviceById(deviceId)?.name ?? 'A paired device', text));
   }
 

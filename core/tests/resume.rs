@@ -55,6 +55,7 @@ async fn interrupted_send(
         size: data.len() as u64,
         modified: modified_time(&std::fs::metadata(src).unwrap()),
         batch: nudge_core::protocol::Batch::single(data.len() as u64),
+        pack: false,
     }
     .write_to(&mut stream)
     .await

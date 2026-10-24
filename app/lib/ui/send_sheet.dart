@@ -28,7 +28,10 @@ Future<void> chooseAndSend(
     ...controller.browserDevices.where((d) => d.online),
   ];
   final reachable = controller.pairedDevices.where((d) => d.reachable).toList();
-  final choice = nearby.length == 1
+  final chosen = request.to == null ? null : controller.deviceById(request.to!);
+  final choice = chosen != null && chosen.paired
+      ? chosen
+      : nearby.length == 1
       ? nearby.single
       : nearby.isEmpty && reachable.length == 1
       ? reachable.single

@@ -22,12 +22,13 @@ use tokio::task::JoinHandle;
 use crate::discovery::{Announcement, DiscoveredPeer, Discovery, DiscoveryConfig, DiscoveryEvent};
 use crate::identity::{Fingerprint, Identity, TrustedPeers, clean_name};
 use crate::link::{LinkKind, Speeds};
+use crate::pack::{self, PACK_FILE_MAX, PACK_MAX_BYTES, PACK_MAX_FILES, PACK_MIN_FILES, Pack};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
 use crate::protocol::{
     AwaitAnswer, Batch, Clip, Offer, PairAsk, PairReply, PairRequest, Request, Response, Status,
 };
 use crate::transfer::{
-    Landed, Progress, TransferStats, land, receive_offered, send_file_tracked,
+    Landed, Progress, TransferStats, land, receive_offered, send_file_tracked, send_from_tracked,
     send_open_file_tracked,
 };
 use crate::{DEFAULT_PORT, Error, Result, Tls};
@@ -146,14 +147,21 @@ pub struct Peer {
 /// A file to send.
 #[derive(Debug)]
 pub enum Outgoing {
+    /// A file, or a folder: everything in it goes, in its own folder on the
+    /// other side.
     Path(PathBuf),
     /// Already open, sent under `name`. Android shares files this way: the
     /// app gets an open descriptor, not a path, and reading it directly
     /// avoids copying the file first.
-    Open {
-        file: std::fs::File,
-        name: String,
-    },
+    Open { file: std::fs::File, name: String },
+    /// A file from a folder, sent under its path in that folder
+    /// ("Trip/day 1/notes.txt"). Made by `expand`.
+    InFolder { path: PathBuf, name: String },
+    /// A folder with nothing in it ("Trip/empty"), so it arrives too.
+    /// Made by `expand`; only ever sent in a pack.
+    EmptyFolder { name: String },
+    /// Small files together, as one transfer. Made by `pack_small`.
+    Pack(Pack),
 }
 
 impl Outgoing {
@@ -163,14 +171,29 @@ impl Outgoing {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
-            Self::Open { name, .. } => name.clone(),
+            Self::Open { name, .. } | Self::InFolder { name, .. } | Self::EmptyFolder { name } => {
+                name.clone()
+            }
+            Self::Pack(pack) => pack.display_name(),
         }
     }
 
     fn size(&self) -> u64 {
         match self {
-            Self::Path(path) => std::fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+            Self::Path(path) | Self::InFolder { path, .. } => {
+                std::fs::metadata(path).map(|m| m.len()).unwrap_or(0)
+            }
             Self::Open { file, .. } => file.metadata().map(|m| m.len()).unwrap_or(0),
+            Self::EmptyFolder { .. } => 0,
+            Self::Pack(pack) => pack.size(),
+        }
+    }
+
+    /// How many files it is.
+    fn files(&self) -> usize {
+        match self {
+            Self::Pack(pack) => pack.len(),
+            _ => 1,
         }
     }
 
@@ -182,8 +205,132 @@ impl Outgoing {
                 file: file.try_clone()?,
                 name: name.clone(),
             },
+            Self::InFolder { path, name } => Self::InFolder {
+                path: path.clone(),
+                name: name.clone(),
+            },
+            Self::EmptyFolder { name } => Self::EmptyFolder { name: name.clone() },
+            Self::Pack(pack) => Self::Pack(pack.try_clone()?),
         })
     }
+}
+
+/// Folders become the files in them, each named by its path from the
+/// folder ("Trip/day 1/notes.txt"), and their empty folders. Links aren't
+/// followed.
+fn expand(items: Vec<Outgoing>) -> Vec<Outgoing> {
+    fn walk(dir: &std::path::Path, name: &str, depth: usize, out: &mut Vec<Outgoing>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = entries.flatten().collect();
+        if entries.is_empty() {
+            out.push(Outgoing::EmptyFolder {
+                name: format!("{name}/"),
+            });
+            return;
+        }
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let child = format!("{name}/{}", entry.file_name().to_string_lossy());
+            if kind.is_dir() && depth < 63 {
+                walk(&entry.path(), &child, depth + 1, out);
+            } else if kind.is_file() {
+                out.push(Outgoing::InFolder {
+                    path: entry.path(),
+                    name: child,
+                });
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Outgoing::Path(path) if path.is_dir() => {
+                let name = item_name(&path);
+                walk(&path, &name, 1, &mut out);
+            }
+            item => out.push(item),
+        }
+    }
+    out
+}
+
+fn item_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Folder".into())
+}
+
+/// Many small files go as packs (see `pack`), ahead of the large ones,
+/// which go on their own. A few files go as they are, unless there's an
+/// empty folder: only a pack can carry one.
+fn pack_small(items: Vec<Outgoing>) -> Vec<Outgoing> {
+    let small =
+        |item: &Outgoing| !matches!(item, Outgoing::Pack(_)) && item.size() <= PACK_FILE_MAX;
+    let folders = items
+        .iter()
+        .any(|item| matches!(item, Outgoing::EmptyFolder { .. }));
+    if !folders && items.iter().filter(|item| small(item)).count() < PACK_MIN_FILES {
+        return items;
+    }
+    let (smalls, large): (Vec<_>, Vec<_>) = items.into_iter().partition(small);
+    let mut out = Vec::new();
+    let mut entries = Vec::new();
+    let mut bytes = 0u64;
+    for item in smalls {
+        let Some(entry) = pack_entry(item) else {
+            continue;
+        };
+        if !entries.is_empty()
+            && (entries.len() >= PACK_MAX_FILES || bytes + entry.size > PACK_MAX_BYTES)
+        {
+            out.push(Outgoing::Pack(Pack::new(std::mem::take(&mut entries))));
+            bytes = 0;
+        }
+        bytes += entry.size;
+        entries.push(entry);
+    }
+    if !entries.is_empty() {
+        out.push(Outgoing::Pack(Pack::new(entries)));
+    }
+    out.extend(large);
+    out
+}
+
+fn pack_entry(item: Outgoing) -> Option<pack::Entry> {
+    let (path, source, metadata) = match item {
+        Outgoing::Path(path) => {
+            let metadata = std::fs::metadata(&path).ok()?;
+            (item_name(&path), pack::Source::Path(path), metadata)
+        }
+        Outgoing::InFolder { path, name } => {
+            let metadata = std::fs::metadata(&path).ok()?;
+            (name, pack::Source::Path(path), metadata)
+        }
+        Outgoing::Open { file, name } => {
+            let metadata = file.metadata().ok()?;
+            (name, pack::Source::File(file), metadata)
+        }
+        Outgoing::EmptyFolder { name } => {
+            return Some(pack::Entry {
+                path: name,
+                size: 0,
+                modified: 0,
+                source: pack::Source::Folder,
+            });
+        }
+        Outgoing::Pack(_) => return None,
+    };
+    metadata.is_file().then(|| pack::Entry {
+        path,
+        size: metadata.len(),
+        modified: crate::transfer::modified_time(&metadata),
+        source,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,12 +486,27 @@ struct Shared {
     ask: bool,
     /// Paired devices whose files are accepted without asking.
     auto_accept: Mutex<HashSet<Fingerprint>>,
+    receiving: Mutex<Receiving>,
     /// Paired devices the clipboard doesn't sync with.
     clip_off: Mutex<HashSet<Fingerprint>>,
     /// Measured speeds per device and path.
     speeds: Speeds,
     /// May set up a direct link (the phone's hotspot) for big transfers.
     direct_link: std::sync::atomic::AtomicBool,
+}
+
+/// How incoming files are treated right now. The app sets it from things
+/// the core doesn't know about, such as whether the device is locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Receiving {
+    /// The usual rules: auto-accepted devices send without a question,
+    /// others are asked about.
+    #[default]
+    Usual,
+    /// Ask about every send, even from auto-accepted devices.
+    Ask,
+    /// Decline every send without asking.
+    Refuse,
 }
 
 /// What became of a question about files.
@@ -638,6 +800,7 @@ impl Node {
             platform: config.platform.clone(),
             ask: config.ask_before_receiving,
             auto_accept: Mutex::new(auto_accept),
+            receiving: Mutex::default(),
             clip_off: Mutex::new(clip_off),
             speeds,
             direct_link: std::sync::atomic::AtomicBool::new(direct_link),
@@ -946,6 +1109,16 @@ impl Node {
         self.shared.direct_link.load(Ordering::Relaxed)
     }
 
+    /// How incoming files are treated from now on (see [`Receiving`]).
+    /// Not saved: the app sets it again as things change.
+    pub fn set_receiving(&self, receiving: Receiving) {
+        *self
+            .shared
+            .receiving
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = receiving;
+    }
+
     pub fn set_direct_link(&self, on: bool) -> Result<()> {
         self.shared.direct_link.store(on, Ordering::Relaxed);
         let file = self.shared.data_dir.join(DIRECT_LINK_OFF_FILE);
@@ -1055,7 +1228,21 @@ impl Node {
     }
 
     /// `send_files` for any mix of paths and already-open files.
+    ///
+    /// Folders go with everything in them. Many small files go as packs
+    /// (one transfer each, see `pack`), so there are fewer IDs than files.
     pub fn send(&self, peer: Fingerprint, items: Vec<Outgoing>) -> Vec<u64> {
+        let items = expand(items);
+        // Browsers download files one by one.
+        let items = if web::is_browser(&self.shared, &peer) {
+            // A browser downloads files; it has nowhere to put a folder.
+            items
+                .into_iter()
+                .filter(|item| !matches!(item, Outgoing::EmptyFolder { .. }))
+                .collect()
+        } else {
+            pack_small(items)
+        };
         let jobs: Vec<(u64, Outgoing)> = items
             .into_iter()
             .map(|item| (self.shared.next_id.fetch_add(1, Ordering::Relaxed), item))
@@ -1070,7 +1257,7 @@ impl Node {
             let count = jobs.len();
             let batch = Batch {
                 id: u64::from_be_bytes(pairing::random_bytes()).max(1),
-                count: count as u32,
+                count: jobs.iter().map(|(_, item)| item.files()).sum::<usize>() as u32,
                 size: jobs.iter().map(|(_, item)| item.size()).sum(),
             };
             // If they're asked, the files still go, one after another; the
@@ -1093,8 +1280,10 @@ impl Node {
                 });
                 let progress = shared.track(id, peer, size);
                 let source = match &item {
-                    Outgoing::Path(path) => path.clone(),
-                    Outgoing::Open { .. } => PathBuf::from(&name),
+                    Outgoing::Path(path) | Outgoing::InFolder { path, .. } => path.clone(),
+                    Outgoing::Open { .. } | Outgoing::Pack(_) | Outgoing::EmptyFolder { .. } => {
+                        PathBuf::from(&name)
+                    }
                 };
                 match out.verdict() {
                     Some(Verdict::No) => refused = Some(|| Error::Declined),
@@ -1225,7 +1414,14 @@ impl Shared {
         count: u32,
         size: u64,
     ) -> Asking {
-        if !self.ask || self.auto_accepts(&peer) || web::always_accepts(self, &peer) {
+        let receiving = *self.receiving.lock().unwrap_or_else(|e| e.into_inner());
+        if receiving == Receiving::Refuse {
+            return Asking::Now(Verdict::No);
+        }
+        let ask_anyway = receiving == Receiving::Ask;
+        if !ask_anyway
+            && (!self.ask || self.auto_accepts(&peer) || web::always_accepts(self, &peer))
+        {
             return Asking::Now(Verdict::Yes);
         }
         let key = match batch {
@@ -2061,6 +2257,24 @@ async fn send_over(
         Outgoing::Open { file, name } => {
             send_open_file_tracked(stream, file, name, Some(batch), progress).await?
         }
+        Outgoing::InFolder { path, name } => {
+            let file = std::fs::File::open(&path)?;
+            send_open_file_tracked(stream, file, name, Some(batch), progress).await?
+        }
+        // Never on its own (see pack_small).
+        Outgoing::EmptyFolder { .. } => {
+            return Err(Error::Protocol("an empty folder goes in a pack"));
+        }
+        Outgoing::Pack(pack) => {
+            let offer = Offer {
+                name: pack.display_name(),
+                size: pack.size(),
+                modified: pack.fingerprint(),
+                batch,
+                pack: true,
+            };
+            send_from_tracked(stream, pack.reader()?, offer, progress).await?
+        }
     };
     let _ = stream.shutdown().await;
     Ok(stats)
@@ -2464,6 +2678,184 @@ mod tests {
         connect_any(&laptop.shared.tls, &addrs, phone.fingerprint())
             .await
             .unwrap();
-        assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// Refusing (say, while the phone is locked) declines without a question.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn refusing_declines_without_asking() {
+        let ((laptop, mut laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_pair().await;
+        phone.set_receiving(Receiving::Refuse);
+        let src = laptop_dir.path().join("a.bin");
+        std::fs::write(&src, vec![1u8; 10_000]).unwrap();
+        let ids = laptop.send_files(phone.fingerprint(), vec![src]);
+        let NodeEvent::TransferFailed { error, .. } = next(
+            &mut laptop_events,
+            |e| matches!(e, NodeEvent::TransferFailed { id, .. } if *id == ids[0]),
+        )
+        .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(error, "they declined");
+        while let Ok(e) = phone_events.try_recv() {
+            assert!(
+                !matches!(e, NodeEvent::OfferReceived { .. }),
+                "asked: {e:?}"
+            );
+        }
+        until(|| names_in(&phone_dir.path().join("downloads")).is_empty()).await;
+    }
+
+    /// "Ask" asks even about a device whose files are usually taken at once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn asking_overrides_auto_accept() {
+        let ((laptop, _laptop_events, laptop_dir), (phone, mut phone_events, _phone_dir)) =
+            paired_pair().await;
+        phone.set_auto_accept(&laptop.fingerprint(), true).unwrap();
+        phone.set_receiving(Receiving::Ask);
+        let src = laptop_dir.path().join("a.bin");
+        std::fs::write(&src, vec![1u8; 10_000]).unwrap();
+        laptop.send_files(phone.fingerprint(), vec![src]);
+        next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::OfferReceived { .. })
+        })
+        .await;
+    }
+
+    /// Many small files, end to end on this machine: how long until every
+    /// one is saved. A benchmark, not a check (`cargo test --release -p
+    /// nudge-core many_small_files -- --ignored --nocapture`).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore]
+    async fn many_small_files() {
+        let ((laptop, _laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_pair().await;
+        // The laptop takes files without asking; the phone sends.
+        let _ = &mut phone_events;
+        let src = phone_dir.path().join("small");
+        std::fs::create_dir_all(&src).unwrap();
+        let count = 1000;
+        let paths: Vec<PathBuf> = (0..count)
+            .map(|i| {
+                let path = src.join(format!("note {i:04}.txt"));
+                std::fs::write(&path, vec![b'x'; 10_000]).unwrap();
+                path
+            })
+            .collect();
+        let downloads = laptop_dir.path().join("downloads");
+        let started = Instant::now();
+        phone.send_files(laptop.fingerprint(), paths);
+        tokio::time::timeout(Duration::from_secs(600), async {
+            loop {
+                let saved = walk_count(&downloads);
+                if saved >= count {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("timed out");
+        let took = started.elapsed();
+        println!(
+            "{count} files x 10 KB: {:.2} s ({:.1} ms per file)",
+            took.as_secs_f64(),
+            took.as_secs_f64() * 1000.0 / count as f64
+        );
+    }
+
+    /// Finished files under `dir`, in any folder (partials don't count).
+    fn walk_count(dir: &std::path::Path) -> usize {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|e| {
+                let path = e.path();
+                if path.is_dir() {
+                    walk_count(&path)
+                } else {
+                    let name = path.to_string_lossy();
+                    usize::from(!name.ends_with(".nudgepart") && !name.ends_with(".nudgemeta"))
+                }
+            })
+            .sum()
+    }
+
+    /// A folder goes whole: small files packed into one transfer, the large
+    /// one on its own, and everything back in its folders on the other side.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sends_a_folder() {
+        let ((laptop, _laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_pair().await;
+        let trip = phone_dir.path().join("Trip");
+        std::fs::create_dir_all(trip.join("day 2")).unwrap();
+        for i in 0..6 {
+            std::fs::write(trip.join(format!("note {i}.txt")), format!("note {i}")).unwrap();
+        }
+        std::fs::write(trip.join("day 2/plan.txt"), "plan").unwrap();
+        std::fs::create_dir_all(trip.join("for later")).unwrap();
+        let big = vec![7u8; (PACK_FILE_MAX + 1) as usize];
+        std::fs::write(trip.join("day 2/video.mp4"), &big).unwrap();
+
+        // The laptop takes files without asking.
+        let ids = phone.send_files(laptop.fingerprint(), vec![trip]);
+        assert_eq!(ids.len(), 2, "one pack and one large file");
+        for id in &ids {
+            next(
+                &mut phone_events,
+                |e| matches!(e, NodeEvent::TransferDone { id: done, .. } if done == id),
+            )
+            .await;
+        }
+        let got = laptop_dir.path().join("downloads").join("Trip");
+        for i in 0..6 {
+            let text = std::fs::read_to_string(got.join(format!("note {i}.txt"))).unwrap();
+            assert_eq!(text, format!("note {i}"));
+        }
+        assert_eq!(
+            std::fs::read_to_string(got.join("day 2/plan.txt")).unwrap(),
+            "plan"
+        );
+        assert_eq!(std::fs::read(got.join("day 2/video.mp4")).unwrap(), big);
+        assert!(got.join("for later").is_dir(), "empty folders come too");
+        let _ = laptop;
+    }
+
+    /// Files shared as open descriptors (as Android shares them) are packed
+    /// too, and land loose in the download folder.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn packs_open_files() {
+        let ((laptop, _laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_pair().await;
+        let items: Vec<Outgoing> = (0..5)
+            .map(|i| {
+                let path = phone_dir.path().join(format!("shared {i}.txt"));
+                std::fs::write(&path, format!("shared {i}")).unwrap();
+                Outgoing::Open {
+                    file: std::fs::File::open(&path).unwrap(),
+                    name: format!("photo {i}.txt"),
+                }
+            })
+            .collect();
+        let ids = phone.send(laptop.fingerprint(), items);
+        assert_eq!(ids.len(), 1, "one pack");
+        next(
+            &mut phone_events,
+            |e| matches!(e, NodeEvent::TransferDone { id, .. } if *id == ids[0]),
+        )
+        .await;
+        let downloads = laptop_dir.path().join("downloads");
+        for i in 0..5 {
+            let text = std::fs::read_to_string(downloads.join(format!("photo {i}.txt"))).unwrap();
+            assert_eq!(text, format!("shared {i}"));
+        }
     }
 }

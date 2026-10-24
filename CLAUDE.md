@@ -60,7 +60,7 @@ Goal: AirDrop-like behaviour — send/receive with the app closed, receive while
   - Request the battery-optimization exemption (`REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) so Doze doesn't cut network access.
   - Samsung: onboarding must guide the user to add Nudge to **Never sleeping apps** (Settings → Battery → Background usage limits). See dontkillmyapp.com.
   - Reconnect fast: try each paired device's last known IP first, then mDNS. Hold the multicast lock only during discovery.
-- **Windows:** tray app that auto-starts at login (MSIX `windows.startupTask`, or registry Run key). Closing the window hides to tray; Quit lives in the tray menu. Installer adds a private-network firewall rule.
+- **Windows:** tray app that auto-starts at login (MSIX `windows.startupTask`, or registry Run key). Closing the window hides to tray; Quit lives in the tray menu. Installer adds firewall rules for all network types (home Wi-Fi is often marked Public; only paired devices can send).
 
 ### Receiving while locked
 - Android foreground service keeps receiving while locked. After a reboot, before first unlock, user storage is encrypted: queue or reject with "unlock phone once" message.
@@ -97,6 +97,10 @@ Goal: AirDrop-like behaviour — send/receive with the app closed, receive while
 
 **Testing:** use a real Samsung phone, locked overnight, then send to it in the morning — Doze and Samsung sleeping-apps behaviour don't reproduce in emulators.
 
+## Building
+- Windows MSIX: `powershell -File app\windows\packaging\package.ps1` (`-Install` registers it on this PC in Developer Mode). The package provides the Win11 top-level menu (`app/windows/shell`), Share panel, startup task and firewall rules.
+- Android: the Rust core runs in the process via JNI (`app/rust/src/android.rs` ↔ `Core.kt`); `Background.kt` handles events with no window. The Flutter window attaches to the same core.
+
 ## Platform notes
 - Android 10+ blocks background clipboard reads — clipboard sync phone→PC needs a tap (notification/share action) or a custom keyboard.
 - iOS (later): app can't create a hotspot (it joins one instead); background time is limited; share extensions have tight memory limits (hand off to main app); Local Network permission prompt; no USB file access; iPhone↔Mac can use AWDL via Network.framework peer-to-peer.
@@ -104,9 +108,9 @@ Goal: AirDrop-like behaviour — send/receive with the app closed, receive while
 ## Build order
 1. Rust core: stream one file over TLS between two desktop processes, with resume + BLAKE3 verify + a throughput benchmark.
 2. Android + Windows shells with discovery and QR pairing.
-3. Seamless mode: background process, locked receiving, OS integrations (see "Seamless mode" above). ← current focus
-4. Multi-file packing and folder transfer.
-5. Direct-link mode and start-then-upgrade switching.
+3. Seamless mode: background process, locked receiving, OS integrations (see "Seamless mode" above).
+4. Multi-file packing and folder transfer (packs: `core/src/pack.rs`; folders from Windows and Android, empty ones included).
+5. Direct-link mode and start-then-upgrade switching. ← next
 6. USB-C cable path.
 7. macOS, then iOS.
 

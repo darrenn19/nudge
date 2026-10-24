@@ -9,6 +9,14 @@ import 'package:path_provider/path_provider.dart';
 
 const _channel = MethodChannel('nudge/platform');
 
+/// What Android says through [_channel], by method. One handler serves all.
+final _fromAndroid = <String, void Function(Object? arguments)>{};
+
+void _onAndroid(String method, void Function(Object? arguments) handle) {
+  _fromAndroid[method] = handle;
+  _channel.setMethodCallHandler((call) async => _fromAndroid[call.method]?.call(call.arguments));
+}
+
 String get platformTag => Platform.isAndroid
     ? 'android'
     : Platform.isWindows
@@ -87,18 +95,39 @@ class OutgoingFile {
     final name = m['name'] as String? ?? 'file';
     final size = (m['size'] as num?)?.toInt() ?? 0;
     final fd = m['fd'] as int?;
+    final path = m['path'] as String?;
+    // An empty folder from a picked folder ("Trip/empty/"): no file at all.
+    if (fd == null && path == null) return OutgoingFile.fd(-1, name: name, size: 0);
     return fd != null
         ? OutgoingFile.fd(fd, name: name, size: size)
-        : OutgoingFile.path(m['path'] as String, name: name, size: size);
+        : OutgoingFile.path(path!, name: name, size: size);
   }
 
+  /// A file, or a folder (everything in it goes; its size is the total).
   static OutgoingFile fromPath(String path) {
     final file = File(path);
-    return OutgoingFile.path(
-      path,
-      name: path.split(RegExp(r'[\/]')).last,
-      size: file.existsSync() ? file.lengthSync() : 0,
-    );
+    final folder = Directory(path);
+    final int size;
+    if (file.existsSync()) {
+      size = file.lengthSync();
+    } else if (folder.existsSync()) {
+      size = _folderSize(folder);
+    } else {
+      size = 0;
+    }
+    return OutgoingFile.path(path, name: path.split(RegExp(r'[\\/]')).last, size: size);
+  }
+
+  static int _folderSize(Directory folder) {
+    var total = 0;
+    try {
+      for (final entry in folder.listSync(recursive: true, followLinks: false)) {
+        if (entry is File) total += entry.lengthSync();
+      }
+    } on FileSystemException {
+      // Unreadable parts aren't sent either.
+    }
+    return total;
   }
 }
 
@@ -106,6 +135,20 @@ class OutgoingFile {
 ///
 /// On Android these come back as open descriptors, read in place: no copy,
 /// however big the file.
+/// Desktop: let the user choose a folder to send (everything in it goes).
+///
+/// Android hands back the folder's files, each named by its path in the
+/// folder ("Trip/day 2/plan.jpg"); desktop hands back the folder itself.
+/// Either way it arrives as a folder. Empty when nothing was picked.
+Future<List<OutgoingFile>> pickFolder() async {
+  if (Platform.isAndroid) {
+    final picked = await _activity.invokeListMethod<Map<Object?, Object?>>('pickFolder');
+    return [for (final m in picked ?? const <Map<Object?, Object?>>[]) OutgoingFile.fromMap(m)];
+  }
+  final path = await FilePicker.getDirectoryPath(dialogTitle: 'Choose a folder to send');
+  return path == null ? const [] : [OutgoingFile.fromPath(path)];
+}
+
 Future<List<OutgoingFile>> pickFiles() async {
   if (Platform.isAndroid) {
     final picked = await _activity.invokeListMethod<Map<Object?, Object?>>('pickFiles');
@@ -120,7 +163,10 @@ Future<List<OutgoingFile>> pickFiles() async {
 
 /// Release files the user decided not to send.
 Future<void> closeUnsent(List<OutgoingFile> files) async {
-  final fds = [for (final f in files) ?f.fd];
+  final fds = [
+    for (final f in files)
+      if (f.fd case final fd? when fd >= 0) fd,
+  ];
   if (fds.isNotEmpty) await _channel.invokeMethod('closeFiles', {'fds': fds});
 }
 
@@ -130,12 +176,14 @@ const _activity = MethodChannel('nudge/activity');
 
 /// Calls [onFiles] with files shared to Nudge (share sheet, quick settings
 /// tile), now and whenever more arrive; `byQr` is set for files shared with
-/// "Share by QR code", meant for someone without Nudge. [onStarting] runs
-/// the moment a share or pick begins, before the files are ready.
+/// "Share by QR code", meant for someone without Nudge; `to` is the device
+/// picked in the share sheet's top row (Direct Share), if one was.
+/// [onStarting] runs the moment a share or pick begins, before the files
+/// are ready. [onText] gets shared or selected text.
 Future<void> listenForShares(
-  void Function(List<OutgoingFile> files, {bool byQr}) onFiles, {
+  void Function(List<OutgoingFile> files, {bool byQr, String? to}) onFiles, {
   void Function()? onStarting,
-  void Function(String text)? onText,
+  void Function(String text, {String? to})? onText,
 }) async {
   if (!Platform.isAndroid) return;
   Future<void> take() async {
@@ -143,15 +191,16 @@ Future<void> listenForShares(
       final shared = await _activity.invokeListMethod<Map<Object?, Object?>>('takeShared');
       if (shared == null) return;
       bool byQr(Map<Object?, Object?> m) => m['byQr'] == true;
-      final normal = [
-        for (final m in shared)
-          if (!byQr(m)) OutgoingFile.fromMap(m),
-      ];
+      // Grouped by the device they're for (null: ask).
+      final normal = <String?, List<OutgoingFile>>{};
+      for (final m in shared) {
+        if (!byQr(m)) (normal[m['to'] as String?] ??= []).add(OutgoingFile.fromMap(m));
+      }
       final qr = [
         for (final m in shared)
           if (byQr(m)) OutgoingFile.fromMap(m),
       ];
-      if (normal.isNotEmpty) onFiles(normal);
+      normal.forEach((to, files) => onFiles(files, to: to));
       if (qr.isNotEmpty) onFiles(qr, byQr: true);
     } on MissingPluginException {
       // No window yet; files wait in the activity until it asks again.
@@ -165,10 +214,22 @@ Future<void> listenForShares(
       case 'sharedAvailable':
         await take();
       case 'sharedText':
-        if (call.arguments is String) onText?.call(call.arguments as String);
+        final args = (call.arguments as Map?)?.cast<String, Object?>() ?? const {};
+        if (args['text'] case final String text) onText?.call(text, to: args['to'] as String?);
     }
   });
   await take();
+}
+
+/// Android: put each paired device in the share sheet's top row (Direct
+/// Share), in the user's order. Sharing to one sends straight to it.
+Future<void> publishShareTargets(List<({String id, String name})> devices) async {
+  if (!Platform.isAndroid) return;
+  await _channel.invokeMethod('setShareTargets', {
+    'devices': [
+      for (final d in devices) {'id': d.id, 'name': d.name},
+    ],
+  });
 }
 
 /// Android: ask once to be left out of battery optimization, so the system
@@ -181,6 +242,36 @@ Future<void> askToRunInBackground() async {
   } on MissingPluginException {
     // No window; ask another time.
   }
+}
+
+/// Android: whether the "Send latest" tile may send while the phone is
+/// locked (off unless turned on; then the phone asks to unlock first).
+Future<bool> latestTileWhileLocked() async {
+  if (!Platform.isAndroid) return false;
+  return await _channel.invokeMethod<bool>('latestTileWhileLocked') ?? false;
+}
+
+Future<void> setLatestTileWhileLocked(bool on) async {
+  if (Platform.isAndroid) await _channel.invokeMethod('setLatestTileWhileLocked', {'on': on});
+}
+
+/// Samsung: whether to show the one-time "keep Nudge awake" guide (Samsung
+/// puts apps to sleep despite the battery exemption; "Never sleeping apps"
+/// stops it).
+Future<bool> needsSleepGuide() async {
+  if (!Platform.isAndroid) return false;
+  try {
+    return await _activity.invokeMethod<bool>('needsSleepGuide') ?? false;
+  } on MissingPluginException {
+    return false;
+  }
+}
+
+/// Open the settings page with "Never sleeping apps" (or, with [open]
+/// false, just don't ask again).
+Future<void> sleepGuideDone({required bool open}) async {
+  if (!Platform.isAndroid) return;
+  await _activity.invokeMethod(open ? 'openSleepSettings' : 'sleepGuideDismissed');
 }
 
 /// Android: ask once for what the hotspot (the direct link for big
@@ -244,12 +335,34 @@ Future<void> cancelOfferNotification(int id) async {
 /// notification.
 void listenForOfferAnswers(void Function(int id, bool accept) onAnswer) {
   if (!Platform.isAndroid) return;
-  _channel.setMethodCallHandler((call) async {
-    if (call.method != 'offerAnswer') return;
-    final args = (call.arguments as Map).cast<String, Object?>();
+  _onAndroid('offerAnswer', (arguments) {
+    final args = (arguments as Map).cast<String, Object?>();
     final id = (args['id'] as num?)?.toInt();
     if (id != null) onAnswer(id, args['accept'] == true);
   });
+}
+
+// Locking.
+
+/// Android: the "Accept files while locked" choice changed; apply it now.
+Future<void> whenLockedChanged() async {
+  if (Platform.isAndroid) await _channel.invokeMethod('whenLockedChanged');
+}
+
+const _session = MethodChannel('nudge/session');
+
+/// Calls [onChange] with whether the device is locked: now, and whenever
+/// it changes. On Android the screen being off counts as locked.
+Future<void> listenForLock(void Function(bool locked) onChange) async {
+  if (Platform.isAndroid) {
+    _onAndroid('locked', (locked) => onChange(locked == true));
+    onChange(await _channel.invokeMethod<bool>('isLocked') ?? false);
+  } else if (Platform.isWindows) {
+    // Nudge starts (or is opened) unlocked.
+    _session.setMethodCallHandler((call) async {
+      if (call.method == 'locked') onChange(call.arguments == true);
+    });
+  }
 }
 
 /// "Received photo.jpg from Laptop", with an Open action. Also adds the file

@@ -10,25 +10,48 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 
-const _menuKey = r'HKEY_CURRENT_USER\Software\Classes\*\shell\Nudge';
+const _runner = MethodChannel('nudge/instance');
 
-/// The Explorer menu entry and the login entry, written together.
+bool? _packaged;
+
+/// Installed as an MSIX package (windows/packaging). The package then
+/// provides the Explorer menu (Windows 11's top-level one), the Share
+/// panel entry and start at login itself.
+Future<bool> isPackaged() async {
+  if (!Platform.isWindows) return false;
+  try {
+    return _packaged ??= await _runner.invokeMethod<bool>('packaged') ?? false;
+  } on PlatformException {
+    return false;
+  }
+}
+
+/// For files, and for folders (a folder goes whole).
+const _menuKeys = [
+  r'HKEY_CURRENT_USER\Software\Classes\*\shell\Nudge',
+  r'HKEY_CURRENT_USER\Software\Classes\Directory\shell\Nudge',
+];
+
+/// The Explorer menu entries and the login entry, written together.
 Future<void> registerShell(String dataDir) async {
-  if (!Platform.isWindows) return;
+  if (!Platform.isWindows || await isPackaged()) return;
   final exe = Platform.resolvedExecutable;
   final lines = [
     'Windows Registry Editor Version 5.00',
     '',
-    '[$_menuKey]',
-    '@=${_regString('Send with Nudge')}',
-    '"Icon"=${_regString('"$exe",0')}',
-    // Any number of selected files (Explorer otherwise hides the verb past 15).
-    '"MultiSelectModel"=${_regString('Player')}',
-    '',
-    '[$_menuKey\\command]',
-    '@=${_regString('"$exe" --send "%1"')}',
-    '',
+    for (final key in _menuKeys) ...[
+      '[$key]',
+      '@=${_regString('Send with Nudge')}',
+      '"Icon"=${_regString('"$exe",0')}',
+      // Any number of selected items (Explorer otherwise hides the verb past 15).
+      '"MultiSelectModel"=${_regString('Player')}',
+      '',
+      '[$key\\command]',
+      '@=${_regString('"$exe" --send "%1"')}',
+      '',
+    ],
     if (canStartWithWindows) ...[
       '[$_runKeyLong]',
       await startsWithWindows(dataDir) ? '"Nudge"=${_regString(_runCommand)}' : '"Nudge"=-',
@@ -76,7 +99,12 @@ bool get canStartWithWindows => Platform.isWindows && !kDebugMode;
 String _settingsPath(String dataDir) => '$dataDir${Platform.pathSeparator}windows.json';
 
 /// The user's choice, kept beside the identity. On unless turned off.
+/// Packaged, it's the package's startup task (on unless turned off there or
+/// in Task Manager).
 Future<bool> startsWithWindows(String dataDir) async {
+  if (await isPackaged()) {
+    return await _runner.invokeMethod<bool>('startupTask') ?? false;
+  }
   try {
     final settings = jsonDecode(await File(_settingsPath(dataDir)).readAsString());
     return (settings as Map<String, Object?>)['startWithWindows'] != false;
@@ -87,6 +115,10 @@ Future<bool> startsWithWindows(String dataDir) async {
 
 /// Save the choice and apply it.
 Future<void> setStartWithWindows(String dataDir, bool on) async {
+  if (await isPackaged()) {
+    await _runner.invokeMethod<bool>('setStartupTask', on);
+    return;
+  }
   try {
     await File(_settingsPath(dataDir)).writeAsString(jsonEncode({'startWithWindows': on}));
   } on FileSystemException {
@@ -98,7 +130,7 @@ Future<void> setStartWithWindows(String dataDir, bool on) async {
 /// Make the login entry match the choice (startup does this in
 /// [registerShell], so the entry follows the exe if it moves).
 Future<void> syncStartWithWindows(String dataDir) async {
-  if (!canStartWithWindows) return;
+  if (!canStartWithWindows || await isPackaged()) return;
   final args = await startsWithWindows(dataDir)
       ? ['add', _runKey, '/v', 'Nudge', '/d', _runCommand, '/f']
       : ['delete', _runKey, '/v', 'Nudge', '/f'];

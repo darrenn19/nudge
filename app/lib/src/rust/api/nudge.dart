@@ -9,7 +9,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'nudge.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `into_outgoing`, `parse_id`, `route_name`, `runtime`
+// These functions are ignored because they are not marked as `pub`: `deliver`, `into_outgoing`, `parse_id`, `route_name`, `running_core`, `runtime`, `set_native`, `start_core`, `take_early`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>>
@@ -42,7 +43,8 @@ abstract class NudgeApp implements RustOpaqueInterface {
 
   String downloadDir();
 
-  /// Deliver events to Dart. Call once; later calls do nothing.
+  /// Deliver events to this window. A later call (a new window) takes
+  /// over from an earlier one.
   Stream<AppEvent> events();
 
   /// Answer `AppEvent::HotspotWanted`: the hotspot's name and passphrase,
@@ -95,8 +97,16 @@ abstract class NudgeApp implements RustOpaqueInterface {
 
   void setDownloadDir({required String dir});
 
+  /// How incoming files are treated from now on: "usual" (auto-accepted
+  /// devices send without a question), "ask" (ask about every send) or
+  /// "refuse" (decline without asking). The app sets it as the device
+  /// locks and unlocks.
+  void setReceiving({required String mode});
+
   /// Start Nudge: load or create this device's identity in `data_dir`,
-  /// listen for connections and start finding nearby devices.
+  /// listen for connections and start finding nearby devices. If it's
+  /// already running in this process (Android's background service
+  /// started it), this attaches to it.
   static Future<NudgeApp> start({
     required String dataDir,
     required String downloadDir,

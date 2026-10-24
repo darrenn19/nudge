@@ -9,6 +9,7 @@ pub mod error;
 pub mod identity;
 pub mod link;
 pub mod node;
+pub mod pack;
 pub mod pairing;
 pub mod protocol;
 pub mod resume;
@@ -18,7 +19,7 @@ pub mod transfer;
 pub use error::{Error, Result};
 pub use identity::{Fingerprint, Identity, TrustedPeers};
 pub use link::LinkKind;
-pub use node::{Direction, HotspotInfo, Node, NodeConfig, NodeEvent, Outgoing, Peer};
+pub use node::{Direction, HotspotInfo, Node, NodeConfig, NodeEvent, Outgoing, Peer, Receiving};
 pub use tls::Tls;
 pub use transfer::{ReceivedFile, TransferStats, receive_file, send_file};
 

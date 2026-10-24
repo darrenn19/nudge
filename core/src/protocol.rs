@@ -59,6 +59,8 @@ const KIND_STATUS: u8 = 4;
 const KIND_AWAIT: u8 = 5;
 const KIND_CLIP: u8 = 6;
 const KIND_LINK: u8 = 7;
+/// A file offer whose data is a pack of files (see `pack`).
+const KIND_PACK: u8 = 8;
 
 /// Header that opens every connection.
 fn put_header(buf: &mut Vec<u8>, kind: u8) {
@@ -136,7 +138,8 @@ pub enum Request {
 impl Request {
     pub async fn read_from<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
         match read_header(r).await? {
-            KIND_FILE => Ok(Self::File(Offer::read_body(r).await?)),
+            KIND_FILE => Ok(Self::File(Offer::read_body(r, false).await?)),
+            KIND_PACK => Ok(Self::File(Offer::read_body(r, true).await?)),
             KIND_PAIR => Ok(Self::Pair(PairRequest::read_body(r).await?)),
             KIND_PAIR_ASK => Ok(Self::PairAsk(PairAsk::read_body(r).await?)),
             KIND_STATUS => Ok(Self::Status(Status::read_body(r).await?)),
@@ -393,6 +396,8 @@ pub struct Offer {
     /// Used with name and size to decide whether a transfer can resume.
     pub modified: u64,
     pub batch: Batch,
+    /// The data is a pack of files, unpacked on arrival (see `pack`).
+    pub pack: bool,
 }
 
 impl Offer {
@@ -401,7 +406,7 @@ impl Offer {
             return Err(Error::BadFileName(self.name.clone()));
         }
         let mut buf = Vec::with_capacity(7 + 2 + self.name.len() + 8 + 8 + 20);
-        put_header(&mut buf, KIND_FILE);
+        put_header(&mut buf, if self.pack { KIND_PACK } else { KIND_FILE });
         put_string(&mut buf, &self.name);
         buf.extend_from_slice(&self.size.to_be_bytes());
         buf.extend_from_slice(&self.modified.to_be_bytes());
@@ -416,12 +421,13 @@ impl Offer {
     /// Read a whole file offer, header included.
     pub async fn read_from<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
         match read_header(r).await? {
-            KIND_FILE => Self::read_body(r).await,
+            KIND_FILE => Self::read_body(r, false).await,
+            KIND_PACK => Self::read_body(r, true).await,
             _ => Err(Error::Protocol("expected a file offer")),
         }
     }
 
-    async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+    async fn read_body<R: AsyncRead + Unpin>(r: &mut R, pack: bool) -> Result<Self> {
         let name = read_string(r, MAX_NAME_LEN, "file name too long").await?;
         let size = r.read_u64().await?;
         let modified = r.read_u64().await?;
@@ -435,6 +441,7 @@ impl Offer {
             size,
             modified,
             batch,
+            pack,
         })
     }
 }
@@ -595,11 +602,23 @@ mod tests {
                 count: 3,
                 size: 123_456_789_999,
             },
+            pack: false,
         };
         let mut buf = Vec::new();
         offer.write_to(&mut buf).await.unwrap();
         let back = Offer::read_from(&mut buf.as_slice()).await.unwrap();
         assert_eq!(back, offer);
+        // A pack is the same offer, under its own kind.
+        let pack = Offer {
+            pack: true,
+            ..offer
+        };
+        let mut buf = Vec::new();
+        pack.write_to(&mut buf).await.unwrap();
+        assert_eq!(
+            Request::read_from(&mut buf.as_slice()).await.unwrap(),
+            Request::File(pack)
+        );
     }
 
     #[tokio::test]
@@ -631,6 +650,7 @@ mod tests {
             size: 5,
             modified: 0,
             batch: Batch::single(5),
+            pack: false,
         };
         let pair = PairRequest {
             proof: [7; 32],

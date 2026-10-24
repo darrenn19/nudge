@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Direct Share: each paired device in the share sheet's top row. The
+     shortcuts themselves are published at run time (ShareTargets.kt). -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <share-target android:targetClass="io.github.darrenn19.nudge.ShareActivity">
+        <data android:mimeType="*/*" />
+        <category android:name="io.github.darrenn19.nudge.category.SEND_TO_DEVICE" />
+    </share-target>
+</shortcuts>

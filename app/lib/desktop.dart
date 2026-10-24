@@ -76,9 +76,14 @@ Future<void> showWindow() async {
 }
 
 /// "Received photo.jpg from Phone"; clicking opens the file.
-Future<void> showReceivedToast({required String path, required String from}) async {
+/// [name] is what came: a file's name, or for several files sent together
+/// "Trip" or "37 files" ([path] is then the folder they went in).
+Future<void> showReceivedToast({
+  required String path,
+  required String from,
+  required String name,
+}) async {
   if (!_desktop) return;
-  final name = path.split(RegExp(r'[\\/]')).last;
   final toast = LocalNotification(
     title: 'Received $name',
     body: from.isEmpty ? 'Saved to Downloads' : 'From $from',
@@ -181,6 +186,7 @@ class Tray with WindowListener {
 
     add('Open Nudge', (_) => unawaited(showWindow()));
     add('Send files…', (_) => unawaited(_pickAndSend()));
+    add('Send a folder…', (_) => unawaited(_pickFolderAndSend()));
     menu.addSeparator();
     if (startsAtLogin != null) {
       var on = startsAtLogin;
@@ -202,6 +208,13 @@ class Tray with WindowListener {
     controller.warmUp();
     await showWindow();
     controller.offer(await pickFiles(), fromOutside: false);
+  }
+
+  /// A folder goes whole, in its own folder on the other side.
+  Future<void> _pickFolderAndSend() async {
+    controller.warmUp();
+    await showWindow();
+    controller.offer(await pickFolder(), fromOutside: false);
   }
 
   Future<void> _quit() async {

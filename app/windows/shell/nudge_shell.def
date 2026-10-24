@@ -1,0 +1,4 @@
+LIBRARY nudge_shell
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

@@ -52,4 +52,6 @@ flutter {
 dependencies {
     // NotificationCompat, FileProvider and ServiceCompat.
     implementation("androidx.core:core-ktx:1.13.1")
+    // Direct Share targets on Android 9 and older.
+    implementation("androidx.sharetarget:sharetarget:1.2.0")
 }

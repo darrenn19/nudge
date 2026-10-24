@@ -5,17 +5,17 @@
 #include <string>
 
 #include "flutter_window.h"
+#include "packaged.h"
 #include "utils.h"
 
 namespace {
 
-// One Nudge at a time. A later launch (the Start menu, or Explorer's "Send
-// with Nudge", which starts one process per selected file) hands its command
-// line to the running Nudge and exits, before any of Flutter loads.
-void HandOver(const wchar_t* command_line) {
+// One Nudge at a time. A later launch (the Start menu, Explorer's "Send
+// with Nudge", the Share panel) hands its command line to the running Nudge
+// and exits, before any of Flutter loads.
+void HandOver(std::wstring line) {
   // Started at login while Nudge is already running: nothing to say.
-  if (wcsstr(command_line, L"--background")) return;
-  std::wstring line = GetCommandLineW();
+  if (line.find(L" --background") != std::wstring::npos) return;
   COPYDATASTRUCT data = {};
   data.dwData = kLaunchMessage;
   data.cbData = static_cast<DWORD>((line.size() + 1) * sizeof(wchar_t));
@@ -40,14 +40,52 @@ void HandOver(const wchar_t* command_line) {
   }
 }
 
+// |text| in a new temporary file (UTF-8); its path, or empty.
+std::wstring SaveText(const std::wstring& text) {
+  wchar_t dir[MAX_PATH], path[MAX_PATH];
+  if (!GetTempPathW(MAX_PATH, dir) || !GetTempFileNameW(dir, L"ndg", 0, path)) return L"";
+  std::string utf8 = Utf8FromUtf16(text.c_str());
+  HANDLE file = CreateFileW(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_TEMPORARY, nullptr);
+  if (file == INVALID_HANDLE_VALUE) return L"";
+  DWORD written = 0;
+  WriteFile(file, utf8.data(), static_cast<DWORD>(utf8.size()), &written, nullptr);
+  CloseHandle(file);
+  return path;
+}
+
+// This launch as a command line: the real one, or, for a packaged launch
+// from the Share panel or at login, what that amounts to.
+std::wstring EffectiveCommandLine() {
+  std::wstring line = GetCommandLineW();
+  PackagedLaunch launch = GetPackagedLaunch();
+  if (launch.at_login && line.find(L" --background") == std::wstring::npos) {
+    line += L" --background";
+  }
+  wchar_t exe[MAX_PATH];
+  GetModuleFileNameW(nullptr, exe, MAX_PATH);
+  if (!launch.shared.empty()) {
+    line = std::wstring(L"\"") + exe + L"\" --send";
+    for (const auto& path : launch.shared) line += L" \"" + path + L"\"";
+  } else if (!launch.text.empty()) {
+    // Text can hold anything a command line can't: it goes in a file, which
+    // the app reads and deletes.
+    std::wstring file = SaveText(launch.text);
+    if (!file.empty()) line = std::wstring(L"\"") + exe + L"\" --clip \"" + file + L"\"";
+  }
+  return line;
+}
+
 }  // namespace
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
+  std::wstring line = EffectiveCommandLine();
+
   // Held until exit: owning it is what makes this the running Nudge.
   HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\Nudge.SingleInstance");
   if (single && GetLastError() == ERROR_ALREADY_EXISTS) {
-    HandOver(command_line);
+    HandOver(line);
     CloseHandle(single);
     return EXIT_SUCCESS;
   }
@@ -67,12 +105,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // start and held ~700 MB more memory, for no visible difference here.
   project.set_impeller_switch(flutter::ImpellerSwitch::Disabled);
 
-  std::vector<std::string> command_line_arguments =
-      GetCommandLineArguments();
+  project.set_dart_entrypoint_arguments(ArgumentsOf(line.c_str()));
 
-  project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
-
-  FlutterWindow window(project);
+  // Started at login (--background): stay in the tray until opened.
+  bool hidden = line.find(L" --background") != std::wstring::npos;
+  FlutterWindow window(project, hidden);
   if (!window.Create(L"Nudge", Win32Window::Size(480, 720))) {
     return EXIT_FAILURE;
   }

@@ -14,6 +14,12 @@
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="32" />
+    <!-- The "Send latest" tile finds the newest photo or video. -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
     <!-- Scanning pairing QR codes. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
@@ -57,21 +63,46 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- "Share → Nudge" from any app. -->
+            <!-- Direct Share targets: one per paired device, published at
+                 run time (ShareTargets.kt); shares to them land in
+                 ShareActivity. Declared here, on the launcher activity. -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+        <!-- Where shares land, with no window: "Share -> Nudge", a device in
+             the share sheet's top row, and "Send with Nudge" on selected
+             text. Opens MainActivity only when there's a device to choose. -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <!-- Direct Share on Android 9 and older. -->
+            <meta-data
+                android:name="android.service.chooser.chooser_target_service"
+                android:value="androidx.sharetarget.ChooserTargetServiceCompat" />
             <intent-filter android:label="Nudge">
                 <action android:name="android.intent.action.SEND" />
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="*/*" />
             </intent-filter>
+            <!-- Selected text: onto the other devices' clipboards. -->
+            <intent-filter android:label="Send with Nudge">
+                <action android:name="android.intent.action.PROCESS_TEXT" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
         </activity>
         <!-- A second share sheet entry: send to someone without Nudge, by
-             showing them a QR code. Opens MainActivity, which tells them apart. -->
+             showing them a QR code. ShareActivity tells them apart. -->
         <activity-alias
             android:name=".ShareByQr"
             android:exported="true"
             android:label="Share by QR code"
-            android:targetActivity=".MainActivity">
+            android:targetActivity=".ShareActivity">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
@@ -99,6 +130,16 @@
             android:exported="true"
             android:icon="@drawable/ic_notification"
             android:label="Send files"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".LatestTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_notification"
+            android:label="Send latest"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE" />

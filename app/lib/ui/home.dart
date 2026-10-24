@@ -82,6 +82,9 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) showToast(context, note, icon: CupertinoIcons.doc_on_clipboard);
     });
     WidgetsBinding.instance.addPostFrameCallback((_) => _askNext());
+    // Already paired (say, after an update): the Samsung guide, once, after
+    // the screen has settled.
+    Future<void>.delayed(const Duration(seconds: 2), _guideKeepAwake);
   }
 
   /// The question on screen, if any.
@@ -187,7 +190,9 @@ class _HomeScreenState extends State<HomeScreen> {
       // Now that there's somewhere to send, make sure Android won't stop
       // Nudge mid-transfer or while waiting to receive, and can start the
       // hotspot for big transfers. Each asked once.
-      unawaited(askToRunInBackground().then((_) => askForDirectLink()));
+      unawaited(
+        askToRunInBackground().then((_) => askForDirectLink()).then((_) => _guideKeepAwake()),
+      );
     }
   }
 
@@ -208,6 +213,15 @@ class _HomeScreenState extends State<HomeScreen> {
     final files = await pickFiles();
     // A file dialog can leave a stray click behind on the window; don't let
     // it open the menu.
+    _quietUntil = DateTime.now().add(const Duration(milliseconds: 900));
+    if (files.isEmpty) return;
+    controller.send(device, files);
+  }
+
+  /// A whole folder: it arrives as a folder.
+  Future<void> _sendFolderTo(DeviceInfo device) async {
+    controller.warmUp(device);
+    final files = await pickFolder();
     _quietUntil = DateTime.now().add(const Duration(milliseconds: 900));
     if (files.isEmpty) return;
     controller.send(device, files);
@@ -237,7 +251,9 @@ class _HomeScreenState extends State<HomeScreen> {
       showToast(context, 'Paired with ${paired.name}');
       _focusId = paired.id;
       WidgetsBinding.instance.addPostFrameCallback((_) => _goTo(paired.id));
-      unawaited(askToRunInBackground().then((_) => askForDirectLink()));
+      unawaited(
+        askToRunInBackground().then((_) => askForDirectLink()).then((_) => _guideKeepAwake()),
+      );
     }
   }
 
@@ -250,7 +266,10 @@ class _HomeScreenState extends State<HomeScreen> {
       subtitle:
           "It hasn't been seen on this Wi-Fi just now. It may be asleep, switched off, "
           'or on another network.'
-          '${d.reachable ? ' A sleeping phone usually still receives.' : ''}',
+          '${d.reachable ? ' A sleeping phone usually still receives.' : ''}'
+          // After a restart, Android keeps Nudge's storage locked (and Nudge
+          // stopped) until the phone is unlocked once.
+          '${d.platform == 'android' ? ' If it restarted, unlock it once so Nudge can start.' : ''}',
       items: [
         if (d.reachable)
           MenuItem(label: 'Send anyway', icon: CupertinoIcons.paperplane, onTap: () => _sendTo(d)),
@@ -259,14 +278,45 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// Samsung, once: put Nudge in "Never sleeping apps", or files stop
+  /// arriving while the phone is idle.
+  Future<void> _guideKeepAwake() async {
+    if (_guiding || controller.pairedDevices.isEmpty || !await needsSleepGuide()) return;
+    if (!mounted) return;
+    _guiding = true;
+    var opened = false;
+    await showMenuSheet(
+      context,
+      title: 'Keep Nudge awake',
+      subtitle:
+          'Samsung phones put apps to sleep, and a sleeping Nudge misses files. '
+          'On the next screen, tap "Never sleeping apps", then +, and add Nudge.',
+      items: [
+        MenuItem(
+          label: 'Open battery settings',
+          icon: CupertinoIcons.battery_full,
+          onTap: () {
+            opened = true;
+            unawaited(sleepGuideDone(open: true));
+          },
+        ),
+      ],
+    );
+    if (!opened) await sleepGuideDone(open: false);
+  }
+
+  bool _guiding = false;
+
   /// Put devices in the order you want them.
   void _arrange() {
     showGlassSheet<void>(context, (_) => _ArrangeSheet(controller: controller));
   }
 
   /// What this device is called, and where that comes from.
-  void _aboutThisDevice() {
-    showMenuSheet(
+  Future<void> _aboutThisDevice() async {
+    final tileWhileLocked = isPhone ? await latestTileWhileLocked() : null;
+    if (!mounted) return;
+    await showMenuSheet(
       context,
       title: 'This is you',
       subtitle:
@@ -283,6 +333,41 @@ class _HomeScreenState extends State<HomeScreen> {
           toggle: controller.directLink,
           onToggle: controller.setDirectLink,
         ),
+        // The quick settings tile sends the newest photo or download; from
+        // the lock screen only if allowed here.
+        if (tileWhileLocked != null)
+          MenuItem(
+            label: '"Send latest" tile works while locked',
+            icon: CupertinoIcons.device_phone_portrait,
+            toggle: tileWhileLocked,
+            onToggle: (on) => unawaited(setLatestTileWhileLocked(on)),
+          ),
+        MenuItem(
+          label: 'Files while locked: ${controller.whenLocked.label}',
+          icon: CupertinoIcons.lock,
+          onTap: _chooseWhenLocked,
+        ),
+      ],
+    );
+  }
+
+  /// Who may send while this device is locked.
+  void _chooseWhenLocked() {
+    showMenuSheet(
+      context,
+      title: 'Accept files while locked',
+      subtitle: isPhone
+          ? 'While the phone is locked or its screen is off.'
+          : 'While this PC is locked.',
+      items: [
+        for (final choice in WhenLocked.values)
+          MenuItem(
+            label: choice.label,
+            icon: choice == controller.whenLocked
+                ? CupertinoIcons.checkmark_circle_fill
+                : CupertinoIcons.circle,
+            onTap: () => controller.setWhenLocked(choice),
+          ),
       ],
     );
   }
@@ -299,6 +384,11 @@ class _HomeScreenState extends State<HomeScreen> {
       ].join(' · '),
       items: [
         MenuItem(label: 'Send files', icon: CupertinoIcons.paperplane, onTap: () => _sendTo(d)),
+        MenuItem(
+          label: 'Send a folder',
+          icon: CupertinoIcons.folder,
+          onTap: () => unawaited(_sendFolderTo(d)),
+        ),
         MenuItem(
           label: 'Always accept files',
           icon: CupertinoIcons.checkmark_shield,
@@ -342,7 +432,9 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() => _dragging = false);
     final files = [
       for (final item in details.files)
-        if (FileSystemEntity.isFileSync(item.path)) OutgoingFile.fromPath(item.path),
+        // Files and folders (a folder goes whole).
+        if (FileSystemEntity.typeSync(item.path) != FileSystemEntityType.notFound)
+          OutgoingFile.fromPath(item.path),
     ];
     if (files.isEmpty) return;
     final d = _focus;
@@ -1564,8 +1656,9 @@ IconData deviceIcon(DeviceInfo d) => switch (d.platform) {
 };
 
 /// The latest transfer, as a small pill. Tap for all of them.
-/// Once it finishes, the pill fades away after a few seconds; the transfer
-/// stays in the Activity sheet.
+/// Once nothing is moving (finished, or waiting on someone's answer), the
+/// pill fades away after a few seconds; the transfer stays in the Activity
+/// sheet. A later change (say, accepted) shows it briefly again.
 class _ActivityPill extends StatefulWidget {
   const _ActivityPill({required this.controller});
 
@@ -1593,10 +1686,11 @@ class _ActivityPillState extends State<_ActivityPill> {
   @override
   Widget build(BuildContext context) {
     var t = controller.transfers.firstOrNull;
-    final key = t == null ? null : '${t.id}-${t.state}';
-    final finished = t != null && t.state != TransferState.running;
-    if (!finished) {
-      // Running or waiting on someone: keep showing it.
+    final key = t == null ? null : '${t.id}-${t.state}-${t.outcome}';
+    // Shown while bytes move. Once they stop (done, failed, or waiting for
+    // someone to accept), it lingers briefly; the Activity sheet keeps it.
+    final settled = t != null && !t.active;
+    if (!settled) {
       _timer?.cancel();
       _timerFor = null;
     } else if (_timerFor != key) {
@@ -1619,7 +1713,7 @@ class _ActivityPillState extends State<_ActivityPill> {
       child: t == null
           ? const SizedBox(height: 52, key: ValueKey('none'))
           : Pressable(
-              key: ValueKey('${t.id}-${t.state}'),
+              key: ValueKey(key),
               onTap: () => showActivity(context, controller),
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 360),

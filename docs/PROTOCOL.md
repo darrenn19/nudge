@@ -64,6 +64,15 @@ The receiver hashes each chunk as it arrives. On a mismatch it closes the connec
 
 **4. Done** (receiver → sender): sent only after every byte is written, synced to disk, and the file renamed into place.
 
+### Folders and packs (kind 8)
+A file from a folder is offered under its path in that folder, `/`-separated (`Trip/day 2/plan.txt`). The receiver sanitizes each part like a file name, refuses empty, `.` and `..` parts, and puts the file in those folders under its download folder (never overwriting: a clash gets a " (1)" suffix).
+
+Many small files (4 or more, each ≤ 8 MiB) go as **packs**: a kind-8 header with exactly the body of a file offer (kind 1), whose name is only for showing ("Trip", "37 files") and whose modified time is a hash of the pack's file list (so a resume only matches the same files). The data, streamed, hashed and resumed exactly like one file's, is:
+
+`"NDGP"`, u16 version (1), u32 count, then per file: u16 path length, path (UTF-8, as above), u64 size, u64 modified; then every file's bytes in the same order. A path ending in `/` is an empty folder (size 0): only a pack carries those, so a send with one always uses a pack.
+
+The receiver lands it as one partial file and, once kept, checks the list adds up to the size and unpacks it. A pack holds at most 4,000 files and about 256 MiB; larger files go on their own. Code: `core/src/pack.rs`.
+
 ### Pairing without a code (kind 3)
 A device that sees another nearby (by discovery) can ask to pair. The asker connects trusting exactly the fingerprint discovery reported, and sends **PairAsk**: `name_len` (u16, ≤ 255) and its device name. The other side asks its user, showing a six-digit code; the asker shows the same code. The code is `BLAKE3-derive-key("nudge pairing compare code v1", lower fingerprint ‖ higher fingerprint)`, first four bytes as a big-endian u32 mod 1,000,000, so both sides compute it from the fingerprints the handshake proved: a device in the middle would make the codes differ. The answer is a **PairReply** (as for kind 2), after up to 90 s. On Accept both sides trust each other. One question per device at a time.
 

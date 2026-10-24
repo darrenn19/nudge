@@ -69,7 +69,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => 1497432876;
+  int get rustContentHash => -1159783562;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -179,6 +179,11 @@ abstract class RustLibApi extends BaseApi {
   void crateApiNudgeNudgeAppSetDownloadDir({
     required NudgeApp that,
     required String dir,
+  });
+
+  void crateApiNudgeNudgeAppSetReceiving({
+    required NudgeApp that,
+    required String mode,
   });
 
   Future<NudgeApp> crateApiNudgeNudgeAppStart({
@@ -988,6 +993,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  void crateApiNudgeNudgeAppSetReceiving({
+    required NudgeApp that,
+    required String mode,
+  }) {
+    return handler.executeSync(
+      SyncTask(
+        callFfi: () {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_Auto_Ref_RustOpaque_flutter_rust_bridgefor_generatedRustAutoOpaqueInnerNudgeApp(
+            that,
+            serializer,
+          );
+          sse_encode_String(mode, serializer);
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 24)!;
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: null,
+        ),
+        constMeta: kCrateApiNudgeNudgeAppSetReceivingConstMeta,
+        argValues: [that, mode],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiNudgeNudgeAppSetReceivingConstMeta =>
+      const TaskConstMeta(
+        debugName: "NudgeApp_set_receiving",
+        argNames: ["that", "mode"],
+      );
+
+  @override
   Future<NudgeApp> crateApiNudgeNudgeAppStart({
     required String dataDir,
     required String downloadDir,
@@ -1005,7 +1043,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 25,
             port: port_,
           );
         },
@@ -1036,7 +1074,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 25)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 26)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_String,
@@ -1068,7 +1106,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 27,
             port: port_,
           );
         },
@@ -1099,7 +1137,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 27)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 28)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1132,7 +1170,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(deviceId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 28)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 29)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1165,7 +1203,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             serializer,
           );
           sse_encode_String(deviceId, serializer);
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 29)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 30)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_unit,
@@ -1193,7 +1231,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             that,
             serializer,
           );
-          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 30)!;
+          return pdeCallFfi(generalizedFrbRustBinding, serializer, funcId: 31)!;
         },
         codec: SseCodec(
           decodeSuccessData: sse_decode_opt_String,
@@ -1221,7 +1259,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 31,
+            funcId: 32,
             port: port_,
           );
         },
@@ -2264,7 +2302,8 @@ class NudgeAppImpl extends RustOpaque implements NudgeApp {
   String downloadDir() =>
       RustLib.instance.api.crateApiNudgeNudgeAppDownloadDir(that: this);
 
-  /// Deliver events to Dart. Call once; later calls do nothing.
+  /// Deliver events to this window. A later call (a new window) takes
+  /// over from an earlier one.
   Stream<AppEvent> events() =>
       RustLib.instance.api.crateApiNudgeNudgeAppEvents(that: this);
 
@@ -2362,6 +2401,13 @@ class NudgeAppImpl extends RustOpaque implements NudgeApp {
 
   void setDownloadDir({required String dir}) => RustLib.instance.api
       .crateApiNudgeNudgeAppSetDownloadDir(that: this, dir: dir);
+
+  /// How incoming files are treated from now on: "usual" (auto-accepted
+  /// devices send without a question), "ask" (ask about every send) or
+  /// "refuse" (decline without asking). The app sets it as the device
+  /// locks and unlocks.
+  void setReceiving({required String mode}) => RustLib.instance.api
+      .crateApiNudgeNudgeAppSetReceiving(that: this, mode: mode);
 
   /// Show a pairing code: returns the text for the QR code. It works once
   /// and expires after five minutes (`AppEvent::PairingClosed`).

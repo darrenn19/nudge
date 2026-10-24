@@ -707,8 +707,12 @@ async fn stream_file(
     name: &str,
 ) -> Result<u64> {
     let file = match item {
-        Outgoing::Path(path) => std::fs::File::open(path)?,
+        Outgoing::Path(path) | Outgoing::InFolder { path, .. } => std::fs::File::open(path)?,
         Outgoing::Open { file, .. } => file,
+        // Never made for a browser (see Node::send).
+        Outgoing::Pack(_) | Outgoing::EmptyFolder { .. } => {
+            return Err(Error::Protocol("packs don't go to browsers"));
+        }
     };
     let size = file.metadata()?.len();
     let progress = shared.track(id, browser, size);
