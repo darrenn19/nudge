@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use anyhow::{Context, Result};
 use flutter_rust_bridge::frb;
 use nudge_core::{
-    Direction, Fingerprint, HotspotInfo, LinkKind, Node, NodeConfig, NodeEvent, Outgoing, Peer,
-    Receiving,
+    Cable, Direction, Fingerprint, HotspotInfo, LinkKind, Node, NodeConfig, NodeEvent, Outgoing,
+    Peer, Receiving,
 };
 use tokio::runtime::Runtime;
 
@@ -63,6 +63,10 @@ pub struct DeviceInfo {
     pub accepts_from_us: Option<bool>,
     /// Clipboard text syncs with it, both ways.
     pub clipboard: bool,
+    /// A cable between the two: "connected" (files can go over it),
+    /// "tethering" (plugged in, but the phone's USB tethering is off), or
+    /// empty.
+    pub cable: String,
 }
 
 impl From<Peer> for DeviceInfo {
@@ -78,6 +82,12 @@ impl From<Peer> for DeviceInfo {
             auto_accept: p.auto_accept,
             accepts_from_us: p.accepts_from_us,
             clipboard: p.clipboard,
+            cable: match p.cable {
+                Cable::Connected => "connected",
+                Cable::NeedsTethering => "tethering",
+                Cable::None => "",
+            }
+            .into(),
         }
     }
 }
@@ -621,6 +631,14 @@ impl NudgeApp {
             "refuse" => Receiving::Refuse,
             _ => Receiving::Usual,
         });
+    }
+
+    /// On a phone: plugged into a computer by a cable that carries data,
+    /// with USB tethering off. Paired computers nearby are told.
+    #[frb(sync)]
+    pub fn set_cable_unused(&self, on: bool) {
+        let _guard = runtime().enter();
+        self.node.set_cable_unused(on);
     }
 
     #[frb(sync)]

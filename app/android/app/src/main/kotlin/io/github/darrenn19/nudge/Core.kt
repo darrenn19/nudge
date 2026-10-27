@@ -40,6 +40,9 @@ object Core {
     /** "usual", "ask" or "refuse". */
     @JvmStatic external fun setReceiving(mode: String)
 
+    /** Plugged into a computer with USB tethering off (see [UsbCable]). */
+    @JvmStatic external fun setCableUnused(on: Boolean)
+
     /**
      * Answer a "hotspotWanted" event; null [ssid] if no direct link started.
      * [mhz]: its frequency, 0 if unknown.

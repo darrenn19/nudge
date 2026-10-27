@@ -26,10 +26,12 @@ use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::{BatchKey, Direction, NodeEvent, Outgoing, Shared, Verdict, local_addrs};
+use crate::link::{self, LinkKind};
+use crate::archive::{Archive, Entry};
 use crate::identity::Fingerprint;
 use crate::pairing::random_bytes;
 use crate::resume::with_suffix;
-use crate::transfer::{CancelledBy, TransferStats, sanitize_file_name, unique_path};
+use crate::transfer::{Cancel, CancelledBy, Progress, TransferStats, sanitize_file_name, unique_path};
 use crate::{Error, Result};
 
 /// Port for the page; any free port if it's taken.
@@ -133,6 +135,8 @@ impl Drop for Ended {
 /// One open tab.
 pub(super) struct Browser {
     pub(super) name: String,
+    /// Its page reached this device over a phone's cable (USB tethering).
+    pub(super) via_cable: bool,
     /// The tab's event stream, while it's connected.
     events: Option<mpsc::UnboundedSender<String>>,
     /// Which connection `events` belongs to, so an old one closing late
@@ -141,9 +145,11 @@ pub(super) struct Browser {
     gone_since: Option<Instant>,
     /// Offers waiting for an answer, by batch ID.
     offers: HashMap<u64, Offer>,
-    /// Accepted files, downloaded one at a time in this order.
-    queue: VecDeque<Download>,
-    current: Option<Download>,
+    /// Accepted sends not yet downloaded in full: one download each (a
+    /// zip when there's more than one file), fetched in any order.
+    downloads: Vec<Download>,
+    /// Sends just accepted, about to join `downloads`.
+    accepting: HashSet<u64>,
     /// Files this tab may still send: granted when the user accepts its
     /// "can I send you these?" question. Every send is asked about: a tab
     /// is temporary, so there's no "always accept".
@@ -163,12 +169,13 @@ impl Browser {
     fn new(name: String) -> Self {
         Self {
             name,
+            via_cable: false,
             events: None,
             connection: 0,
             gone_since: None,
             offers: HashMap::new(),
-            queue: VecDeque::new(),
-            current: None,
+            downloads: Vec::new(),
+            accepting: HashSet::new(),
             allowance: 0,
             asking: None,
             uploads: HashSet::new(),
@@ -195,12 +202,7 @@ impl Browser {
     /// coming, how recent ones ended, and which uploads were saved. The
     /// page corrects itself from this, whatever it missed.
     fn sync_event(&self) -> String {
-        let owed: Vec<String> = self
-            .current
-            .iter()
-            .chain(&self.queue)
-            .map(Download::summary)
-            .collect();
+        let owed: Vec<String> = self.downloads.iter().map(Download::summary).collect();
         let done: Vec<String> = self
             .recent_down
             .iter()
@@ -225,23 +227,13 @@ impl Browser {
         }
     }
 
-    /// Tell the tab to fetch the next accepted file, if any.
-    fn advance(&mut self) {
-        if self.current.is_none() {
-            self.current = self.queue.pop_front();
-        }
-        if let Some(d) = &self.current {
-            self.push("download", &d.event());
-        }
-    }
-
     /// Everything still owed to a tab that reconnected.
     fn resend(&self) {
         self.push("sync", &self.sync_event());
         for offer in self.offers.values() {
             self.push("offer", &offer.event);
         }
-        if let Some(d) = &self.current {
+        for d in self.downloads.iter().filter(|d| d.streaming.is_none()) {
             self.push("download", &d.event());
         }
     }
@@ -255,47 +247,122 @@ struct Offer {
     answer: oneshot::Sender<Option<bool>>,
 }
 
+/// An accepted send, as the tab downloads it: one download however many
+/// files, so the browser only has to allow one (it holds back a second that
+/// no tap started). Several files go as one zip.
 struct Download {
+    /// The send's batch ID (its first file's ID): the page asks for it by
+    /// this.
     id: u64,
-    /// The send it's part of (its first file's ID).
-    batch: u64,
+    /// What it's saved as: the file's name, or "3 files from Laptop.zip".
     name: String,
+    /// Bytes on the wire.
     size: u64,
     /// Kept until it's settled, so a browser that asks again (a retry, or
-    /// the page's "Download" button) can be served again.
-    item: Outgoing,
+    /// the page's Download button) can be served again.
+    files: Vec<WebFile>,
     /// Requests so far; each one's number.
     attempts: u64,
     /// The request streaming it now, if any.
     streaming: Option<Streaming>,
 }
 
+/// A file in a send to a tab.
+struct WebFile {
+    id: u64,
+    /// Its name; in a zip, its path there ("Trip/day 1/notes.txt").
+    name: String,
+    size: u64,
+    /// Unix seconds, for the zip.
+    modified: u64,
+    item: Outgoing,
+}
+
+impl WebFile {
+    fn new(id: u64, name: String, size: u64, item: Outgoing) -> Self {
+        let metadata = match &item {
+            Outgoing::Path(path) | Outgoing::InFolder { path, .. } => std::fs::metadata(path).ok(),
+            Outgoing::Open { file, .. } => file.metadata().ok(),
+            Outgoing::Pack(_) | Outgoing::EmptyFolder { .. } => None,
+        };
+        let modified = metadata
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        Self {
+            id,
+            name,
+            size,
+            modified,
+            item,
+        }
+    }
+}
+
+/// The zip for these files (same names, same order, every time).
+fn archive_of<'a>(files: impl Iterator<Item = (&'a str, u64, u64)>) -> Archive {
+    Archive::new(
+        files
+            .map(|(name, size, modified)| Entry {
+                name: name.to_owned(),
+                size,
+                modified,
+            })
+            .collect(),
+    )
+}
+
 /// A request streaming a download.
 struct Streaming {
     attempt: u64,
-    /// Tells it to stop: a newer request for the same file took over.
+    /// Stops it for good: cancelled, or sharing stopped.
+    cancel: Cancel,
+    /// Tells it to let go: a newer request for the same send took over.
     stop: Arc<Notify>,
     /// Closes when it has stopped.
     done: watch::Receiver<()>,
 }
 
 impl Download {
-    fn summary(&self) -> String {
-        format!(
-            "{{\"id\":{},\"name\":{},\"size\":{}}}",
-            self.id,
-            json_str(&self.name),
-            self.size
-        )
+    fn new(id: u64, files: Vec<WebFile>, from: &str) -> Self {
+        let (name, size) = match files.as_slice() {
+            [one] => (one.name.clone(), one.size),
+            _ => (
+                format!("{} files from {from}.zip", files.len()),
+                archive_of(files.iter().map(|f| (f.name.as_str(), f.size, f.modified))).total_size(),
+            ),
+        };
+        Self {
+            id,
+            name,
+            size,
+            files,
+            attempts: 0,
+            streaming: None,
+        }
     }
 
-    /// "Fetch this now"; `streaming` says if a request already is.
-    fn event(&self) -> String {
+    fn covers(&self, id: u64) -> bool {
+        self.files.iter().any(|f| f.id == id)
+    }
+
+    fn summary(&self) -> String {
+        let ids: Vec<String> = self.files.iter().map(|f| f.id.to_string()).collect();
         format!(
-            "{{\"id\":{},\"name\":{},\"size\":{},\"streaming\":{}}}",
+            "{{\"id\":{},\"name\":{},\"size\":{},\"ids\":[{}]}}",
             self.id,
             json_str(&self.name),
             self.size,
+            ids.join(",")
+        )
+    }
+
+    /// "Fetch this"; `streaming` says if a request already is.
+    fn event(&self) -> String {
+        let summary = self.summary();
+        format!(
+            "{},\"streaming\":{}}}",
+            &summary[..summary.len() - 1],
             self.streaming.is_some()
         )
     }
@@ -353,16 +420,24 @@ pub(super) fn stop(shared: &Shared, why: StopReason) {
         return;
     };
     let data = format!("{{\"why\":\"{}\"}}", why.word());
-    let mut moving = Vec::new();
+    let mut downloading = Vec::new();
+    let mut uploading = Vec::new();
     for tab in web.browsers.values() {
         tab.push("stopped", &data);
-        moving.extend(tab.current.iter().filter(|d| d.streaming.is_some()).map(|d| d.id));
-        moving.extend(tab.uploads.iter().copied());
+        downloading.extend(
+            tab.downloads
+                .iter()
+                .filter_map(|d| d.streaming.as_ref().map(|s| s.cancel.clone())),
+        );
+        uploading.extend(tab.uploads.iter().copied());
     }
     fail_leftovers(shared, std::mem::take(&mut web.browsers).into_values());
     // Downloads and uploads under way end as "sharing was stopped" (see
     // `ended_error`).
-    for id in moving {
+    for cancel in downloading {
+        cancel.cancel(CancelledBy::Here);
+    }
+    for id in uploading {
         let progress = shared.state().active.get(&id).map(|a| a.progress.clone());
         if let Some(p) = progress {
             p.cancel().cancel(CancelledBy::Here);
@@ -442,7 +517,7 @@ pub(super) fn is_browser(shared: &Shared, id: &Fingerprint) -> bool {
         .is_some_and(|w| w.browsers.contains_key(id))
 }
 
-/// Offer files to a browser and, once accepted, queue them for download.
+/// Offer files to a browser and, once accepted, let it download them.
 pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Outgoing)>) {
     tokio::spawn(async move {
         let files: Vec<(u64, String, u64)> = jobs
@@ -504,19 +579,17 @@ pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Ou
                 for (id, _, _) in &files {
                     shared.emit(NodeEvent::TransferAccepted { id: *id });
                 }
+                tab.accepting.remove(&batch);
                 let items = jobs.into_iter().map(|(_, item)| item);
-                for ((id, name, size), item) in files.iter().zip(items) {
-                    tab.queue.push_back(Download {
-                        id: *id,
-                        batch,
-                        name: name.clone(),
-                        size: *size,
-                        item,
-                        attempts: 0,
-                        streaming: None,
-                    });
-                }
-                tab.advance();
+                let web_files = files
+                    .iter()
+                    .zip(items)
+                    .map(|((id, name, size), item)| WebFile::new(*id, name.clone(), *size, item))
+                    .collect();
+                let d = Download::new(batch, web_files, &shared.device_name);
+                // The page usually started it already, with the Accept tap.
+                tab.push("download", &d.event());
+                tab.downloads.push(d);
             }
             (Ok(Ok(Some(false))), _) => {
                 drop(state);
@@ -552,21 +625,24 @@ fn fail_all(shared: &Shared, files: &[(u64, String, u64)], error: impl Fn() -> E
     }
 }
 
-/// Fail what removed tabs still had queued. Unanswered offers fail on their
-/// own when their answer channel drops.
+/// Fail what removed tabs still had waiting. Unanswered offers fail on
+/// their own when their answer channel drops.
 fn fail_leftovers(shared: &Shared, gone: impl Iterator<Item = Browser>) {
     for tab in gone {
-        for d in tab.current.into_iter().chain(tab.queue) {
-            // A download in progress finishes (or fails) by itself.
+        for d in tab.downloads {
+            // A download under way finishes (or fails) by itself.
             if d.streaming.is_none() {
-                shared.finish(d.id, Err(Error::BrowserGone));
+                for f in &d.files {
+                    shared.finish(f.id, Err(Error::BrowserGone));
+                }
             }
         }
     }
 }
 
 /// Stop the send to a tab that file `id` is part of: still waiting for an
-/// answer, queued, or downloading. False if `id` isn't one.
+/// answer, waiting to be downloaded, or downloading. False if `id` isn't
+/// one.
 pub(super) fn cancel(shared: &Shared, id: u64, by: CancelledBy) -> bool {
     let found = {
         let mut state = shared.state();
@@ -587,14 +663,9 @@ pub(super) fn cancel(shared: &Shared, id: u64, by: CancelledBy) -> bool {
                 }
                 return true;
             }
-            let batch = tab
-                .current
-                .iter()
-                .chain(&tab.queue)
-                .find(|d| d.id == id)
-                .map(|d| d.batch);
-            if let Some(batch) = batch {
-                found = Some(stop_downloads(tab, Some(batch), by));
+            let send = tab.downloads.iter().find(|d| d.covers(id)).map(|d| d.id);
+            if let Some(send) = send {
+                found = Some(stop_downloads(tab, Some(send), by));
                 break;
             }
         }
@@ -609,10 +680,11 @@ pub(super) fn cancel(shared: &Shared, id: u64, by: CancelledBy) -> bool {
     }
 }
 
-/// Downloads stopped: those not started yet, and the one under way.
+/// Downloads stopped: files not started yet, and requests under way.
+#[derive(Default)]
 struct Stopped {
     unstarted: Vec<u64>,
-    streaming: Option<u64>,
+    streaming: Vec<Cancel>,
 }
 
 impl Stopped {
@@ -620,41 +692,30 @@ impl Stopped {
         for id in self.unstarted {
             shared.finish(id, Err(by.error()));
         }
-        if let Some(id) = self.streaming {
-            let progress = shared.state().active.get(&id).map(|a| a.progress.clone());
-            if let Some(p) = progress {
-                p.cancel().cancel(by);
-            }
+        // Each ends, and fails its files, when its stream does.
+        for cancel in self.streaming {
+            cancel.cancel(by);
         }
     }
 }
 
-/// Take a tab's downloads of `batch` (or all of them) off its list, and
-/// tell it. The one downloading now ends when its stream does.
-fn stop_downloads(tab: &mut Browser, batch: Option<u64>, by: CancelledBy) -> Stopped {
-    let ours = |d: &Download| batch.is_none_or(|b| d.batch == b);
-    let mut stopped = Stopped {
-        unstarted: Vec::new(),
-        streaming: None,
-    };
+/// Take the tab's download `send` (or all of them) off its list, and tell
+/// it. One under way ends when it's cancelled (`Stopped::finish`).
+fn stop_downloads(tab: &mut Browser, send: Option<u64>, by: CancelledBy) -> Stopped {
+    let mut stopped = Stopped::default();
     let mut ids = Vec::new();
-    tab.queue.retain(|d| {
-        if ours(d) {
-            stopped.unstarted.push(d.id);
+    tab.downloads.retain(|d| {
+        let ours = send.is_none_or(|s| d.id == s);
+        if ours {
             ids.push(d.id);
+            ids.extend(d.files.iter().map(|f| f.id).filter(|id| *id != d.id));
+            match &d.streaming {
+                None => stopped.unstarted.extend(d.files.iter().map(|f| f.id)),
+                Some(s) => stopped.streaming.push(s.cancel.clone()),
+            }
         }
-        !ours(d)
+        !ours
     });
-    if let Some(d) = tab.current.take_if(|d| ours(d)) {
-        // Off the list either way, so a retry can't pick it up again; the
-        // request streaming it ends when its progress is cancelled.
-        ids.push(d.id);
-        if d.streaming.is_none() {
-            stopped.unstarted.push(d.id);
-        } else {
-            stopped.streaming = Some(d.id);
-        }
-    }
     for id in &ids {
         tab.remember_down(*id, false);
     }
@@ -669,7 +730,6 @@ fn stop_downloads(tab: &mut Browser, batch: Option<u64>, by: CancelledBy) -> Sto
             ),
         );
     }
-    tab.advance();
     stopped
 }
 
@@ -864,7 +924,7 @@ async fn handle(shared: &Arc<Shared>, token: &str, mut tcp: TcpStream) -> std::i
         // The page checks this when its connection drops: an answer means
         // still sharing (any other answer, not; no answer, out of reach).
         ("GET", ["ping"]) => respond(&mut tcp, "200 OK", "application/json", b"{}").await,
-        ("GET", ["events"]) => events(shared, &mut tcp, session, &req.user_agent).await,
+        ("GET", ["events"]) => events(shared, token, &mut tcp, session, &req.user_agent).await,
         ("POST", ["answer"]) => {
             let ok = answer(shared, session, &req.query);
             let status = if ok { "200 OK" } else { "404 Not Found" };
@@ -996,10 +1056,21 @@ async fn page(tcp: &mut TcpStream) -> std::io::Result<()> {
 /// The tab's event stream. While it's open, the tab is a device.
 async fn events(
     shared: &Arc<Shared>,
+    token: &str,
     tcp: &mut TcpStream,
     session: Option<Fingerprint>,
     user_agent: &str,
 ) -> std::io::Result<()> {
+    // How the tab reached this device. Over Wi-Fi with a phone's cable
+    // plugged in too, the page is told the link's address on the cable: if
+    // it can reach it, it's on that phone, and it moves over (faster).
+    let nets = link::local_nets();
+    let here = tcp.local_addr()?;
+    let via = link::kind_of_local(&nets, here.ip());
+    let cable_url = (via != LinkKind::Usb)
+        .then(|| nets.iter().find(|n| n.kind == LinkKind::Usb))
+        .flatten()
+        .map(|n| format!("http://{}:{}/t/{token}", n.ip, here.port()));
     let (tx, mut rx) = mpsc::unbounded_channel();
     let (id, connection) = {
         let mut state = shared.state();
@@ -1020,14 +1091,17 @@ async fn events(
         tab.connection += 1;
         tab.events = Some(tx);
         tab.gone_since = None;
+        tab.via_cable = via == LinkKind::Usb;
         web.idle_since = None;
         tab.push(
             "hello",
             &format!(
-                "{{\"session\":\"{id}\",\"from\":{},\"platform\":{},\"name\":{}}}",
+                "{{\"session\":\"{id}\",\"from\":{},\"platform\":{},\"name\":{},\"via\":\"{}\",\"cable\":{}}}",
                 json_str(&shared.device_name),
                 json_str(&shared.platform),
-                json_str(&tab.name)
+                json_str(&tab.name),
+                if tab.via_cable { "cable" } else { via.name() },
+                cable_url.as_deref().map_or_else(|| "null".to_owned(), json_str)
             ),
         );
         tab.resend();
@@ -1086,16 +1160,91 @@ fn answer(shared: &Shared, session: Option<Fingerprint>, query: &HashMap<String,
         .as_mut()
         .and_then(|w| w.browsers.get_mut(&session))
         .and_then(|tab| tab.offers.remove(&batch));
-    match offer {
-        Some(offer) => offer.answer.send(Some(accept)).is_ok(),
-        None => false,
+    let Some(offer) = offer else {
+        return false;
+    };
+    if accept && let Some(tab) = state.web.as_mut().and_then(|w| w.browsers.get_mut(&session)) {
+        tab.accepting.insert(batch);
     }
+    offer.answer.send(Some(accept)).is_ok()
 }
 
-/// Stream an accepted file to the tab: only the one it was last told to
-/// fetch. Asked for again while it's still that one (the browser retrying a
-/// broken download, or the page's Download button), the newer request
-/// takes over from the older.
+/// How long a request for a send waits for its Accept to land. The page
+/// starts the download in the same tap as Accept (so the browser counts it
+/// as the person's own doing), and it can get here first.
+const CLAIM_WAIT: Duration = Duration::from_secs(15);
+
+/// A request's hold on a download.
+struct Claim {
+    files: Vec<(u64, String, u64, u64, Outgoing)>,
+    name: String,
+    size: u64,
+    attempt: u64,
+    previous: Option<Streaming>,
+    cancel: Cancel,
+    stop: Arc<Notify>,
+    /// Dropped when this request is over (see `Streaming::done`).
+    _done: watch::Sender<()>,
+}
+
+enum Claimed {
+    Got(Claim),
+    /// Accepted (or about to be) but not ready yet.
+    Wait,
+    No,
+}
+
+fn claim(shared: &Shared, session: Fingerprint, id: u64) -> Claimed {
+    let mut state = shared.state();
+    let Some(tab) = state
+        .web
+        .as_mut()
+        .and_then(|w| w.browsers.get_mut(&session))
+    else {
+        return Claimed::No;
+    };
+    let Some(d) = tab.downloads.iter_mut().find(|d| d.id == id) else {
+        let soon = tab.offers.contains_key(&id) || tab.accepting.contains(&id);
+        return if soon { Claimed::Wait } else { Claimed::No };
+    };
+    let files: std::io::Result<Vec<_>> = d
+        .files
+        .iter()
+        .map(|f| {
+            let item = f.item.try_clone()?;
+            Ok((f.id, f.name.clone(), f.size, f.modified, item))
+        })
+        .collect();
+    let Ok(files) = files else {
+        return Claimed::No;
+    };
+    d.attempts += 1;
+    let cancel = Cancel::new();
+    let stop = Arc::new(Notify::new());
+    let (done, done_rx) = watch::channel(());
+    let previous = d.streaming.replace(Streaming {
+        attempt: d.attempts,
+        cancel: cancel.clone(),
+        stop: stop.clone(),
+        done: done_rx,
+    });
+    let claim = Claim {
+        files,
+        name: d.name.clone(),
+        size: d.size,
+        attempt: d.attempts,
+        previous,
+        cancel,
+        stop,
+        _done: done,
+    };
+    tab.push("started", &format!("{{\"id\":{id}}}"));
+    Claimed::Got(claim)
+}
+
+/// Stream an accepted send to the tab, by its batch ID. Asked for again
+/// while it's still on the list (the browser retrying a broken download,
+/// or the page's Download button), the newer request takes over.
 async fn download(
     shared: &Arc<Shared>,
     token: &str,
@@ -1103,63 +1252,58 @@ async fn download(
     session: Fingerprint,
     id: u64,
 ) -> std::io::Result<()> {
-    let claimed = {
-        let mut state = shared.state();
-        let tab = state
-            .web
-            .as_mut()
-            .and_then(|w| w.browsers.get_mut(&session));
-        tab.and_then(|tab| {
-            let d = tab.current.as_mut().filter(|d| d.id == id)?;
-            let item = d.item.try_clone().ok()?;
-            d.attempts += 1;
-            let stop = Arc::new(Notify::new());
-            let (done, done_rx) = watch::channel(());
-            let previous = d.streaming.replace(Streaming {
-                attempt: d.attempts,
-                stop: stop.clone(),
-                done: done_rx,
-            });
-            let claim = (item, d.name.clone(), d.attempts, previous, stop, done);
-            tab.push("started", &format!("{{\"id\":{id}}}"));
-            Some(claim)
-        })
+    let deadline = Instant::now() + CLAIM_WAIT;
+    let claim = loop {
+        match claim(shared, session, id) {
+            Claimed::Got(c) => break c,
+            Claimed::Wait if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            _ => return respond(tcp, "404 Not Found", "text/plain", b"Not found").await,
+        }
     };
-    let Some((item, name, attempt, previous, stop, _done)) = claimed else {
-        return respond(tcp, "404 Not Found", "text/plain", b"Not found").await;
-    };
+    let Claim {
+        files,
+        name,
+        size,
+        attempt,
+        previous,
+        cancel,
+        stop,
+        _done,
+    } = claim;
     if let Some(previous) = previous {
-        // Wait for the older request to let go of the file (its `done`
-        // closes), so the two never read it at once.
+        // The older request lets go of the files (its `done` closes) before
+        // this one reads them, so the two never read at once.
         previous.stop.notify_one();
         let mut done = previous.done;
         let gone = async { while done.changed().await.is_ok() {} };
         let _ = tokio::time::timeout(Duration::from_secs(5), gone).await;
     }
 
+    let about: Vec<(u64, String, u64)> = files
+        .iter()
+        .map(|(id, name, size, _, _)| (*id, name.clone(), *size))
+        .collect();
     let start = Instant::now();
     let streamed = tokio::select! {
-        r = stream_file(shared, tcp, session, id, item, &name) => r,
-        // A newer request took over; it settles the file.
+        r = stream_download(shared, tcp, session, id, &name, size, files, &cancel) => r,
+        by = cancel.until() => Err(by.error()),
+        // A newer request took over; it settles the send.
         () = stop.notified() => return Ok(()),
     };
-    let result = streamed.map(|bytes| {
-        (
-            PathBuf::from(&name),
-            TransferStats {
-                bytes,
-                resumed_from: 0,
-                elapsed: start.elapsed(),
-            },
-        )
-    });
-    match result {
+    match streamed {
         // Broken off (not cancelled, and still sharing): the browser may ask
         // again. Leave it on the list for a moment before failing it.
         Err(e) if !matches!(e, Error::Cancelled | Error::CancelledThere) && live(shared, token) => {
             let wait = {
                 let mut state = shared.state();
-                current_of(&mut state, session, id).map(|d| {
+                let d = state
+                    .web
+                    .as_mut()
+                    .and_then(|w| w.browsers.get_mut(&session))
+                    .and_then(|tab| tab.downloads.iter_mut().find(|d| d.id == id));
+                d.map(|d| {
                     let ours = d.streaming.as_ref().is_some_and(|s| s.attempt == attempt);
                     if ours {
                         d.streaming = None;
@@ -1172,42 +1316,35 @@ async fn download(
                     let shared = shared.clone();
                     tokio::spawn(async move {
                         tokio::time::sleep(RETRY_WINDOW).await;
-                        settle(&shared, session, id, attempt, Err(e), true);
+                        settle(&shared, session, id, attempt, &about, Err(e), true);
                     });
                 }
                 // A newer request has it.
                 Some(false) => {}
                 // Off the list already (the tab went): just fail it.
-                None => shared.finish(id, Err(e)),
+                None => settle(shared, session, id, attempt, &about, Err(e), false),
             }
         }
         result => {
-            let result = result.map_err(|e| ended_error(shared, token, e));
-            settle(shared, session, id, attempt, result, false);
+            let result = result
+                .map(|()| start.elapsed())
+                .map_err(|e| ended_error(shared, token, e));
+            settle(shared, session, id, attempt, &about, result, false);
         }
     }
     Ok(())
 }
 
-/// The download `id`, if it's the one `session` is fetching now.
-fn current_of(state: &mut super::State, session: Fingerprint, id: u64) -> Option<&mut Download> {
-    state
-        .web
-        .as_mut()
-        .and_then(|w| w.browsers.get_mut(&session))
-        .and_then(|tab| tab.current.as_mut())
-        .filter(|d| d.id == id)
-}
-
-/// A download is over: tell the app and the tab, and move on to the next.
-/// `retried_out`: called after `RETRY_WINDOW`, so only if nobody asked
-/// for it again meanwhile and it wasn't settled some other way.
+/// A send's download is over: tell the tab and the app.
+/// `retried_out`: called after `RETRY_WINDOW`, so only if nobody asked for
+/// it again meanwhile and it wasn't settled some other way.
 fn settle(
     shared: &Shared,
     session: Fingerprint,
     id: u64,
     attempt: u64,
-    result: Result<(PathBuf, TransferStats)>,
+    files: &[(u64, String, u64)],
+    result: Result<Duration>,
     retried_out: bool,
 ) {
     let ok = result.is_ok();
@@ -1216,34 +1353,69 @@ fn settle(
         let tab = state
             .web
             .as_mut()
-            .and_then(|w| w.browsers.get_mut(&session))
-            .filter(|tab| tab.current.as_ref().is_some_and(|d| d.id == id));
-        match tab {
-            Some(tab) => {
-                let unclaimed = tab
-                    .current
-                    .as_ref()
-                    .is_some_and(|d| d.attempts == attempt && d.streaming.is_none());
+            .and_then(|w| w.browsers.get_mut(&session));
+        let at = tab
+            .as_ref()
+            .and_then(|tab| tab.downloads.iter().position(|d| d.id == id));
+        match (tab, at) {
+            (Some(tab), Some(at)) => {
+                let d = &tab.downloads[at];
+                let unclaimed = d.attempts == attempt && d.streaming.is_none();
                 if retried_out && !unclaimed {
                     return;
                 }
-                let d = tab.current.take().expect("checked above");
+                let d = tab.downloads.remove(at);
                 // An older request still going (this one overtook it and
                 // won): stop it quietly.
                 if let Some(other) = d.streaming.filter(|s| s.attempt != attempt) {
                     other.stop.notify_one();
                 }
                 tab.remember_down(id, ok);
+                for (file, _, _) in files.iter().filter(|(f, _, _)| *f != id) {
+                    tab.remember_down(*file, ok);
+                }
                 let event = if ok { "delivered" } else { "failed" };
                 tab.push(event, &format!("{{\"id\":{id}}}"));
-                tab.advance();
             }
             // Settled some other way already (cancelled, or the tab went).
-            None if retried_out => return,
-            None => {}
+            _ if retried_out => return,
+            _ => {}
         }
     }
-    shared.finish(id, result);
+    match result {
+        Ok(elapsed) => {
+            for (file, name, size) in files {
+                let stats = TransferStats {
+                    bytes: *size,
+                    resumed_from: 0,
+                    elapsed,
+                };
+                shared.finish(*file, Ok((PathBuf::from(name), stats)));
+            }
+        }
+        Err(e) => {
+            for (file, _, _) in files {
+                shared.finish(*file, Err(copy_error(&e)));
+            }
+        }
+    }
+}
+
+/// The same error again, for the next file of a send that failed as one.
+fn copy_error(e: &Error) -> Error {
+    match e {
+        Error::Cancelled => Error::Cancelled,
+        Error::CancelledThere => Error::CancelledThere,
+        Error::WebShareStopped => Error::WebShareStopped,
+        Error::BrowserStalled => Error::BrowserStalled,
+        Error::BrowserGone => Error::BrowserGone,
+        Error::Truncated { got, expected } => Error::Truncated {
+            got: *got,
+            expected: *expected,
+        },
+        Error::Io(io) => Error::Io(std::io::Error::new(io.kind(), io.to_string())),
+        other => Error::Io(std::io::Error::other(other.to_string())),
+    }
 }
 
 /// Read up to `buf.len()` bytes at `at`, without moving the file's position:
@@ -1264,29 +1436,125 @@ async fn read_chunk(
     .map_err(std::io::Error::other)?
 }
 
-async fn stream_file(
+/// The connection a download goes out on: counts what's sent, gives up on a
+/// browser that takes nothing for `STALL_LIMIT`, and tells the page how far
+/// it's got.
+struct Wire<'a> {
+    tcp: &'a mut TcpStream,
+    shared: &'a Shared,
+    browser: Fingerprint,
+    id: u64,
+    sent: u64,
+    size: u64,
+    told: Instant,
+}
+
+impl Wire<'_> {
+    async fn write(&mut self, mut bytes: &[u8]) -> Result<()> {
+        // In pieces, so a slow browser isn't mistaken for a stalled one:
+        // only no progress at all for `STALL_LIMIT` is.
+        while !bytes.is_empty() {
+            let wrote = tokio::time::timeout(STALL_LIMIT, self.tcp.write(bytes))
+                .await
+                .map_err(|_| Error::BrowserStalled)??;
+            if wrote == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+            }
+            bytes = &bytes[wrote..];
+            self.sent += wrote as u64;
+        }
+        // The page shows the same progress as the app.
+        if self.told.elapsed() >= PAGE_PROGRESS || self.sent == self.size {
+            self.told = Instant::now();
+            if let Some(tab) = self
+                .shared
+                .state()
+                .web
+                .as_ref()
+                .and_then(|w| w.browsers.get(&self.browser))
+            {
+                tab.push(
+                    "progress",
+                    &format!(
+                        "{{\"id\":{},\"bytes\":{},\"size\":{}}}",
+                        self.id, self.sent, self.size
+                    ),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// `size` bytes of `file`, onto the wire.
+    async fn file(
+        &mut self,
+        file: std::fs::File,
+        size: u64,
+        progress: &Progress,
+        mut crc: Option<&mut crc32fast::Hasher>,
+    ) -> Result<()> {
+        let file = Arc::new(file);
+        let mut buf = vec![0u8; BUFFER];
+        let mut done = 0u64;
+        while done < size {
+            let (back, n) = read_chunk(file.clone(), std::mem::take(&mut buf), done).await?;
+            buf = back;
+            let n = n.min((size - done) as usize);
+            if n == 0 {
+                return Err(Error::Truncated {
+                    got: done,
+                    expected: size,
+                });
+            }
+            if let Some(crc) = crc.as_deref_mut() {
+                crc.update(&buf[..n]);
+            }
+            self.write(&buf[..n]).await?;
+            done += n as u64;
+            progress.set(done);
+        }
+        Ok(())
+    }
+}
+
+fn open(item: Outgoing) -> Result<std::fs::File> {
+    match item {
+        Outgoing::Path(path) | Outgoing::InFolder { path, .. } => Ok(std::fs::File::open(path)?),
+        Outgoing::Open { file, .. } => Ok(file),
+        // Never made for a browser (see Node::send).
+        Outgoing::Pack(_) | Outgoing::EmptyFolder { .. } => {
+            Err(Error::Protocol("packs don't go to browsers"))
+        }
+    }
+}
+
+/// Send `files`: the one file as it is, or several as a zip.
+#[allow(clippy::too_many_arguments)]
+async fn stream_download(
     shared: &Shared,
     tcp: &mut TcpStream,
     browser: Fingerprint,
     id: u64,
-    item: Outgoing,
     name: &str,
-) -> Result<u64> {
-    let file = match item {
-        Outgoing::Path(path) | Outgoing::InFolder { path, .. } => std::fs::File::open(path)?,
-        Outgoing::Open { file, .. } => file,
-        // Never made for a browser (see Node::send).
-        Outgoing::Pack(_) | Outgoing::EmptyFolder { .. } => {
-            return Err(Error::Protocol("packs don't go to browsers"));
-        }
+    size: u64,
+    files: Vec<(u64, String, u64, u64, Outgoing)>,
+    cancel: &Cancel,
+) -> Result<()> {
+    // The app follows each file; cancelling any stops them all.
+    let progress: Vec<Progress> = files
+        .iter()
+        .map(|(file, _, size, _, _)| {
+            shared.track_with(*file, browser, *size, Progress::with_cancel(cancel.clone()))
+        })
+        .collect();
+    let kind = if files.len() > 1 {
+        "application/zip"
+    } else {
+        "application/octet-stream"
     };
-    let size = file.metadata()?.len();
-    let progress = shared.track(id, browser, size);
-    let file = Arc::new(file);
-
     let head = format!(
         "HTTP/1.1 200 OK\r\n\
-         Content-Type: application/octet-stream\r\n\
+         Content-Type: {kind}\r\n\
          Content-Length: {size}\r\n\
          Content-Disposition: {}\r\n\
          Cache-Control: no-store\r\n\
@@ -1295,62 +1563,39 @@ async fn stream_file(
         content_disposition(name)
     );
     tcp.write_all(head.as_bytes()).await?;
-    let mut buf = vec![0u8; BUFFER];
-    let mut sent = 0u64;
-    let mut told = Instant::now();
-    while sent < size {
-        let step = async {
-            let (back, n) = read_chunk(file.clone(), std::mem::take(&mut buf), sent).await?;
-            buf = back;
-            let n = n.min((size - sent) as usize);
-            // Written in pieces, so a slow browser isn't mistaken for a
-            // stalled one: only no progress at all for `STALL_LIMIT` is.
-            let mut off = 0;
-            while off < n {
-                let wrote = tokio::time::timeout(STALL_LIMIT, tcp.write(&buf[off..n]))
-                    .await
-                    .map_err(|_| Error::BrowserStalled)??;
-                if wrote == 0 {
-                    return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
-                }
-                off += wrote;
-                progress.set(sent + off as u64);
-            }
-            Ok::<usize, Error>(n)
-        };
-        let n = tokio::select! {
-            n = step => n?,
-            by = progress.cancel().until() => return Err(by.error()),
-        };
-        if n == 0 {
-            break;
+    let mut wire = Wire {
+        tcp,
+        shared,
+        browser,
+        id,
+        sent: 0,
+        size,
+        told: Instant::now(),
+    };
+    if files.len() == 1 {
+        let (_, _, size, _, item) = files.into_iter().next().expect("one file");
+        wire.file(open(item)?, size, &progress[0], None).await?;
+    } else {
+        let mut zip = archive_of(files.iter().map(|(_, n, s, m, _)| (n.as_str(), *s, *m)));
+        for (i, (_, _, size, _, item)) in files.into_iter().enumerate() {
+            wire.write(&zip.local_header(i)).await?;
+            let mut crc = crc32fast::Hasher::new();
+            wire.file(open(item)?, size, &progress[i], Some(&mut crc))
+                .await?;
+            zip.data(size);
+            wire.write(&zip.descriptor(i, crc.finalize())).await?;
         }
-        sent += n as u64;
-        // The page shows the same progress as the app.
-        if told.elapsed() >= PAGE_PROGRESS || sent == size {
-            told = Instant::now();
-            if let Some(tab) = shared
-                .state()
-                .web
-                .as_ref()
-                .and_then(|w| w.browsers.get(&browser))
-            {
-                tab.push(
-                    "progress",
-                    &format!("{{\"id\":{id},\"bytes\":{sent},\"size\":{size}}}"),
-                );
-            }
-        }
+        wire.write(&zip.finish()).await?;
     }
-    if sent < size {
+    if wire.sent != size {
         return Err(Error::Truncated {
-            got: sent,
+            got: wire.sent,
             expected: size,
         });
     }
-    tcp.flush().await?;
-    let _ = tcp.shutdown().await;
-    Ok(sent)
+    wire.tcp.flush().await?;
+    let _ = wire.tcp.shutdown().await;
+    Ok(())
 }
 
 /// Save a file the tab sends, once the user here has accepted it (`ask`).
@@ -1564,7 +1809,27 @@ async fn respond(
     );
     tcp.write_all(head.as_bytes()).await?;
     tcp.write_all(body).await?;
-    tcp.shutdown().await
+    tcp.shutdown().await?;
+    linger(tcp).await;
+    Ok(())
+}
+
+/// Before closing, read (and drop) what the browser is still sending, for a
+/// moment. Closing with a request body unread (a refused upload, say) makes
+/// the system reset the connection, and a reset can wipe out the reply
+/// before the browser reads it.
+async fn linger(tcp: &mut TcpStream) {
+    let drain = async {
+        let mut sink = [0u8; 16 * 1024];
+        let mut left = 1usize << 20;
+        while left > 0 {
+            match tcp.read(&mut sink).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => left = left.saturating_sub(n),
+            }
+        }
+    };
+    let _ = tokio::time::timeout(Duration::from_millis(500), drain).await;
 }
 
 /// This device's address on the local network, as people nearby reach it.

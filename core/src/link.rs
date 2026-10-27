@@ -19,9 +19,10 @@ use crate::identity::Fingerprint;
 /// A kind of network path, fastest-typical first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkKind {
-    /// A USB cable (USB tethering).
+    /// A cable to a phone, of any kind (USB-C, micro-USB, Lightning): the
+    /// phone shares a network over it (USB tethering).
     Usb,
-    /// Ethernet. On Windows a USB-tethered phone also shows up as Ethernet.
+    /// Ethernet, and USB Ethernet adapters.
     Wired,
     /// Straight to the phone's own hotspot: one hop over the air.
     Hotspot,
@@ -128,8 +129,59 @@ impl LocalNet {
     }
 }
 
+/// Whether an adapter's driver is a phone sharing its network over a cable.
+/// The cable doesn't matter (USB-C, micro-USB, Lightning, USB-A to
+/// anything): what shows up is one of these drivers.
+///
+/// - Android, RNDIS: "Remote NDIS based Internet Sharing Device", "Remote
+///   NDIS Compatible Device", Samsung's "SAMSUNG Mobile USB Remote NDIS
+///   Network Device".
+/// - Android 11+ and others, NCM: "UsbNcm Host Device" (Windows' own
+///   driver).
+/// - iPhone and iPad: "Apple Mobile Device Ethernet" (with Apple's drivers).
+fn tethering_driver(description: &str) -> bool {
+    let d = description.to_ascii_lowercase();
+    ["remote ndis", "rndis", "usbncm", "usb ncm", "apple mobile device ethernet", "iphone usb"]
+        .iter()
+        .any(|k| d.contains(k))
+}
+
+/// What kind of path an adapter is, from its name and, where the system
+/// gives one, its driver's description (Windows names a phone's cable just
+/// "Ethernet 3").
+pub fn classify_adapter(name: &str, description: Option<&str>) -> LinkKind {
+    if description.is_some_and(tethering_driver) {
+        return LinkKind::Usb;
+    }
+    match classify(name) {
+        LinkKind::Other => description.map_or(LinkKind::Other, classify),
+        kind => kind,
+    }
+}
+
+/// Driver descriptions of this computer's adapters, by IPv4 address.
+#[cfg(windows)]
+fn descriptions() -> std::collections::HashMap<Ipv4Addr, String> {
+    ipconfig::get_adapters()
+        .unwrap_or_default()
+        .iter()
+        .flat_map(|a| {
+            a.ip_addresses().iter().filter_map(move |ip| match ip {
+                IpAddr::V4(v4) => Some((*v4, a.description().to_owned())),
+                IpAddr::V6(_) => None,
+            })
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn descriptions() -> std::collections::HashMap<Ipv4Addr, String> {
+    std::collections::HashMap::new()
+}
+
 /// This device's IPv4 networks that are up, loopback excluded.
 pub fn local_nets() -> Vec<LocalNet> {
+    let descriptions = descriptions();
     if_addrs::get_if_addrs()
         .unwrap_or_default()
         .into_iter()
@@ -138,7 +190,7 @@ pub fn local_nets() -> Vec<LocalNet> {
             if_addrs::IfAddr::V4(v4) => Some(LocalNet {
                 ip: v4.ip,
                 netmask: v4.netmask,
-                kind: classify(&i.name),
+                kind: classify_adapter(&i.name, descriptions.get(&v4.ip).map(String::as_str)),
             }),
             if_addrs::IfAddr::V6(_) => None,
         })
@@ -265,6 +317,33 @@ mod tests {
         assert_eq!(classify("Ethernet 3"), LinkKind::Wired);
         assert_eq!(classify("eth0"), LinkKind::Wired);
         assert_eq!(classify("rmnet_data0"), LinkKind::Other);
+    }
+
+    #[test]
+    fn knows_a_phone_cable_whatever_the_cable() {
+        // Windows names them all "Ethernet N"; the driver says what it is.
+        for driver in [
+            "Remote NDIS based Internet Sharing Device",
+            "Remote NDIS Compatible Device #2",
+            "SAMSUNG Mobile USB Remote NDIS Network Device",
+            "UsbNcm Host Device",
+            "Apple Mobile Device Ethernet",
+        ] {
+            assert_eq!(classify_adapter("Ethernet 3", Some(driver)), LinkKind::Usb, "{driver}");
+        }
+        // A USB Ethernet adapter is just wired; a PCIe card too.
+        assert_eq!(
+            classify_adapter("Ethernet 2", Some("Realtek USB GbE Family Controller")),
+            LinkKind::Wired
+        );
+        assert_eq!(
+            classify_adapter("Wi-Fi", Some("MediaTek Wi-Fi 7 MT7925 Wireless LAN Card")),
+            LinkKind::Wifi
+        );
+        // Names alone, as on Android and Linux.
+        assert_eq!(classify_adapter("rndis0", None), LinkKind::Usb);
+        assert_eq!(classify_adapter("ncm0", None), LinkKind::Usb);
+        assert_eq!(classify_adapter("usb0", None), LinkKind::Usb);
     }
 
     #[test]

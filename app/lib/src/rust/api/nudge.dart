@@ -102,6 +102,10 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// Accept files from a paired device without asking, or ask again.
   void setAutoAccept({required String deviceId, required bool on_});
 
+  /// On a phone: plugged into a computer by a cable that carries data,
+  /// with USB tethering off. Paired computers nearby are told.
+  void setCableUnused({required bool on_});
+
   /// Sync the clipboard with a paired device, both ways, or stop.
   void setClipboardSync({required String deviceId, required bool on_});
 
@@ -303,6 +307,11 @@ class DeviceInfo {
   /// Clipboard text syncs with it, both ways.
   final bool clipboard;
 
+  /// A cable between the two: "connected" (files can go over it),
+  /// "tethering" (plugged in, but the phone's USB tethering is off), or
+  /// empty.
+  final String cable;
+
   const DeviceInfo({
     required this.id,
     required this.shortId,
@@ -314,6 +323,7 @@ class DeviceInfo {
     required this.autoAccept,
     this.acceptsFromUs,
     required this.clipboard,
+    required this.cable,
   });
 
   @override
@@ -327,7 +337,8 @@ class DeviceInfo {
       reachable.hashCode ^
       autoAccept.hashCode ^
       acceptsFromUs.hashCode ^
-      clipboard.hashCode;
+      clipboard.hashCode ^
+      cable.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -343,7 +354,8 @@ class DeviceInfo {
           reachable == other.reachable &&
           autoAccept == other.autoAccept &&
           acceptsFromUs == other.acceptsFromUs &&
-          clipboard == other.clipboard;
+          clipboard == other.clipboard &&
+          cable == other.cable;
 }
 
 /// A file the platform opened for us: its descriptor and display name. A

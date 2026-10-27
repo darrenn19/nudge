@@ -216,6 +216,15 @@ impl Progress {
         Self::default()
     }
 
+    /// One stopped by `cancel`, shared with others (files sent together
+    /// that stop together).
+    pub fn with_cancel(cancel: Cancel) -> Self {
+        Self(Arc::new(ProgressInner {
+            cancel,
+            ..ProgressInner::default()
+        }))
+    }
+
     /// Bytes of the file that have crossed the network so far, counted from
     /// the start of the file (a resumed transfer starts at its offset).
     pub fn position(&self) -> u64 {

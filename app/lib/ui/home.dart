@@ -5,6 +5,7 @@ import 'dart:ui' show PointerDeviceKind;
 
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/cupertino.dart';
+import 'package:flutter/foundation.dart' show ValueListenable;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
@@ -38,6 +39,12 @@ class _HomeScreenState extends State<HomeScreen> {
   late final StreamSubscription<(String, String)> _clips;
   late final StreamSubscription<String> _notes;
   final _pages = PageController(viewportFraction: 0.74);
+
+  /// For the transfer stream: the device on screen, this device, and what
+  /// lies between them.
+  final _orbKey = GlobalKey();
+  final _selfKey = GlobalKey();
+  final _occluders = <GlobalKey>{};
 
   /// The device on screen; null on the "add a device" page.
   String? _focusId;
@@ -705,147 +712,178 @@ class _HomeScreenState extends State<HomeScreen> {
     final inSize = incoming.fold<int>(0, (s, t) => s + t.size);
     final inBytes = incoming.fold<int>(0, (s, t) => s + t.bytes);
 
-    return Column(
-      children: [
-        Padding(
-          padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-          child: Row(
-            children: [
-              GlassIconButton(
-                icon: CupertinoIcons.clock,
-                tooltip: 'Activity',
-                dot: running.isNotEmpty,
-                onTap: () => showActivity(context, controller),
-              ),
-              const Spacer(),
-              GlassIconButton(
-                icon: CupertinoIcons.globe,
-                tooltip: 'Share without the app',
-                dot: controller.webShareUrl != null,
-                onTap: _openWebShare,
-              ),
-              const SizedBox(width: 10),
-              GlassIconButton(
-                icon: CupertinoIcons.qrcode,
-                tooltip: 'Pair a device',
-                onTap: _openPairing,
-              ),
-            ],
-          ),
-        ),
-        Expanded(
-          child: LayoutBuilder(
-            builder: (context, box) {
-              final orb = math
-                  .min(box.maxWidth * 0.74 - 24, box.maxHeight - _aboveOrb - _underOrb - 8)
-                  .clamp(140.0, 330.0);
-              // Marked only when there's more than one device to choose from.
-              final target = controller.pairedDevices.length > 1 ? controller.sendTarget : null;
-              final isDefault = target != null && target.id == controller.defaultDevice?.id;
-              return Stack(
-                alignment: Alignment.center,
-                children: [
-                  ScrollConfiguration(
-                    // Swipe with a mouse too, not just touch.
-                    behavior: ScrollConfiguration.of(context)
-                        .copyWith(dragDevices: PointerDeviceKind.values.toSet(), scrollbars: false),
-                    child: PageView.builder(
-                      controller: _pages,
-                      itemCount: targets.length + 1,
-                      onPageChanged: (i) {
-                        tapFeedback();
-                        setState(() => _focusId = i < targets.length ? targets[i].id : null);
-                        if (!_moving) _makeCurrent(i);
-                      },
-                      itemBuilder: (context, i) => _Carousel(
-                        pages: _pages,
-                        index: i,
-                        child: i < targets.length
-                            ? _DevicePage(
-                                device: targets[i],
-                                focused: targets[i].id == _focusId,
-                                dragging: _dragging,
-                                transfers: controller.transfers,
-                                size: orb,
-                                mark: targets[i].isBrowser
-                                    ? _Mark.temporary
-                                    : targets[i].id != target?.id
-                                    ? null
-                                    : isDefault
-                                    ? _Mark.defaultDevice
-                                    : _Mark.current,
-                                onMark: () => targets[i].isBrowser
-                                    ? _browserMenu(targets[i])
-                                    : _aboutTarget(targets[i]),
-                                onTap: () => _tapDevice(targets[i]),
-                                onMenu: () => targets[i].isBrowser
-                                    ? _browserMenu(targets[i])
-                                    : _deviceMenu(targets[i]),
-                                onAway: () => _explainAway(targets[i]),
-                                onCancel: controller.cancelWith,
-                              )
-                            : _AddPage(size: orb, focused: _focusId == null, onTap: _openPairing),
-                      ),
-                    ),
-                  ),
-                  if (!isPhone && targets.isNotEmpty) ...[
-                    Positioned(
-                      left: 12,
-                      child: _Arrow(
-                        icon: CupertinoIcons.chevron_left,
-                        visible: _focusId != targets.first.id,
-                        onTap: () => _step(-1),
-                      ),
-                    ),
-                    Positioned(
-                      right: 12,
-                      child: _Arrow(
-                        icon: CupertinoIcons.chevron_right,
-                        visible: _focusId != null,
-                        onTap: () => _step(1),
-                      ),
-                    ),
-                  ],
-                ],
-              );
-            },
-          ),
-        ),
-        _PageDots(
-          onTap: (i) => _moveTo(i, byUser: true),
-          count: targets.length + 1,
-          index: _focusId == null
-              ? targets.length
-              : math.max(0, targets.indexWhere((d) => d.id == _focusId)),
-        ),
-        _FlowGap(
-          // Sending goes up to the device; receiving comes down to this one.
-          direction: linked.isEmpty ? null : (linked.first.incoming ? 1 : -1),
-        ),
-        _Self(
-          onTap: _aboutThisDevice,
-          name: controller.deviceName,
-          progress: incoming.isEmpty || inSize == 0 ? null : inBytes / inSize,
-          busy: incoming.isNotEmpty,
-          arrivals: _arrivals,
-        ),
-        Padding(
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 8),
-          child: AnimatedSwitcher(
-            duration: const Duration(milliseconds: 300),
-            child: Text(
-              _status(running, targets),
-              key: ValueKey(_status(running, targets)),
-              textAlign: TextAlign.center,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Fonts.small,
+    return _FlowScope(
+      orb: _orbKey,
+      self: _selfKey,
+      occluders: _occluders,
+      child: Stack(
+        children: [
+          // Behind everything: the dots between the device and this one.
+          Positioned.fill(
+            child: _FlowStream(
+              // Sending goes up to the device; receiving comes down to this one.
+              direction: linked.isEmpty ? null : (linked.first.incoming ? 1 : -1),
             ),
           ),
-        ),
-        _ActivityPill(controller: controller),
-        const SizedBox(height: 12),
-      ],
+          Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+                child: Row(
+                  children: [
+                    GlassIconButton(
+                      icon: CupertinoIcons.clock,
+                      tooltip: 'Activity',
+                      dot: running.isNotEmpty,
+                      onTap: () => showActivity(context, controller),
+                    ),
+                    const Spacer(),
+                    GlassIconButton(
+                      icon: CupertinoIcons.globe,
+                      tooltip: 'Share without the app',
+                      dot: controller.webShareUrl != null,
+                      onTap: _openWebShare,
+                    ),
+                    const SizedBox(width: 10),
+                    GlassIconButton(
+                      icon: CupertinoIcons.qrcode,
+                      tooltip: 'Pair a device',
+                      onTap: _openPairing,
+                    ),
+                  ],
+                ),
+              ),
+              Expanded(
+                child: LayoutBuilder(
+                  builder: (context, box) {
+                    final orb = math
+                        .min(box.maxWidth * 0.74 - 24, box.maxHeight - _aboveOrb - _underOrb - 8)
+                        .clamp(140.0, 330.0);
+                    // Marked only when there's more than one device to choose from.
+                    final target = controller.pairedDevices.length > 1
+                        ? controller.sendTarget
+                        : null;
+                    final isDefault = target != null && target.id == controller.defaultDevice?.id;
+                    return Stack(
+                      alignment: Alignment.center,
+                      children: [
+                        ScrollConfiguration(
+                          // Swipe with a mouse too, not just touch.
+                          behavior: ScrollConfiguration.of(context).copyWith(
+                            dragDevices: PointerDeviceKind.values.toSet(),
+                            scrollbars: false,
+                          ),
+                          child: PageView.builder(
+                            controller: _pages,
+                            itemCount: targets.length + 1,
+                            onPageChanged: (i) {
+                              tapFeedback();
+                              setState(() => _focusId = i < targets.length ? targets[i].id : null);
+                              if (!_moving) _makeCurrent(i);
+                            },
+                            itemBuilder: (context, i) => _Carousel(
+                              pages: _pages,
+                              index: i,
+                              child: i < targets.length
+                                  ? _DevicePage(
+                                      device: targets[i],
+                                      orbKey: targets[i].id == _focusId ? _orbKey : null,
+                                      focused: targets[i].id == _focusId,
+                                      dragging: _dragging,
+                                      transfers: controller.transfers,
+                                      size: orb,
+                                      mark: targets[i].isBrowser
+                                          ? _Mark.temporary
+                                          : targets[i].id != target?.id
+                                          ? null
+                                          : isDefault
+                                          ? _Mark.defaultDevice
+                                          : _Mark.current,
+                                      onMark: () => targets[i].isBrowser
+                                          ? _browserMenu(targets[i])
+                                          : _aboutTarget(targets[i]),
+                                      onTap: () => _tapDevice(targets[i]),
+                                      onMenu: () => targets[i].isBrowser
+                                          ? _browserMenu(targets[i])
+                                          : _deviceMenu(targets[i]),
+                                      onAway: () => _explainAway(targets[i]),
+                                      onCancel: controller.cancelWith,
+                                    )
+                                  : _AddPage(
+                                      size: orb,
+                                      focused: _focusId == null,
+                                      onTap: _openPairing,
+                                    ),
+                            ),
+                          ),
+                        ),
+                        if (!isPhone && targets.isNotEmpty) ...[
+                          Positioned(
+                            left: 12,
+                            child: _Arrow(
+                              icon: CupertinoIcons.chevron_left,
+                              visible: _focusId != targets.first.id,
+                              onTap: () => _step(-1),
+                            ),
+                          ),
+                          Positioned(
+                            right: 12,
+                            child: _Arrow(
+                              icon: CupertinoIcons.chevron_right,
+                              visible: _focusId != null,
+                              onTap: () => _step(1),
+                            ),
+                          ),
+                        ],
+                      ],
+                    );
+                  },
+                ),
+              ),
+              // Out of the way while files move with the device on screen.
+              _Occludes(
+                active: linked.isEmpty,
+                child: AnimatedOpacity(
+                  opacity: linked.isEmpty ? 1 : 0,
+                  duration: const Duration(milliseconds: 250),
+                  child: _PageDots(
+                    onTap: (i) => _moveTo(i, byUser: true),
+                    count: targets.length + 1,
+                    index: _focusId == null
+                        ? targets.length
+                        : math.max(0, targets.indexWhere((d) => d.id == _focusId)),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 28),
+              _Self(
+                bubbleKey: _selfKey,
+                onTap: _aboutThisDevice,
+                name: controller.deviceName,
+                progress: incoming.isEmpty || inSize == 0 ? null : inBytes / inSize,
+                busy: incoming.isNotEmpty,
+                arrivals: _arrivals,
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 12, 24, 8),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  child: Text(
+                    _status(running, targets),
+                    key: ValueKey(_status(running, targets)),
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Fonts.small,
+                  ),
+                ),
+              ),
+              _ActivityPill(controller: controller),
+              const SizedBox(height: 12),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -1330,13 +1368,172 @@ class _ArrangeSheetState extends State<_ArrangeSheet> {
 }
 
 /// Height of what sits under each device's orb: gap, menu, setting line.
-const _underOrb = 10.0 + 34 + 22;
+const _underOrb = 10.0 + 34 + 22 + _cableSlot;
 
 /// Height of what sits above it: the current/default device mark and a gap.
 const _aboveOrb = 28.0 + 6;
 
 /// Over a device's orb: where "Send latest" (and opening Nudge) goes, or
 /// that it's only a web page, here for now.
+bool _isComputer(DeviceInfo d) => const {'windows', 'macos', 'linux'}.contains(d.platform);
+
+/// Room under a device for its cable pill, kept whether or not it shows, so
+/// nothing moves (or gets cut off) when a cable comes or goes.
+const _cableSlot = 44.0;
+
+/// What a cable between this device and [device] means right now, if
+/// anything: connected over it, or plugged in with the setting it needs
+/// off (USB tethering on the phone), or a cable that only charges.
+enum _CableNote { connected, needsTethering, chargeOnly }
+
+_CableNote? _cableNote(DeviceInfo d, UsbCable here) {
+  if (d.cable == 'connected') return _CableNote.connected;
+  if (!d.paired) return null;
+  // On the phone, its own view of the cable answers at once; the core's
+  // follows a moment later.
+  final computer = isPhone && _isComputer(d);
+  if (d.cable == 'tethering' || (computer && here.couldUse)) return _CableNote.needsTethering;
+  if (computer && here.chargeOnly) return _CableNote.chargeOnly;
+  return null;
+}
+
+/// A cable between two devices, said under the other one: "Connected by
+/// cable" while files can use it, or what to switch on when they can't.
+/// Files use a cable (any kind that carries data: USB-C, micro-USB, USB-A)
+/// once the phone shares a network on it, which only the person can turn
+/// on; then Nudge uses it by itself.
+class _CablePill extends StatelessWidget {
+  const _CablePill({required this.device, required this.note});
+
+  final DeviceInfo device;
+  final _CableNote note;
+
+  /// The phone's name, from whichever end this is.
+  String get _phone => isPhone ? 'this phone' : device.name;
+
+  void _explain(BuildContext context) {
+    final (title, text, items) = switch (note) {
+      _CableNote.connected => (
+        'Connected by cable',
+        device.isBrowser
+            ? "This page reached this computer over the phone's cable, so files go that way."
+            : 'Files go over the cable whenever it beats Wi-Fi, which is usually by a lot. '
+                  'To stop using it, turn off USB tethering on $_phone.',
+        [
+          if (isPhone)
+            MenuItem(
+              label: 'Open USB tethering settings',
+              icon: CupertinoIcons.settings,
+              onTap: () => unawaited(openTetherSettings()),
+            ),
+        ],
+      ),
+      _CableNote.needsTethering => (
+        'Use the cable every time',
+        isPhone
+            ? "Files go over the cable once USB tethering is on, often several times faster than "
+                  "Wi-Fi. Android turns it off whenever the cable comes out, so set it once to come "
+                  'back on by itself: Developer options → Default USB configuration → USB tethering.'
+                  '${usbCable.value.developerOptions ? '' : ' Developer options is hidden until you tap Build number 7 times (in About phone → Software information).'}'
+                  " While it's on, the computer will likely use this phone's internet instead of its Wi-Fi."
+            : 'Files go over the cable once USB tethering is on, but Android turns it off whenever '
+                  'the cable comes out. On ${device.name}, set it once to come back on by itself: tap '
+                  'the note in Nudge there, or go to Developer options → Default USB configuration → '
+                  "USB tethering. While it's on, this computer will likely use the phone's internet "
+                  'instead of its Wi-Fi.',
+        [
+          if (isPhone) ...[
+            MenuItem(
+              label: usbCable.value.developerOptions
+                  ? 'Set it up once (Developer options)'
+                  : 'Set it up once (About phone)',
+              icon: CupertinoIcons.settings,
+              onTap: () => unawaited(openAutoTethering()),
+            ),
+            MenuItem(
+              label: 'Just this time (USB tethering)',
+              icon: CupertinoIcons.bolt,
+              onTap: () => unawaited(openTetherSettings()),
+            ),
+          ],
+        ],
+      ),
+      _CableNote.chargeOnly => (
+        'This cable only charges',
+        "It carries power but no data, so files can't go over it. "
+            'Use a cable that carries data: the one that came with the phone usually does, '
+            'whether it ends in USB-C, micro-USB or USB-A.',
+        <MenuItem>[],
+      ),
+    };
+    showMenuSheet(context, title: title, subtitle: text, items: items);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final (text, tone) = switch (note) {
+      _CableNote.connected => ('Connected by cable', Palette.good),
+      _CableNote.needsTethering => ('Plugged in · turn on USB tethering', Palette.accent),
+      _CableNote.chargeOnly => ('This cable only charges', Palette.muted),
+    };
+    final action = note == _CableNote.needsTethering;
+    return Tooltip(
+      message: action ? 'How to send over the cable' : 'About the cable',
+      child: Pressable(
+        onTap: () => _explain(context),
+        child: Container(
+          height: 32,
+          constraints: const BoxConstraints(maxWidth: 320),
+          // The same on both sides, with the arrow (when there is one) as
+          // wide as the icon, so the words sit in the middle.
+          padding: const EdgeInsets.symmetric(horizontal: 14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            color: Color.alphaBlend(tone.withValues(alpha: 0.12), Palette.glass),
+            border: Border.all(color: tone.withValues(alpha: 0.35)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (note == _CableNote.connected)
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: tone,
+                    shape: BoxShape.circle,
+                    boxShadow: [BoxShadow(color: tone.withValues(alpha: 0.6), blurRadius: 8)],
+                  ),
+                )
+              else
+                Icon(
+                  note == _CableNote.chargeOnly
+                      ? CupertinoIcons.battery_25
+                      : CupertinoIcons.bolt_fill,
+                  size: 14,
+                  color: tone,
+                ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  text,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Fonts.label.copyWith(height: 1.1),
+                ),
+              ),
+              if (action) ...[
+                const SizedBox(width: 8),
+                Icon(CupertinoIcons.chevron_right, size: 14, color: tone),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 enum _Mark { current, defaultDevice, temporary }
 
 /// "Current device" or "Default device", over that device's orb. Tap to
@@ -1424,6 +1621,7 @@ class _Carousel extends StatelessWidget {
 class _DevicePage extends StatefulWidget {
   const _DevicePage({
     required this.device,
+    this.orbKey,
     required this.focused,
     required this.dragging,
     required this.transfers,
@@ -1437,6 +1635,9 @@ class _DevicePage extends StatefulWidget {
   });
 
   final DeviceInfo device;
+
+  /// Set on the device on screen, for the transfer stream to find.
+  final GlobalKey? orbKey;
   final bool focused;
   final bool dragging;
   final List<Transfer> transfers;
@@ -1628,7 +1829,7 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
               child: Transform.scale(scale: pop, child: child),
             );
           },
-          child: orb,
+          child: widget.orbKey == null ? orb : KeyedSubtree(key: widget.orbKey, child: orb),
         ),
         const SizedBox(height: 10),
         // The menu for a paired device, centred under it, and whether it
@@ -1640,43 +1841,47 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
             opacity: widget.focused && (d.paired || d.isBrowser) ? 1 : 0,
             duration: const Duration(milliseconds: 250),
             child: running.any((t) => t.cancellable)
-                ? Tooltip(
-                    message: running.every((t) => t.incoming) ? 'Stop receiving' : 'Stop sending',
-                    child: Pressable(
-                      onTap: () => widget.onCancel(d),
-                      child: Container(
-                        height: 34,
-                        padding: const EdgeInsets.symmetric(horizontal: 14),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(17),
-                          color: Palette.glass,
-                          border: Border.all(color: Palette.glassBorder),
-                        ),
-                        child: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(CupertinoIcons.xmark, size: 13, color: Palette.text),
-                            SizedBox(width: 6),
-                            Text('Cancel', style: TextStyle(color: Palette.text, fontSize: 14)),
-                          ],
+                ? _Occludes(
+                    child: Tooltip(
+                      message: running.every((t) => t.incoming) ? 'Stop receiving' : 'Stop sending',
+                      child: Pressable(
+                        onTap: () => widget.onCancel(d),
+                        child: Container(
+                          height: 34,
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(17),
+                            color: Palette.glass,
+                            border: Border.all(color: Palette.glassBorder),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(CupertinoIcons.xmark, size: 13, color: Palette.text),
+                              SizedBox(width: 6),
+                              Text('Cancel', style: TextStyle(color: Palette.text, fontSize: 14)),
+                            ],
+                          ),
                         ),
                       ),
                     ),
                   )
                 : d.paired || d.isBrowser
-                ? Tooltip(
-                    message: 'More',
-                    child: Pressable(
-                      onTap: widget.onMenu,
-                      child: Container(
-                        width: 44,
-                        height: 34,
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(17),
-                          color: Palette.glass,
-                          border: Border.all(color: Palette.glassBorder),
+                ? _Occludes(
+                    child: Tooltip(
+                      message: 'More',
+                      child: Pressable(
+                        onTap: widget.onMenu,
+                        child: Container(
+                          width: 44,
+                          height: 34,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(17),
+                            color: Palette.glass,
+                            border: Border.all(color: Palette.glassBorder),
+                          ),
+                          child: const Icon(CupertinoIcons.ellipsis, size: 16, color: Palette.text),
                         ),
-                        child: const Icon(CupertinoIcons.ellipsis, size: 16, color: Palette.text),
                       ),
                     ),
                   )
@@ -1686,34 +1891,66 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
         SizedBox(
           height: 22,
           child: AnimatedOpacity(
-            opacity: widget.focused && (d.isBrowser || d.paired && d.acceptsFromUs != null) ? 1 : 0,
+            // Out of the way while files move, so the stream between the two
+            // devices runs straight.
+            opacity:
+                widget.focused &&
+                    running.isEmpty &&
+                    (d.isBrowser || d.paired && d.acceptsFromUs != null)
+                ? 1
+                : 0,
             duration: const Duration(milliseconds: 250),
             child: Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    d.isBrowser
-                        ? CupertinoIcons.clock
-                        : d.acceptsFromUs == true
-                        ? CupertinoIcons.checkmark_shield
-                        : CupertinoIcons.hand_raised,
-                    size: 13,
-                    color: Palette.muted,
-                  ),
-                  const SizedBox(width: 5),
-                  Text(
-                    d.isBrowser
-                        ? 'Not paired · gone when the page closes'
-                        : d.acceptsFromUs == true
-                        ? 'Accepts your files automatically'
-                        : 'Asks before accepting your files',
-                    style: Fonts.small.copyWith(fontSize: 12),
-                  ),
-                ],
+              child: _Occludes(
+                active: running.isEmpty,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      d.isBrowser
+                          ? CupertinoIcons.clock
+                          : d.acceptsFromUs == true
+                          ? CupertinoIcons.checkmark_shield
+                          : CupertinoIcons.hand_raised,
+                      size: 13,
+                      color: Palette.muted,
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      d.isBrowser
+                          ? 'Not paired · gone when the page closes'
+                          : d.acceptsFromUs == true
+                          ? 'Accepts your files automatically'
+                          : 'Asks before accepting your files',
+                      style: Fonts.small.copyWith(fontSize: 12),
+                    ),
+                  ],
+                ),
               ),
             ),
+          ),
+        ),
+        // A cable between the two: connected over it, or what to switch on.
+        SizedBox(
+          height: _cableSlot,
+          child: ValueListenableBuilder<UsbCable>(
+            valueListenable: usbCable,
+            builder: (context, here, _) {
+              final note = _cableNote(d, here);
+              return AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                child: note == null || !widget.focused || running.isNotEmpty
+                    ? const SizedBox.shrink()
+                    : Align(
+                        key: ValueKey(note),
+                        alignment: Alignment.bottomCenter,
+                        child: _Occludes(
+                          child: _CablePill(device: d, note: note),
+                        ),
+                      ),
+              );
+            },
           ),
         ),
       ],
@@ -1816,90 +2053,250 @@ class _PageDots extends StatelessWidget {
   }
 }
 
-/// The gap between the device on screen and this one. Dots flow up while
-/// sending ([direction] -1) and down while receiving (1).
-class _FlowGap extends StatefulWidget {
-  const _FlowGap({required this.direction});
+/// The circles at either end of a transfer, and what lies between them,
+/// for [_FlowStream] to find on screen.
+class _FlowScope extends InheritedWidget {
+  const _FlowScope({
+    required this.orb,
+    required this.self,
+    required this.occluders,
+    required super.child,
+  });
 
-  final int? direction;
+  /// The device on screen's circle, and this device's bubble.
+  final GlobalKey orb;
+  final GlobalKey self;
+
+  /// Things the stream passes behind (buttons, pills, text).
+  final Set<GlobalKey> occluders;
+
+  static _FlowScope? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<_FlowScope>();
 
   @override
-  State<_FlowGap> createState() => _FlowGapState();
+  bool updateShouldNotify(_FlowScope old) => false;
 }
 
-class _FlowGapState extends State<_FlowGap> with SingleTickerProviderStateMixin {
-  late final _t = AnimationController(vsync: this, duration: const Duration(milliseconds: 1100));
+/// Something the transfer stream passes behind: dots fade out as they reach
+/// it and back in past it, rather than crossing it.
+class _Occludes extends StatefulWidget {
+  const _Occludes({this.active = true, required this.child});
+
+  /// False while what it wraps is hidden: the stream goes straight past.
+  final bool active;
+  final Widget child;
 
   @override
-  void initState() {
-    super.initState();
-    _sync();
+  State<_Occludes> createState() => _OccludesState();
+}
+
+class _OccludesState extends State<_Occludes> {
+  final _key = GlobalKey();
+  _FlowScope? _scope;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _scope?.occluders.remove(_key);
+    _scope = _FlowScope.of(context);
+    _apply();
   }
 
   @override
-  void didUpdateWidget(_FlowGap old) {
+  void didUpdateWidget(_Occludes old) {
     super.didUpdateWidget(old);
-    _sync();
+    _apply();
   }
 
-  /// Only tick while something's moving.
-  void _sync() {
-    if (widget.direction == null) {
-      _t.stop();
-    } else if (!_t.isAnimating) {
-      _t.repeat();
+  void _apply() {
+    if (widget.active) {
+      _scope?.occluders.add(_key);
+    } else {
+      _scope?.occluders.remove(_key);
     }
   }
 
   @override
   void dispose() {
-    _t.dispose();
+    _scope?.occluders.remove(_key);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => KeyedSubtree(key: _key, child: widget.child);
+}
+
+/// Dots streaming in a straight line between the device on screen and this
+/// one: up while sending ([direction] -1), down while receiving (1). Evenly
+/// spaced, at a steady speed whatever the distance, fading in as they leave
+/// one circle and out as they reach the other.
+class _FlowStream extends StatefulWidget {
+  const _FlowStream({required this.direction});
+
+  final int? direction;
+
+  @override
+  State<_FlowStream> createState() => _FlowStreamState();
+}
+
+class _FlowStreamState extends State<_FlowStream> with TickerProviderStateMixin {
+  /// Time since the stream started, driving the dots.
+  final _clock = ValueNotifier<Duration>(Duration.zero);
+  late final _ticker = createTicker((elapsed) => _clock.value = elapsed);
+
+  /// Fades the whole stream in and out as transfers start and stop.
+  late final _shown = AnimationController(vsync: this, duration: const Duration(milliseconds: 300));
+
+  /// The direction while fading out, after the transfer has ended.
+  int _direction = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    _shown.addStatusListener((s) {
+      if (s == AnimationStatus.dismissed) _ticker.stop();
+    });
+    _sync();
+  }
+
+  @override
+  void didUpdateWidget(_FlowStream old) {
+    super.didUpdateWidget(old);
+    _sync();
+  }
+
+  void _sync() {
+    final direction = widget.direction;
+    if (direction == null) {
+      _shown.reverse();
+      return;
+    }
+    _direction = direction;
+    if (!_ticker.isActive) _ticker.start();
+    _shown.forward();
+  }
+
+  @override
+  void dispose() {
+    _ticker.dispose();
+    _shown.dispose();
+    _clock.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      height: 44,
-      width: 24,
-      child: widget.direction == null
-          ? null
-          : RepaintBoundary(child: CustomPaint(painter: _FlowPainter(_t, widget.direction!))),
+    final scope = _FlowScope.of(context);
+    if (scope == null) return const SizedBox.shrink();
+    return IgnorePointer(
+      child: RepaintBoundary(
+        child: CustomPaint(
+          size: Size.infinite,
+          painter: _StreamPainter(
+            clock: _clock,
+            shown: _shown,
+            direction: () => _direction,
+            scope: scope,
+            canvasBox: () => context.findRenderObject() as RenderBox?,
+          ),
+        ),
+      ),
     );
   }
 }
 
-class _FlowPainter extends CustomPainter {
-  _FlowPainter(this.t, this.direction) : super(repaint: t);
+class _StreamPainter extends CustomPainter {
+  _StreamPainter({
+    required this.clock,
+    required this.shown,
+    required this.direction,
+    required this.scope,
+    required this.canvasBox,
+  }) : super(repaint: Listenable.merge([clock, shown]));
 
-  final Animation<double> t;
-  final int direction;
+  final ValueListenable<Duration> clock;
+  final Animation<double> shown;
+  final int Function() direction;
+  final _FlowScope scope;
+  final RenderBox? Function() canvasBox;
 
-  static const _dots = 3;
+  /// Logical pixels per second, and between dots.
+  static const _speed = 150.0;
+  static const _spacing = 22.0;
 
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint();
-    final top = Offset(size.width / 2, 2);
-    final bottom = Offset(size.width / 2, size.height - 2);
-    final (from, to) = direction > 0 ? (top, bottom) : (bottom, top);
-    for (var k = 0; k < _dots; k++) {
-      final p = (t.value + k / _dots) % 1;
-      // Fade in at the start and out at the end.
-      final alpha = math.sin(math.pi * p);
-      paint.color = Palette.text.withValues(alpha: 0.8 * alpha);
-      canvas.drawCircle(Offset.lerp(from, to, p)!, 2 + 1.5 * alpha, paint);
-    }
+  /// Distance over which a dot fades in, out, and around what it passes.
+  static const _fade = 16.0;
+
+  /// Where `key`'s widget is, in this canvas's coordinates.
+  Rect? _rect(GlobalKey key, RenderBox canvas) {
+    final box = key.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return null;
+    final topLeft = canvas.globalToLocal(box.localToGlobal(Offset.zero));
+    final bottomRight = canvas.globalToLocal(box.localToGlobal(box.size.bottomRight(Offset.zero)));
+    return Rect.fromPoints(topLeft, bottomRight);
   }
 
   @override
-  bool shouldRepaint(_FlowPainter old) => old.direction != direction;
+  void paint(Canvas canvas, Size size) {
+    if (shown.value == 0) return;
+    final box = canvasBox();
+    if (box == null || !box.hasSize) return;
+    final orb = _rect(scope.orb, box);
+    final self = _rect(scope.self, box);
+    if (orb == null || self == null) return;
+
+    // From just inside the orb's outer ring to just short of the bubble.
+    final top = Offset(orb.center.dx, orb.bottom - 4);
+    final bottom = Offset(self.center.dx, self.top - 6);
+    final length = (bottom - top).distance;
+    if (length < _spacing * 2) return;
+    final (from, to) = direction() > 0 ? (top, bottom) : (bottom, top);
+
+    // What's on the way, as gaps along the line.
+    final gaps = <(double, double)>[];
+    for (final key in scope.occluders) {
+      final r = _rect(key, box);
+      if (r == null || r.left > top.dx || r.right < top.dx) continue;
+      final a = ((r.top - top.dy) / (bottom.dy - top.dy)).clamp(0.0, 1.0) * length;
+      final b = ((r.bottom - top.dy) / (bottom.dy - top.dy)).clamp(0.0, 1.0) * length;
+      if (b > a) gaps.add(direction() > 0 ? (a, b) : (length - b, length - a));
+    }
+
+    final seconds = clock.value.inMicroseconds / 1e6;
+    final offset = (seconds * _speed) % _spacing;
+    final paint = Paint();
+    for (var s = offset; s < length; s += _spacing) {
+      // Fade near the ends, and around anything it passes behind.
+      var alpha = math.min(_ease(s / _fade), _ease((length - s) / _fade));
+      for (final (a, b) in gaps) {
+        if (s > a - _fade && s < b + _fade) {
+          final inside = s >= a && s <= b;
+          alpha = inside
+              ? 0
+              : math.min(alpha, _ease(math.min((a - s).abs(), (s - b).abs()) / _fade));
+        }
+      }
+      if (alpha <= 0) continue;
+      paint.color = Palette.text.withValues(alpha: 0.85 * alpha * shown.value);
+      canvas.drawCircle(Offset.lerp(from, to, s / length)!, 1.6 + 1.2 * alpha, paint);
+    }
+  }
+
+  /// 0 → 1, smoothly, for x from 0 to 1.
+  static double _ease(double x) {
+    final t = x.clamp(0.0, 1.0);
+    return t * t * (3 - 2 * t);
+  }
+
+  @override
+  bool shouldRepaint(_StreamPainter old) => true;
 }
 
 /// This device, small, under the big orb. Rings while receiving; pops
 /// green when something arrives.
 class _Self extends StatefulWidget {
   const _Self({
+    this.bubbleKey,
     required this.onTap,
     required this.name,
     required this.progress,
@@ -1907,6 +2304,8 @@ class _Self extends StatefulWidget {
     required this.arrivals,
   });
 
+  /// On the bubble itself, for the transfer stream to find.
+  final GlobalKey? bubbleKey;
   final VoidCallback onTap;
   final String name;
   final double? progress;
@@ -1951,6 +2350,7 @@ class _SelfState extends State<_Self> with SingleTickerProviderStateMixin {
                   alignment: Alignment.center,
                   children: [
                     Container(
+                      key: widget.bubbleKey,
                       width: size,
                       height: size,
                       decoration: BoxDecoration(

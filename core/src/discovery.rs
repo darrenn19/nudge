@@ -167,7 +167,23 @@ impl Discovery {
     /// Ask nearby devices to announce themselves now, e.g. when a device
     /// list opens. Cheap; safe to call often.
     pub fn refresh(&self) {
-        if let Some(beacon) = &self.beacon {
+        self.refresher().refresh();
+    }
+
+    /// A way to `refresh` from elsewhere (when a network comes or goes).
+    pub fn refresher(&self) -> Refresher {
+        Refresher(self.beacon.clone())
+    }
+}
+
+/// See `Discovery::refresher`.
+#[derive(Clone)]
+pub struct Refresher(Option<Arc<Beacon>>);
+
+impl Refresher {
+    /// Ask devices on every network this one is on now to say they're here.
+    pub fn refresh(&self) {
+        if let Some(beacon) = &self.0 {
             beacon.send_all(KIND_QUERY);
         }
     }

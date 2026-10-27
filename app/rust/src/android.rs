@@ -231,6 +231,21 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_setReceiving<'l>(
     }
 }
 
+/// Plugged into a computer with USB tethering off: see
+/// `NudgeApp::set_cable_unused`. From the background, so paired computers
+/// hear it with the window closed too.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_setCableUnused<'l>(
+    _: JNIEnv<'l>,
+    _: JClass<'l>,
+    on: jboolean,
+) {
+    if let Some(c) = core() {
+        let _guard = runtime().enter();
+        c.node.set_cable_unused(on != 0);
+    }
+}
+
 /// Answer a "hotspotWanted" event; a null `ssid` means it didn't start.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_darrenn19_nudge_Core_hotspotReady<'l>(

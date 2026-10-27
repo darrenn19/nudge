@@ -4,6 +4,7 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -451,4 +452,74 @@ void listenForCopies(void Function(String text) onCopy, {void Function(Uint8List
 Future<bool> setClipboardImage(Uint8List image) async {
   if (!Platform.isWindows) return false;
   return await _clipboard.invokeMethod<bool>('setImage', image) ?? false;
+}
+
+/// A cable from this phone to a computer, as Android sees it.
+class UsbCable {
+  const UsbCable({
+    this.data = false,
+    this.tethering = false,
+    this.chargeOnly = false,
+    this.asked = false,
+    this.developerOptions = false,
+  });
+
+  /// A computer at the other end, talking USB (not just power).
+  final bool data;
+
+  /// The phone shares a network over the cable (USB tethering), so files go
+  /// over it. Any cable that carries data works: USB-C, micro-USB, USB-A.
+  final bool tethering;
+
+  /// Power from a computer but no data: a cable that only charges.
+  final bool chargeOnly;
+
+  /// The person was shown how to use the cable once; not asked again.
+  final bool asked;
+
+  /// Developer options is on (needed to make tethering come on by itself).
+  final bool developerOptions;
+
+  /// Plugged in, files still go over Wi-Fi, and it's worth saying so: only
+  /// until the person has been shown once.
+  bool get couldUse => data && !tethering && !asked;
+}
+
+/// The cable right now; Android only (always none elsewhere).
+final usbCable = ValueNotifier<UsbCable>(const UsbCable());
+
+/// Keep [usbCable] up to date.
+Future<void> watchUsbCable() async {
+  if (!Platform.isAndroid) return;
+  UsbCable read(Object? state) {
+    final m = (state as Map?) ?? const {};
+    return UsbCable(
+      data: m['data'] == true,
+      tethering: m['tethering'] == true,
+      chargeOnly: m['chargeOnly'] == true,
+      asked: m['asked'] == true,
+      developerOptions: m['developerOptions'] == true,
+    );
+  }
+
+  _onAndroid('usbCable', (state) => usbCable.value = read(state));
+  _readUsbCable = () async => usbCable.value = read(await _channel.invokeMethod<Object?>('usbCable'));
+  await _readUsbCable!();
+}
+
+Future<void> Function()? _readUsbCable;
+
+/// Android's screen with the USB tethering switch (for this time only).
+Future<void> openTetherSettings() async {
+  if (!Platform.isAndroid) return;
+  await _channel.invokeMethod('openTetherSettings');
+  await _readUsbCable?.call();
+}
+
+/// Where to make USB tethering come on by itself whenever the phone is
+/// plugged into a computer (Developer options → Default USB configuration).
+Future<void> openAutoTethering() async {
+  if (!Platform.isAndroid) return;
+  await _channel.invokeMethod('openAutoTethering');
+  await _readUsbCable?.call();
 }

@@ -18,7 +18,7 @@ clap = { version = "4", features = ["derive"] }
 dirs = "7.0.0"
 nudge-core = { path = "../core" }
 qrcode = { version = "0.14.1", default-features = false }
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["io-std", "io-util", "net", "rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]
 workspace = true

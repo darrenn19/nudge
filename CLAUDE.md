@@ -23,7 +23,7 @@ The app never asks the user which path to use.
 2. In parallel, bring up a **direct link** (Android local-only hotspot, or Wi-Fi Direct) in the background.
 3. After a few seconds, compare measured speed vs. the expected direct speed for the *remaining* bytes.
 4. If direct wins meaningfully (≥20% faster AND saves ≥10 s), switch and **resume from the exact byte offset**.
-5. If a **USB-C cable** is connected, prefer it (fastest of all).
+5. If a **data cable** is connected (any kind: USB-C, micro-USB, Lightning), prefer it (fastest of all). Files go over it once the phone shares a network on it (USB tethering); an app can't switch that on, and Android switches it off whenever the cable comes out, so the phone asks once, steering to Developer options → Default USB configuration → USB tethering (it then comes on by itself), and neither side asks again (`UsbCable.kt`). A phone's cable is recognised by its driver, not its adapter name (`core/src/link.rs`).
 - Store real measured speeds per device pair + path, and use that history for estimates (not hard-coded numbers).
 - Show the ETA as information, never as a question. Keep a manual override in settings ("always use router").
 - Fallback: on phones that can't host a hotspot while staying on Wi-Fi, decide up front from history.
@@ -110,9 +110,9 @@ Goal: AirDrop-like behaviour — send/receive with the app closed, receive while
 2. Android + Windows shells with discovery and QR pairing.
 3. Seamless mode: background process, locked receiving, OS integrations (see "Seamless mode" above).
 4. Multi-file packing and folder transfer (packs: `core/src/pack.rs`; folders from Windows and Android, empty ones included).
-5. Direct-link mode and start-then-upgrade switching. ← next
-6. USB-C cable path.
-7. macOS, then iOS.
+5. Direct-link mode and start-then-upgrade switching. (done: `core/src/node/paths.rs`)
+6. Cable path, any data cable, via USB tethering. (done; a cable without tethering, over Android Open Accessory, would need a Windows USB driver)
+7. macOS, then iOS. ← next
 
 ## Working conventions
 - Measure before optimizing: every performance change should come with benchmark numbers.

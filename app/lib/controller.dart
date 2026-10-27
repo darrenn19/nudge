@@ -218,6 +218,7 @@ class NudgeController extends ChangeNotifier {
     _loadWhenLocked();
     // Android's background service applies it as the phone locks.
     if (!Platform.isAndroid) unawaited(listenForLock(_setLocked));
+    unawaited(watchUsbCable());
   }
 
   // Files while locked. The choice is kept beside the identity; the core is

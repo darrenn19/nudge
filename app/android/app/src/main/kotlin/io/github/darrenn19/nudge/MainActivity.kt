@@ -28,6 +28,7 @@ import java.util.concurrent.Executors
 class MainActivity : FlutterActivity() {
     private var channel: MethodChannel? = null
     private var platform: MethodChannel? = null
+    private var cable: android.content.BroadcastReceiver? = null
     private var pendingPick: MethodChannel.Result? = null
     private var pendingFolder: MethodChannel.Result? = null
     private val worker = Executors.newSingleThreadExecutor()
@@ -63,6 +64,11 @@ class MainActivity : FlutterActivity() {
         super.configureFlutterEngine(flutterEngine)
         platform = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, PlatformChannel.NAME)
             .apply { setMethodCallHandler(PlatformChannel(applicationContext)) }
+        // A cable plugged in or out, or USB tethering switched: the window
+        // offers the cable when it would help.
+        cable = UsbCable.watch(this) {
+            platform?.invokeMethod("usbCable", UsbCable.state(this))
+        }
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).apply {
             setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -287,6 +293,8 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onDestroy() {
+        cable?.let { runCatching { unregisterReceiver(it) } }
+        cable = null
         worker.shutdown()
         super.onDestroy()
     }

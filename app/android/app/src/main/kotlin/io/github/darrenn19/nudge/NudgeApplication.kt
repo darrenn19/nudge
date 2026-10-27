@@ -28,6 +28,7 @@ class NudgeApplication : Application() {
             )
             if (error != null) Log.e("Nudge", "Couldn't start: $error")
             LockState.watch(this)
+            UsbCable.tellCore(this)
         }, "nudge-start").start()
     }
 }

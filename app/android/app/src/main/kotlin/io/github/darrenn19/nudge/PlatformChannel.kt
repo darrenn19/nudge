@@ -103,6 +103,15 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
             }
             "clipboardIfNew" -> result.success(ClipSync.ifNew(context))
             "isLocked" -> result.success(LockState.isLocked(context))
+            "usbCable" -> result.success(UsbCable.state(context))
+            "openTetherSettings" -> {
+                UsbCable.openTetherSettings(context)
+                result.success(null)
+            }
+            "openAutoTethering" -> {
+                UsbCable.openAutoTethering(context)
+                result.success(null)
+            }
             "setShareTargets" -> {
                 val devices = call.argument<List<Map<String, String>>>("devices").orEmpty()
                     .mapNotNull { d -> d["id"]?.let { id -> id to (d["name"] ?: "Device") } }

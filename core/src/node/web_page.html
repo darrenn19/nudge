@@ -133,6 +133,13 @@
     color: var(--warn); background: rgba(255,196,107,.12); border: 1px solid rgba(255,196,107,.35);
   }
   .tools { display: flex; gap: 10px; margin-top: 18px; }
+  /* "Connected by cable", as in the app. */
+  .cable {
+    display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 14px 0 12px; margin-top: 16px;
+    border-radius: 16px; font-size: 13px; font-weight: 500; color: var(--text);
+    background: rgba(123,224,166,.12); border: 1px solid rgba(123,224,166,.35);
+  }
+  .cable i { width: 8px; height: 8px; border-radius: 50%; background: var(--good); box-shadow: 0 0 8px rgba(123,224,166,.6); }
   .pill {
     display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 22px; cursor: pointer;
     background: var(--glass); border: 1px solid var(--line); font-size: 14px; font-weight: 500; transition: transform .15s;
@@ -252,6 +259,7 @@
       <span id="meName">This device</span>
       <span class="temp" title="Ends when you close this page">Temporary</span>
     </div>
+    <div class="cable" id="cable" hidden><i></i>Connected by cable</div>
 
     <p class="hint" id="hint">Opening a connection…</p>
     <div class="tools">
@@ -340,7 +348,7 @@ try { session = sessionStorage.getItem("nudge-session") || ""; } catch (e) {}
 /* link: "connecting" | "live" | "lost" (just dropped) | "away" (can't reach
    it) | "offline" (this device has no network) | "ended" (sharing stopped). */
 const state = {
-  link: "connecting", connected: false, why: "", from: "the other device",
+  link: "connecting", connected: false, why: "", via: "", from: "the other device",
   offers: [], uploading: false, asking: false, finishing: false, upProgress: null, flash: null,
   upName: "", upIndex: 0, upCount: 0,
 };
@@ -448,11 +456,12 @@ function render() {
 
   // Header.
   const status = {
-    connecting: "Connecting…", live: "Connected · temporary", lost: "Reconnecting…",
+    connecting: "Connecting…", live: state.via === "cable" ? "Connected by cable · temporary" : "Connected · temporary", lost: "Reconnecting…",
     away: "Out of reach", offline: "Offline", ended: "Sharing stopped",
   }[state.link];
   $("status").textContent = status;
   $("dot").className = "dot" + (state.link === "live" ? " on" : state.link === "lost" || state.link === "away" || state.link === "offline" ? " warn" : "");
+  $("cable").hidden = !(state.link === "live" && state.via === "cable");
 }
 
 function flash(text, tone) {
@@ -506,7 +515,9 @@ function connect() {
     $("meName").textContent = "You · " + d.name;
     fails = fastFails = 0;
     softEnd = false;
+    state.via = d.via || "";
     setLink("live");
+    if (d.cable) tryCable(d.cable);
   });
   on("sync", sync);
   on("offer", queueOffer);
@@ -585,6 +596,32 @@ setInterval(() => {
   if (state.link === "live" && !document.hidden && Date.now() - lastBeat > 25000) lost();
 }, 5000);
 
+/* This page came over Wi-Fi, but the other device also has a phone's cable
+   plugged in. If the cable's address answers from here, this browser is on
+   that phone: move over (faster) as soon as nothing is under way. */
+let cableUrl = null;
+async function tryCable(url) {
+  if (cableUrl === url) return;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 2500);
+  let reachable = false;
+  try {
+    await fetch(url + "/ping", { mode: "no-cors", cache: "no-store", signal: ctl.signal });
+    reachable = true;
+  } catch (err) {}
+  clearTimeout(timer);
+  if (!reachable) return;
+  cableUrl = url;
+  moveToCable();
+}
+function moveToCable() {
+  if (!cableUrl || state.link !== "live") return;
+  const busy = incoming.size > 0 || state.uploading || state.asking || shown || textMode;
+  if (busy) { setTimeout(moveToCable, 2000); return; }
+  toast("Moving to the cable…");
+  setTimeout(() => location.replace(cableUrl), 600);
+}
+
 /* Sharing stopped. "quiet": nothing answers, so it's only likely; keep
    checking in case it comes back. */
 function end(why) {
@@ -655,15 +692,40 @@ function closeSheet() {
   if (!textMode) $("backdrop").classList.remove("on");
   shown = null;
 }
-function expect(f) {
-  if (incoming.has(f.id)) return;
-  incoming.set(f.id, { name: f.name, size: f.size, bytes: 0, fetched: false, started: false });
-  run.total += f.size;
+/* One per accepted send, by its ID: a single file, or several as one zip
+   (browsers hold back a second download that no tap started). The other
+   device gives its name and exact size. */
+function expect(d) {
+  const f = incoming.get(d.id);
+  if (f) {
+    run.total += d.size - f.size;
+    f.name = d.name;
+    f.size = d.size;
+    return f;
+  }
+  const added = { name: d.name, size: d.size, bytes: 0, fetched: false, started: false, askedAt: 0 };
+  incoming.set(d.id, added);
+  run.total += d.size;
+  return added;
 }
 async function answer(yes) {
   const offer = shown;
   if (!offer) return;
   $("accept").disabled = $("decline").disabled = true;
+  if (yes) {
+    // Start the download in this tap, so the browser counts it as the
+    // person's own. The other device holds it until the answer lands.
+    const many = offer.files.length > 1;
+    const f = expect({
+      id: offer.batch,
+      name: many ? offer.files.length + " files" : offer.files[0].name,
+      size: offer.files.reduce((s, x) => s + x.size, 0),
+    });
+    f.fetched = true;
+    f.askedAt = Date.now();
+    fetchFile(offer.batch);
+    setTimeout(render, 4000);
+  }
   let ok = false;
   try {
     const res = await fetch(base + "/answer?s=" + session + "&batch=" + offer.batch + "&accept=" + (yes ? 1 : 0), { method: "POST" });
@@ -671,39 +733,36 @@ async function answer(yes) {
   } catch (err) {}
   state.offers = state.offers.filter((o) => o.batch !== offer.batch);
   closeSheet();
-  if (yes && ok) {
-    for (const f of offer.files) expect(f);
-    render();
-  } else if (yes) {
+  if (yes && !ok) {
+    const f = incoming.get(offer.batch);
+    if (f) { incoming.delete(offer.batch); run.total -= f.size; }
     toast("That offer has gone");
   }
+  render();
   setTimeout(showNextOffer, 350);
 }
 $("accept").onclick = () => answer(true);
 $("decline").onclick = () => answer(false);
 
-/* Each accepted file downloads to the browser's usual place, one at a
-   time: the other device says which is next. A browser may hold back a
-   download that no tap started (several in a row, say): then a button
-   lets the person start it. */
+/* Each accepted send downloads to the browser's usual place. The Accept tap
+   starts it; a send this page didn't start that way (it was reloaded, say)
+   starts on its own if the browser allows, and otherwise a button lets the
+   person start it. */
 function download(d) {
-  expect(d);
-  const f = incoming.get(d.id);
+  const f = expect(d);
   if (d.streaming) { f.started = true; render(); return; } // under way already
   if (!f.fetched) {
     f.fetched = true;
-    fetchFile(d.id, f.name);
-    setTimeout(() => { if (incoming.get(d.id) === f && !f.started) render(); }, 4000);
     f.askedAt = Date.now();
-  } else {
-    f.askedAt = 0; // asked for before and never started: needs a tap
+    fetchFile(d.id);
+    setTimeout(render, 4000);
   }
   render();
 }
-function fetchFile(id, name) {
+function fetchFile(id) {
   const a = el("a");
   a.href = base + "/f/" + id + "?s=" + session;
-  a.download = name;
+  a.download = ""; // the other device names it
   a.rel = "noopener";
   document.body.append(a);
   a.click();
@@ -729,7 +788,7 @@ $("getFile").onclick = () => {
   const s = stuck();
   if (!s) return;
   s[1].askedAt = Date.now();
-  fetchFile(s[0], s[1].name);
+  fetchFile(s[0]);
   render();
   setTimeout(render, 4000);
 };

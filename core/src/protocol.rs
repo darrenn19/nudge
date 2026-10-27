@@ -204,6 +204,10 @@ impl PairAsk {
 pub struct Status {
     /// Files from the device receiving this are accepted without asking.
     pub auto_accepts_you: bool,
+    /// This phone is plugged into a computer by a cable that carries data,
+    /// but isn't sharing a network on it (USB tethering is off), so files
+    /// can't use it yet. Only phones say so.
+    pub cable_unused: bool,
 }
 
 impl Status {
@@ -211,7 +215,7 @@ impl Status {
     pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
         let mut buf = Vec::with_capacity(8);
         put_header(&mut buf, KIND_STATUS);
-        buf.push(u8::from(self.auto_accepts_you));
+        buf.push(self.flags());
         w.write_all(&buf).await?;
         w.flush().await?;
         Ok(())
@@ -219,14 +223,21 @@ impl Status {
 
     /// As the reply (no header).
     pub async fn write_reply<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
-        w.write_u8(u8::from(self.auto_accepts_you)).await?;
+        w.write_u8(self.flags()).await?;
         w.flush().await?;
         Ok(())
     }
 
+    /// One byte: bit 0 `auto_accepts_you`, bit 1 `cable_unused`.
+    fn flags(&self) -> u8 {
+        u8::from(self.auto_accepts_you) | (u8::from(self.cable_unused) << 1)
+    }
+
     pub async fn read_reply<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        let flags = r.read_u8().await?;
         Ok(Self {
-            auto_accepts_you: r.read_u8().await? != 0,
+            auto_accepts_you: flags & 1 != 0,
+            cable_unused: flags & 2 != 0,
         })
     }
 
@@ -685,6 +696,28 @@ impl PairReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn status_round_trips() {
+        for (auto, cable) in [(false, false), (true, false), (false, true), (true, true)] {
+            let status = Status {
+                auto_accepts_you: auto,
+                cable_unused: cable,
+            };
+            let mut buf = Vec::new();
+            status.write_to(&mut buf).await.unwrap();
+            let Request::Status(got) = Request::read_from(&mut buf.as_slice()).await.unwrap() else {
+                panic!("not a status");
+            };
+            assert_eq!(got, status);
+            let mut reply = Vec::new();
+            status.write_reply(&mut reply).await.unwrap();
+            assert_eq!(Status::read_reply(&mut reply.as_slice()).await.unwrap(), status);
+        }
+        // An older build's byte (auto-accept only) still reads the same.
+        let old = Status::read_reply(&mut [1u8].as_slice()).await.unwrap();
+        assert!(old.auto_accepts_you && !old.cable_unused);
+    }
 
     #[tokio::test]
     async fn offer_round_trips() {

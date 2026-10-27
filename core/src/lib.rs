@@ -3,6 +3,7 @@
 //! Everything platform apps need lives behind this crate's public API:
 //! networking, crypto, discovery and file handling. No UI code here.
 
+pub mod archive;
 pub mod bench;
 pub mod discovery;
 pub mod error;
@@ -20,7 +21,9 @@ pub mod transfer;
 pub use error::{Error, Result};
 pub use identity::{Fingerprint, Identity, TrustedPeers};
 pub use link::LinkKind;
-pub use node::{Direction, HotspotInfo, Node, NodeConfig, NodeEvent, Outgoing, Peer, Receiving};
+pub use node::{
+    Cable, Direction, HotspotInfo, Node, NodeConfig, NodeEvent, Outgoing, Peer, Receiving,
+};
 pub use tls::Tls;
 pub use transfer::{ReceivedFile, TransferStats, receive_file, send_file};
 

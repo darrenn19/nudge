@@ -169,7 +169,7 @@ async fn browser_receives_and_sends() {
     );
     assert!(peer.online && !peer.paired);
 
-    // Send two files: one offer, then one download at a time.
+    // Send two files: one offer, then one download, a zip.
     let a = dir.path().join("a.bin");
     let b = dir.path().join("b é.txt");
     let a_data: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
@@ -184,23 +184,32 @@ async fn browser_receives_and_sends() {
     let batch = field(&offer, "batch");
     let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
     assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
-    for (expected_id, expected) in ids.iter().zip([&a_data[..], b"second"]) {
-        let next = tab.next("download").await;
-        assert_eq!(field(&next, "id"), expected_id.to_string());
-        let (status, body) = http(
-            &addr,
-            "GET",
-            &format!("{path}/f/{expected_id}?s={session}"),
-            b"",
-        )
-        .await;
-        assert_eq!(status, 200);
-        assert!(body == expected);
-        // The page hears when the whole file has gone.
-        assert_eq!(
-            field(&tab.next("delivered").await, "id"),
-            expected_id.to_string()
-        );
+    let next = tab.next("download").await;
+    assert_eq!(field(&next, "id"), ids[0].to_string());
+    assert_eq!(field(&next, "name"), "2 files from Laptop.zip");
+    let (status, body) = http(
+        &addr,
+        "GET",
+        &format!("{path}/f/{}?s={session}", ids[0]),
+        b"",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(body.len().to_string(), field(&next, "size"));
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(body)).unwrap();
+    for (i, (name, expected)) in [("a.bin", &a_data[..]), ("b é.txt", b"second")]
+        .into_iter()
+        .enumerate()
+    {
+        let mut entry = zip.by_index(i).unwrap();
+        assert_eq!(entry.name(), name);
+        let mut data = Vec::new();
+        std::io::Read::read_to_end(&mut entry, &mut data).unwrap(); // checks the CRC
+        assert!(data == expected);
+    }
+    // The page hears when all of it has gone; the app, for each file.
+    assert_eq!(field(&tab.next("delivered").await, "id"), ids[0].to_string());
+    for expected_id in &ids {
         wait_for(&mut events, |e| match e {
             NodeEvent::TransferDone { id, .. } if id == expected_id => Some(()),
             NodeEvent::TransferFailed { error, .. } => panic!("send failed: {error}"),
@@ -416,11 +425,14 @@ async fn a_reconnecting_tab_is_brought_up_to_date() {
     std::fs::write(&a, b"first").unwrap();
     std::fs::write(&b, b"second").unwrap();
 
-    let ids = node.send_files(id, vec![a, b]);
-    let batch = field(&tab.next("offer").await, "batch");
-    let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
-    assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
-    tab.next("download").await;
+    let mut ids = Vec::new();
+    for file in [a, b] {
+        ids.extend(node.send_files(id, vec![file]));
+        let batch = field(&tab.next("offer").await, "batch");
+        let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
+        assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
+        tab.next("download").await;
+    }
     // The tab drops off; its first file arrives meanwhile.
     drop(tab);
     let (status, _) = http(&addr, "GET", &format!("{path}/f/{}?s={session}", ids[0]), b"").await;
@@ -653,4 +665,38 @@ async fn sends_can_be_cancelled_from_either_end() {
         let again = format!("{path}/u?s={session}&name=x.txt");
         assert_eq!(http(&addr, "POST", &again, b"x").await.0, 403);
     }
+}
+
+/// The page starts the download in the Accept tap (so the browser counts it
+/// as the person's), which can arrive before the answer: it waits for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_download_can_start_before_its_accept_lands() {
+    let (node, mut events, dir) = start().await;
+    let url = node.start_web_share().await.unwrap();
+    let (addr, path) = split(&url);
+    let mut tab = Events::open(&addr, &path, None).await;
+    let session = field(&tab.next("hello").await, "session");
+    let id: Fingerprint = session.parse().unwrap();
+    let a = dir.path().join("a.txt");
+    std::fs::write(&a, b"early bird").unwrap();
+
+    let ids = node.send_files(id, vec![a]);
+    let batch = field(&tab.next("offer").await, "batch");
+    let get = format!("{path}/f/{batch}?s={session}");
+    let (get_addr, get_path) = (addr.clone(), get.clone());
+    let fetching = tokio::spawn(async move { http(&get_addr, "GET", &get_path, b"").await });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
+    assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
+    let (status, body) = fetching.await.unwrap();
+    assert_eq!((status, body.as_slice()), (200, &b"early bird"[..]));
+    wait_for(&mut events, |e| match e {
+        NodeEvent::TransferDone { id, .. } if *id == ids[0] => Some(()),
+        _ => None,
+    })
+    .await;
+    // Something never offered isn't waited for.
+    let started = std::time::Instant::now();
+    assert_eq!(http(&addr, "GET", &format!("{path}/f/12345?s={session}"), b"").await.0, 404);
+    assert!(started.elapsed() < Duration::from_secs(2));
 }

@@ -65,6 +65,17 @@ enum Command {
         #[arg(long)]
         pair: bool,
     },
+    /// Share with browsers (for people without Nudge), driven from the
+    /// terminal: for trying the web page on a real phone.
+    ///
+    /// Prints the link, then reads commands: `send <file>...` (to every open
+    /// tab), `stop`, `start`, `quit`. Files the page sends are accepted and
+    /// saved in --dir.
+    WebShare {
+        /// Folder to save files from the page into.
+        #[arg(short, long, default_value = ".")]
+        dir: PathBuf,
+    },
     /// Wait for incoming files and save them.
     Receive {
         /// Folder to save files into.
@@ -143,6 +154,7 @@ async fn main() -> Result<()> {
         Command::Pair { code } => pair(identity_dir, code).await,
         Command::Devices { wait } => devices(identity_dir, wait).await,
         Command::Serve { dir, pair } => serve(identity_dir, dir, pair).await,
+        Command::WebShare { dir } => web_share(identity_dir, dir).await,
         Command::Receive {
             dir,
             port,
@@ -329,6 +341,54 @@ async fn serve(identity_dir: PathBuf, dir: PathBuf, pair: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+async fn web_share(identity_dir: PathBuf, dir: PathBuf) -> Result<()> {
+    use tokio::io::AsyncBufReadExt;
+
+    let (node, mut events) = start_node(identity_dir, dir).await?;
+    println!("Sharing at {}", node.start_web_share().await?);
+    println!("Commands: send <file>..., stop, start, quit");
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else { return Ok(()) };
+                let mut words = line.split_whitespace();
+                match words.next() {
+                    Some("send") => {
+                        let files: Vec<PathBuf> = words.map(PathBuf::from).collect();
+                        let tabs: Vec<_> = node
+                            .peers()
+                            .into_iter()
+                            .filter(|p| p.platform == "browser" && p.online)
+                            .collect();
+                        if tabs.is_empty() {
+                            println!("No page open");
+                        }
+                        for tab in tabs {
+                            let ids = node.send_files(tab.fingerprint, files.clone());
+                            println!("Offered {ids:?} to {}", tab.device_name);
+                        }
+                    }
+                    Some("stop") => node.stop_web_share(),
+                    Some("start") => println!("Sharing at {}", node.start_web_share().await?),
+                    Some("quit") => return Ok(()),
+                    Some(other) => println!("Unknown command {other}"),
+                    None => {}
+                }
+            }
+            event = events.recv() => {
+                let Some(event) = event else { return Ok(()) };
+                if let NodeEvent::OfferReceived { id, .. } = &event {
+                    node.answer_offer(*id, true, false)?;
+                }
+                if !matches!(event, NodeEvent::TransferProgress { .. }) {
+                    println!("{event:?}");
+                }
+            }
+        }
+    }
 }
 
 fn load_tls(identity_dir: &Path) -> Result<Tls> {

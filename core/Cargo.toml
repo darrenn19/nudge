@@ -13,6 +13,7 @@ name = "nudge_core"
 [dependencies]
 blake3 = "1.8.7"
 cpu-time = "1.0.0"
+crc32fast = "1.4"
 httparse = "1.10"
 if-addrs = "0.15.0"
 log = { version = "0.4", features = ["std"] }
@@ -24,8 +25,14 @@ thiserror = "2"
 tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "rt", "sync", "time"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs"] }
 
+# Adapter descriptions ("Remote NDIS based Internet Sharing Device"): on
+# Windows a phone's cable shows up as just "Ethernet 3" otherwise.
+[target.'cfg(windows)'.dependencies]
+ipconfig = { version = "0.3", default-features = false }
+
 [dev-dependencies]
 tempfile = "3"
+zip = { version = "2.2", default-features = false }
 tokio = { version = "1", features = ["io-util", "net", "rt-multi-thread", "macros", "sync"] }
 
 [lints]

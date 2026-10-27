@@ -20,9 +20,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use crate::discovery::{Announcement, DiscoveredPeer, Discovery, DiscoveryConfig, DiscoveryEvent};
+use crate::discovery::{
+    Announcement, DiscoveredPeer, Discovery, DiscoveryConfig, DiscoveryEvent, Refresher,
+};
 use crate::identity::{Fingerprint, Identity, TrustedPeers, clean_name};
-use crate::link::{LinkKind, Speeds};
+use crate::link::{self, LinkKind, LocalNet, Speeds};
 use crate::pack::{self, PACK_FILE_MAX, PACK_MAX_BYTES, PACK_MAX_FILES, PACK_MIN_FILES, Pack};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
 use crate::protocol::{
@@ -144,6 +146,23 @@ pub struct Peer {
     /// Clipboard text goes both ways with it (paired devices only; on
     /// unless turned off).
     pub clipboard: bool,
+    /// Whether files to it can go over a cable.
+    pub cable: Cable,
+}
+
+/// A cable between this device and another (any kind that carries data:
+/// USB-C, micro-USB, Lightning). Files use it once the phone shares a
+/// network on it (USB tethering); see `link::classify_adapter`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cable {
+    #[default]
+    None,
+    /// Reachable over it: files go that way when it's faster.
+    Connected,
+    /// The phone is plugged into a computer, but USB tethering is off, so
+    /// files can't use the cable yet. Shown for a paired computer on the
+    /// phone, and for the phone on paired computers.
+    NeedsTethering,
 }
 
 /// A file to send.
@@ -502,6 +521,11 @@ struct Shared {
     speeds: Speeds,
     /// May set up a direct link (the phone's hotspot) for big transfers.
     direct_link: std::sync::atomic::AtomicBool,
+    /// This phone is plugged into a computer with tethering off (the app
+    /// says; see `Node::set_cable_unused`).
+    cable_unused: std::sync::atomic::AtomicBool,
+    /// Asks nearby devices to say they're here; set once discovery runs.
+    refresher: std::sync::OnceLock<Refresher>,
 }
 
 /// How incoming files are treated right now. The app sets it from things
@@ -594,6 +618,13 @@ struct State {
     /// Whether each paired device accepts our files without asking, as it
     /// last said; and the ones we've asked this session.
     remote_auto: HashMap<Fingerprint, bool>,
+    /// Paired phones that said they're plugged into a computer with
+    /// tethering off.
+    remote_cable: HashSet<Fingerprint>,
+    /// Paired devices that answered (or connected) lately, and when: here
+    /// even if discovery hasn't seen them yet (it can take a while after a
+    /// network comes back, or miss a phone whose screen is off).
+    reached: HashMap<Fingerprint, Instant>,
     status_asked: HashSet<Fingerprint>,
     /// Connections opened ahead of a send, one per device at most.
     warm: HashMap<Fingerprint, WarmSlot>,
@@ -624,6 +655,28 @@ struct State {
     /// their own (batch 0) go by file.
     cancelled_batches: HashMap<BatchKey, (Instant, CancelledBy)>,
     cancelled_files: HashMap<InKey, (Instant, CancelledBy)>,
+}
+
+/// A paired device that answered counts as nearby this long, without
+/// discovery seeing it.
+const REACHED_FRESH: Duration = Duration::from_secs(90);
+
+/// How often to look at this device's networks (a cable plugged in or out,
+/// Wi-Fi coming back).
+const NETWORK_CHECK: Duration = Duration::from_secs(1);
+
+/// Where paired devices were last seen, kept across restarts.
+const LAST_SEEN_FILE: &str = "last_seen.txt";
+
+impl State {
+    /// Nearby right now: seen by discovery, or answered lately.
+    fn here(&self, fp: &Fingerprint) -> bool {
+        self.nearby.contains_key(fp)
+            || self
+                .reached
+                .get(fp)
+                .is_some_and(|t| t.elapsed() < REACHED_FRESH)
+    }
 }
 
 /// How long a cancelled incoming send is remembered.
@@ -884,6 +937,8 @@ impl Node {
             clip_off: Mutex::new(clip_off),
             speeds,
             direct_link: std::sync::atomic::AtomicBool::new(direct_link),
+            cable_unused: std::sync::atomic::AtomicBool::new(false),
+            refresher: std::sync::OnceLock::new(),
         });
 
         let mut tasks = vec![
@@ -901,11 +956,17 @@ impl Node {
         };
         let discovery = match Discovery::start(announcement, config.discovery) {
             Ok((discovery, rx)) => {
+                let _ = shared.refresher.set(discovery.refresher());
                 tasks.push(tokio::spawn(discovery_loop(shared.clone(), rx)));
                 Some(discovery)
             }
             Err(_) => None,
         };
+        // Where paired devices were before this start: tried at once, so a
+        // restart doesn't have to wait for discovery.
+        shared.load_last_seen();
+        tasks.push(tokio::spawn(network_loop(shared.clone())));
+        shared.probe_paired();
 
         Ok((
             Self {
@@ -954,7 +1015,29 @@ impl Node {
     /// Paired devices first (online ones on top), then unpaired nearby ones,
     /// each group sorted by name.
     pub fn peers(&self) -> Vec<Peer> {
+        // Before the lock: reading the system's networks takes a moment.
+        let cables: Vec<LocalNet> = link::local_nets()
+            .into_iter()
+            .filter(|n| n.kind == LinkKind::Usb)
+            .collect();
+        let unused_here = self.shared.cable_unused.load(Ordering::Relaxed);
         let state = self.shared.state();
+        let cable = |fp: &Fingerprint, platform: &str| {
+            let seen = state.nearby.get(fp).or_else(|| state.last_seen.get(fp));
+            let over_cable = seen
+                .iter()
+                .flat_map(|p| p.addrs.iter())
+                .chain(state.learned.get(fp))
+                .any(|ip| matches!(ip, IpAddr::V4(v4) if cables.iter().any(|n| n.contains(*v4))));
+            let computer = matches!(platform, "windows" | "macos" | "linux");
+            if over_cable {
+                Cable::Connected
+            } else if state.remote_cable.contains(fp) || (unused_here && computer) {
+                Cable::NeedsTethering
+            } else {
+                Cable::None
+            }
+        };
         let mut peers: Vec<Peer> = self
             .shared
             .trusted
@@ -971,11 +1054,12 @@ impl Node {
                     },
                     platform: seen.map(|n| n.platform.clone()).unwrap_or_default(),
                     paired: true,
-                    online: state.nearby.contains_key(&fp),
+                    online: state.here(&fp),
                     reachable: seen.is_some(),
                     auto_accept: self.shared.auto_accepts(&fp),
                     accepts_from_us: state.remote_auto.get(&fp).copied(),
                     clipboard: self.shared.syncs_clipboard(&fp),
+                    cable: cable(&fp, seen.map_or("", |n| n.platform.as_str())),
                 }
             })
             .collect();
@@ -994,6 +1078,7 @@ impl Node {
                     auto_accept: false,
                     accepts_from_us: None,
                     clipboard: false,
+                    cable: Cable::None,
                 }),
         );
         if let Some(web) = &state.web {
@@ -1007,6 +1092,11 @@ impl Node {
                 auto_accept: false,
                 accepts_from_us: None,
                 clipboard: false,
+                cable: if tab.via_cable {
+                    Cable::Connected
+                } else {
+                    Cable::None
+                },
             }));
         }
         peers.sort_by(|a, b| {
@@ -1193,6 +1283,30 @@ impl Node {
             .receiving
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = receiving;
+    }
+
+    /// On a phone: whether it's plugged into a computer by a cable that
+    /// carries data, with USB tethering off. Paired devices nearby are told,
+    /// so they can say what to switch on. Call from within the runtime.
+    pub fn set_cable_unused(&self, on: bool) {
+        if self.shared.cable_unused.swap(on, Ordering::Relaxed) == on {
+            return;
+        }
+        let nearby: Vec<Fingerprint> = {
+            let state = self.shared.state();
+            state
+                .nearby
+                .keys()
+                .chain(state.reached.keys())
+                .copied()
+                .collect::<HashSet<_>>()
+                .into_iter()
+                .collect()
+        };
+        for peer in nearby {
+            self.shared.exchange_status(peer);
+        }
+        self.shared.emit(NodeEvent::PeersChanged);
     }
 
     pub fn set_direct_link(&self, on: bool) -> Result<()> {
@@ -1506,6 +1620,7 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         self.tasks.iter().for_each(JoinHandle::abort);
+        self.shared.save_last_seen();
         // Its tasks hold the node's state; stopping them lets it go.
         let mut state = self.shared.state();
         state.web = None;
@@ -1791,6 +1906,7 @@ impl Shared {
         }
         self.trusted.add_named(fp, name);
         self.trusted.save(&self.data_dir)?;
+        self.save_last_seen();
         self.state().remote_auto.remove(&fp);
         self.emit(NodeEvent::Paired {
             peer: self.peer(fp),
@@ -1812,16 +1928,21 @@ impl Shared {
                 .unwrap_or_else(|| fp.short()),
             platform: nearby.map(|n| n.platform.clone()).unwrap_or_default(),
             paired: self.trusted.contains(&fp),
-            online: state.nearby.contains_key(&fp),
+            online: state.here(&fp),
             reachable: nearby.is_some(),
             auto_accept: self.auto_accepts(&fp),
             accepts_from_us: state.remote_auto.get(&fp).copied(),
             clipboard: self.trusted.contains(&fp) && self.syncs_clipboard(&fp),
+            // Only `Node::peers` works it out; this is for events.
+            cable: Cable::None,
         }
     }
 
     fn track(&self, id: u64, peer: Fingerprint, size: u64) -> Progress {
-        let progress = Progress::new();
+        self.track_with(id, peer, size, Progress::new())
+    }
+
+    fn track_with(&self, id: u64, peer: Fingerprint, size: u64, progress: Progress) -> Progress {
         self.state().active.insert(
             id,
             Active {
@@ -1925,6 +2046,7 @@ impl Shared {
             // An address that just worked: good for sending back, even on a
             // network discovery hasn't seen (a hotspot just joined).
             self.state().learned.insert(peer, from);
+            self.mark_reached(peer);
         }
         // A paired device may connect before it knows what to send (see
         // `Node::warm`); anyone else must say at once.
@@ -2013,9 +2135,10 @@ impl Shared {
             Request::Pair(request) => self.answer_pairing(stream, peer, request).await,
             Request::PairAsk(ask) => self.answer_pair_ask(stream, peer, ask).await,
             Request::Status(theirs) if trusted => {
-                self.record_remote_auto(peer, theirs.auto_accepts_you);
+                self.record_remote_status(peer, theirs);
                 Status {
                     auto_accepts_you: self.auto_accepts(&peer),
+                    cable_unused: self.cable_unused.load(Ordering::Relaxed),
                 }
                 .write_reply(&mut stream)
                 .await?;
@@ -2491,6 +2614,133 @@ impl Shared {
         }
     }
 
+    /// A paired device answered, or connected: it's here.
+    fn mark_reached(&self, peer: Fingerprint) {
+        let was_here = {
+            let mut state = self.state();
+            let was_here = state.here(&peer);
+            state.reached.insert(peer, Instant::now());
+            was_here
+        };
+        if !was_here {
+            self.emit(NodeEvent::PeersChanged);
+        }
+        self.save_last_seen();
+    }
+
+    /// Check on every paired device not seen by discovery, at the addresses
+    /// it was last at: after a start, and when a network comes or goes.
+    /// Each check is one small exchange (`swap_status`), and answering marks
+    /// it here.
+    fn probe_paired(self: &Arc<Self>) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            return;
+        }
+        let quiet: Vec<Fingerprint> = {
+            let state = self.state();
+            self.trusted
+                .list()
+                .into_iter()
+                .map(|(fp, _)| fp)
+                .filter(|fp| !state.nearby.contains_key(fp))
+                .collect()
+        };
+        for peer in quiet {
+            if self.addrs_of(&peer).is_empty() {
+                continue;
+            }
+            let shared = self.clone();
+            tokio::spawn(async move {
+                let _ = shared.swap_status(peer).await;
+            });
+        }
+    }
+
+    /// Read where paired devices were last seen (`save_last_seen`).
+    fn load_last_seen(&self) {
+        let Ok(text) = std::fs::read_to_string(self.data_dir.join(LAST_SEEN_FILE)) else {
+            return;
+        };
+        let mut state = self.state();
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            let mut parts = line.splitn(5, ' ');
+            let (Some(fp), Some(port), Some(platform), Some(addrs)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let (Ok(fp), Ok(port)) = (fp.parse::<Fingerprint>(), port.parse::<u16>()) else {
+                continue;
+            };
+            if !self.trusted.contains(&fp) || state.last_seen.contains_key(&fp) {
+                continue;
+            }
+            let addrs: Vec<IpAddr> = addrs.split(',').filter_map(|a| a.parse().ok()).collect();
+            if addrs.is_empty() {
+                continue;
+            }
+            state.last_seen.insert(
+                fp,
+                DiscoveredPeer {
+                    fingerprint: fp,
+                    device_name: parts.next().unwrap_or_default().to_owned(),
+                    platform: if platform == "-" { String::new() } else { platform.to_owned() },
+                    addrs,
+                    port,
+                },
+            );
+        }
+    }
+
+    /// Keep where paired devices were last seen (and connected from), so
+    /// the next start can reach them before discovery does.
+    fn save_last_seen(&self) {
+        let text = {
+            let state = self.state();
+            let mut text = String::from("# Where paired devices were last seen: fingerprint, port, platform, addresses, name.\n");
+            for (fp, seen) in &state.last_seen {
+                if !self.trusted.contains(fp) {
+                    continue;
+                }
+                let mut addrs: Vec<String> = seen.addrs.iter().map(IpAddr::to_string).collect();
+                if let Some(learned) = state.learned.get(fp) {
+                    let learned = learned.to_string();
+                    if !addrs.contains(&learned) {
+                        addrs.insert(0, learned);
+                    }
+                }
+                let platform = if seen.platform.is_empty() { "-" } else { &seen.platform };
+                text.push_str(&format!(
+                    "{fp} {} {platform} {} {}\n",
+                    seen.port,
+                    addrs.join(","),
+                    seen.device_name.replace('\n', " ")
+                ));
+            }
+            text
+        };
+        let file = self.data_dir.join(LAST_SEEN_FILE);
+        if std::fs::read_to_string(&file).ok().as_deref() != Some(text.as_str()) {
+            let _ = std::fs::write(file, text);
+        }
+    }
+
+    /// What a paired device said about itself (`Status`).
+    fn record_remote_status(&self, peer: Fingerprint, theirs: Status) {
+        self.record_remote_auto(peer, theirs.auto_accepts_you);
+        let changed = {
+            let mut state = self.state();
+            if theirs.cable_unused {
+                state.remote_cable.insert(peer)
+            } else {
+                state.remote_cable.remove(&peer)
+            }
+        };
+        if changed {
+            self.emit(NodeEvent::PeersChanged);
+        }
+    }
+
     /// Swap settings with a paired device in the background: tells it
     /// whether we auto-accept it, and learns the same about it.
     fn exchange_status(self: &Arc<Self>, peer: Fingerprint) {
@@ -2512,12 +2762,14 @@ impl Shared {
         let mut stream = connect_any(&self.tls, &addrs, peer).await?;
         let mine = Status {
             auto_accepts_you: self.auto_accepts(&peer),
+            cable_unused: self.cable_unused.load(Ordering::Relaxed),
         };
         mine.write_to(&mut stream).await?;
         let theirs = tokio::time::timeout(REQUEST_TIMEOUT, Status::read_reply(&mut stream))
             .await
             .map_err(|_| Error::Unreachable)??;
-        self.record_remote_auto(peer, theirs.auto_accepts_you);
+        self.record_remote_status(peer, theirs);
+        self.mark_reached(peer);
         let _ = stream.shutdown().await;
         Ok(())
     }
@@ -2611,7 +2863,58 @@ async fn discovery_loop(shared: Arc<Shared>, mut rx: mpsc::UnboundedReceiver<Dis
                 }
             }
         }
+        shared.save_last_seen();
         shared.emit(NodeEvent::PeersChanged);
+    }
+}
+
+/// Watch this device's networks. When one comes or goes (a phone's cable
+/// plugged in or out, Wi-Fi back after a cable came out), the device list
+/// is redone at once (what's connected by cable changed), devices on the
+/// networks there are now are asked to say they're here, and paired
+/// devices are checked at their last addresses. Also notices a device that
+/// answered a while ago going quiet.
+async fn network_loop(shared: Arc<Shared>) {
+    let signature = || {
+        let mut nets: Vec<(Ipv4Addr, Ipv4Addr, LinkKind)> = link::local_nets()
+            .into_iter()
+            .map(|n| (n.ip, n.netmask, n.kind))
+            .collect();
+        nets.sort_by_key(|(ip, mask, _)| (*ip, *mask));
+        nets
+    };
+    let mut last = signature();
+    let mut here: HashSet<Fingerprint> = HashSet::new();
+    let mut tick = tokio::time::interval(NETWORK_CHECK);
+    loop {
+        tick.tick().await;
+        let now = tokio::task::spawn_blocking(signature).await.unwrap_or_default();
+        let mut changed = false;
+        if now != last {
+            last = now;
+            changed = true;
+            if let Some(r) = shared.refresher.get() {
+                r.refresh();
+            }
+            shared.probe_paired();
+        }
+        // Answered-lately devices that have gone quiet.
+        let now_here: HashSet<Fingerprint> = {
+            let state = shared.state();
+            state
+                .reached
+                .keys()
+                .filter(|fp| state.here(fp))
+                .copied()
+                .collect()
+        };
+        if now_here != here {
+            here = now_here;
+            changed = true;
+        }
+        if changed {
+            shared.emit(NodeEvent::PeersChanged);
+        }
     }
 }
 
@@ -3050,6 +3353,44 @@ mod tests {
             assert_eq!(error, "they declined");
         }
         until(|| names_in(&phone_dir.path().join("downloads")).is_empty()).await;
+    }
+
+    /// Restarted with discovery finding nothing, a computer still reaches
+    /// its paired phone at once, at the address it remembers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_restart_reaches_paired_devices_without_discovery() {
+        let ((laptop, _le, laptop_dir), (phone, _pe, _p)) = paired_pair().await;
+        let phone_id = phone.fingerprint();
+        until(|| {
+            laptop
+                .peers()
+                .iter()
+                .any(|p| p.fingerprint == phone_id && p.online)
+        })
+        .await;
+        drop(laptop);
+
+        let mut config = NodeConfig::new(
+            laptop_dir.path().join("id"),
+            laptop_dir.path().join("downloads"),
+            "Laptop",
+            "windows",
+        );
+        config.port = Some(0);
+        config.bind = Ipv4Addr::LOCALHOST.into();
+        config.discovery = DiscoveryConfig {
+            mdns: false,
+            broadcast: false,
+            ..DiscoveryConfig::default()
+        };
+        let (again, _events) = Node::start(config).await.unwrap();
+        until(|| {
+            again
+                .peers()
+                .iter()
+                .any(|p| p.fingerprint == phone_id && p.online && p.reachable)
+        })
+        .await;
     }
 
     /// Clipboard text lands without a question, unless sync is off there.
