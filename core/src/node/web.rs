@@ -15,15 +15,14 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
-use std::io::SeekFrom;
 use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use super::{BatchKey, Direction, NodeEvent, Outgoing, Shared, Verdict, local_addrs};
@@ -46,8 +45,28 @@ const GRACE: Duration = Duration::from_secs(30);
 /// How long an offer waits for Accept or Decline.
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-/// Keeps the event stream alive, and notices when a tab has gone.
-const PING_INTERVAL: Duration = Duration::from_secs(15);
+/// Keeps the event stream alive, and notices when a tab has gone. It's a
+/// real event, not a comment, so the page sees it: a page that hears
+/// nothing for a few of these knows its connection is dead.
+const PING_INTERVAL: Duration = Duration::from_secs(10);
+
+/// After sharing stops, the old link keeps saying so this long, so a tab
+/// that was away (phone locked, out of range) learns that sharing ended
+/// instead of looking for this device forever.
+const ENDED_LINGER: Duration = Duration::from_secs(15 * 60);
+
+/// A download the browser takes nothing of for this long has stalled.
+const STALL_LIMIT: Duration = Duration::from_secs(45);
+
+/// A download that broke waits this long for the browser to ask again
+/// (browsers retry a broken download by starting it over) before failing.
+const RETRY_WINDOW: Duration = Duration::from_secs(10);
+
+/// How often a tab hears how far its download has got.
+const PAGE_PROGRESS: Duration = Duration::from_millis(250);
+
+/// Results kept for a tab that reconnects having missed them.
+const RECENT: usize = 64;
 
 const MAX_HEADER: usize = 16 * 1024;
 const BUFFER: usize = 1024 * 1024;
@@ -55,17 +74,59 @@ const UPLOAD_SUFFIX: &str = ".nudge-upload";
 
 const PAGE: &str = include_str!("web_page.html");
 
+/// Why sharing stopped, as the page is told.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StopReason {
+    /// The user here turned it off.
+    User,
+    /// Nobody was connected for a long time.
+    Idle,
+}
+
+impl StopReason {
+    fn word(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Idle => "idle",
+        }
+    }
+}
+
 /// The running share: its link, and the browsers that opened it.
 pub(super) struct WebShare {
     pub(super) url: String,
+    token: Arc<str>,
     pub(super) browsers: HashMap<Fingerprint, Browser>,
     idle_since: Option<Instant>,
-    tasks: Vec<JoinHandle<()>>,
+    /// Serves the link. Handed to `Ended` when sharing stops.
+    listener: Option<JoinHandle<()>>,
+    watchdog: JoinHandle<()>,
 }
 
 impl Drop for WebShare {
     fn drop(&mut self) {
-        self.tasks.iter().for_each(JoinHandle::abort);
+        if let Some(task) = &self.listener {
+            task.abort();
+        }
+        self.watchdog.abort();
+    }
+}
+
+/// A stopped share's link, still answered for a while (`ENDED_LINGER`):
+/// every request gets "sharing stopped", nothing else. It lets a tab tell
+/// "stopped" from "out of range", which otherwise look the same.
+pub(super) struct Ended {
+    token: Arc<str>,
+    why: StopReason,
+    until: Instant,
+    listener: Option<JoinHandle<()>>,
+}
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        if let Some(task) = &self.listener {
+            task.abort();
+        }
     }
 }
 
@@ -91,9 +152,69 @@ pub(super) struct Browser {
     asking: Option<BatchKey>,
     /// Files it's sending now.
     uploads: HashSet<u64>,
+    /// How its recent downloads ended (delivered or not), and the keys of
+    /// its recent uploads that were saved: what a reconnecting tab may
+    /// have missed hearing.
+    recent_down: VecDeque<(u64, bool)>,
+    recent_up: VecDeque<String>,
 }
 
 impl Browser {
+    fn new(name: String) -> Self {
+        Self {
+            name,
+            events: None,
+            connection: 0,
+            gone_since: None,
+            offers: HashMap::new(),
+            queue: VecDeque::new(),
+            current: None,
+            allowance: 0,
+            asking: None,
+            uploads: HashSet::new(),
+            recent_down: VecDeque::new(),
+            recent_up: VecDeque::new(),
+        }
+    }
+
+    fn remember_down(&mut self, id: u64, ok: bool) {
+        if self.recent_down.len() == RECENT {
+            self.recent_down.pop_front();
+        }
+        self.recent_down.push_back((id, ok));
+    }
+
+    fn remember_up(&mut self, key: String) {
+        if self.recent_up.len() == RECENT {
+            self.recent_up.pop_front();
+        }
+        self.recent_up.push_back(key);
+    }
+
+    /// Where things stand, for a tab that (re)connects: the files still
+    /// coming, how recent ones ended, and which uploads were saved. The
+    /// page corrects itself from this, whatever it missed.
+    fn sync_event(&self) -> String {
+        let owed: Vec<String> = self
+            .current
+            .iter()
+            .chain(&self.queue)
+            .map(Download::summary)
+            .collect();
+        let done: Vec<String> = self
+            .recent_down
+            .iter()
+            .map(|(id, ok)| format!("{{\"id\":{id},\"ok\":{ok}}}"))
+            .collect();
+        let up: Vec<String> = self.recent_up.iter().map(|k| json_str(k)).collect();
+        format!(
+            "{{\"owed\":[{}],\"done\":[{}],\"up\":[{}]}}",
+            owed.join(","),
+            done.join(","),
+            up.join(",")
+        )
+    }
+
     pub(super) fn connected(&self) -> bool {
         self.events.is_some()
     }
@@ -116,6 +237,7 @@ impl Browser {
 
     /// Everything still owed to a tab that reconnected.
     fn resend(&self) {
+        self.push("sync", &self.sync_event());
         for offer in self.offers.values() {
             self.push("offer", &offer.event);
         }
@@ -138,13 +260,44 @@ struct Download {
     /// The send it's part of (its first file's ID).
     batch: u64,
     name: String,
-    /// Taken when the tab starts downloading.
-    item: Option<Outgoing>,
+    size: u64,
+    /// Kept until it's settled, so a browser that asks again (a retry, or
+    /// the page's "Download" button) can be served again.
+    item: Outgoing,
+    /// Requests so far; each one's number.
+    attempts: u64,
+    /// The request streaming it now, if any.
+    streaming: Option<Streaming>,
+}
+
+/// A request streaming a download.
+struct Streaming {
+    attempt: u64,
+    /// Tells it to stop: a newer request for the same file took over.
+    stop: Arc<Notify>,
+    /// Closes when it has stopped.
+    done: watch::Receiver<()>,
 }
 
 impl Download {
+    fn summary(&self) -> String {
+        format!(
+            "{{\"id\":{},\"name\":{},\"size\":{}}}",
+            self.id,
+            json_str(&self.name),
+            self.size
+        )
+    }
+
+    /// "Fetch this now"; `streaming` says if a request already is.
     fn event(&self) -> String {
-        format!("{{\"id\":{},\"name\":{}}}", self.id, json_str(&self.name))
+        format!(
+            "{{\"id\":{},\"name\":{},\"size\":{},\"streaming\":{}}}",
+            self.id,
+            json_str(&self.name),
+            self.size,
+            self.streaming.is_some()
+        )
     }
 }
 
@@ -152,6 +305,13 @@ impl Download {
 pub(super) async fn start(shared: &Arc<Shared>) -> Result<String> {
     if let Some(web) = &shared.state().web {
         return Ok(web.url.clone());
+    }
+    // The last share's link may still hold the port: let it go first, so
+    // the new link gets the usual port.
+    let ended = shared.state().web_ended.take();
+    if let Some(task) = ended.and_then(|mut e| e.listener.take()) {
+        task.abort();
+        let _ = task.await;
     }
     let bind = shared.bind;
     let listener = match TcpListener::bind((bind, WEB_PORT)).await {
@@ -166,7 +326,7 @@ pub(super) async fn start(shared: &Arc<Shared>) -> Result<String> {
     } else {
         best_lan_ip().ok_or_else(|| Error::WebShare("not connected to a network".into()))?
     };
-    let token = hex(&random_bytes::<16>());
+    let token: Arc<str> = hex(&random_bytes::<16>()).into();
     let url = format!("http://{host}:{port}/t/{token}");
 
     let mut state = shared.state();
@@ -176,25 +336,85 @@ pub(super) async fn start(shared: &Arc<Shared>) -> Result<String> {
     }
     state.web = Some(WebShare {
         url: url.clone(),
+        token: token.clone(),
         browsers: HashMap::new(),
         idle_since: Some(Instant::now()),
-        tasks: vec![
-            tokio::spawn(accept_loop(shared.clone(), listener, token.into())),
-            tokio::spawn(watchdog(shared.clone())),
-        ],
+        listener: Some(tokio::spawn(accept_loop(shared.clone(), listener, token))),
+        watchdog: tokio::spawn(watchdog(shared.clone())),
     });
     Ok(url)
 }
 
-/// Stop sharing. Open tabs lose their place; unanswered offers fail.
-pub(super) fn stop(shared: &Shared) {
-    let web = shared.state().web.take();
-    if let Some(web) = web {
-        let mut web = web;
-        fail_leftovers(shared, std::mem::take(&mut web.browsers).into_values());
-        shared.emit(NodeEvent::WebShareStopped);
-        shared.emit(NodeEvent::PeersChanged);
+/// Stop sharing. Open tabs are told, and lose their place; what was on its
+/// way stops, and unanswered offers fail. The link keeps saying it ended
+/// for a while (see `Ended`).
+pub(super) fn stop(shared: &Shared, why: StopReason) {
+    let Some(mut web) = shared.state().web.take() else {
+        return;
+    };
+    let data = format!("{{\"why\":\"{}\"}}", why.word());
+    let mut moving = Vec::new();
+    for tab in web.browsers.values() {
+        tab.push("stopped", &data);
+        moving.extend(tab.current.iter().filter(|d| d.streaming.is_some()).map(|d| d.id));
+        moving.extend(tab.uploads.iter().copied());
     }
+    fail_leftovers(shared, std::mem::take(&mut web.browsers).into_values());
+    // Downloads and uploads under way end as "sharing was stopped" (see
+    // `ended_error`).
+    for id in moving {
+        let progress = shared.state().active.get(&id).map(|a| a.progress.clone());
+        if let Some(p) = progress {
+            p.cancel().cancel(CancelledBy::Here);
+        }
+    }
+    shared.state().web_ended = Some(Ended {
+        token: web.token.clone(),
+        why,
+        until: Instant::now() + ENDED_LINGER,
+        listener: web.listener.take(),
+    });
+    drop(web);
+    shared.emit(NodeEvent::WebShareStopped);
+    shared.emit(NodeEvent::PeersChanged);
+}
+
+/// Whether `token` is the link being shared now.
+fn live(shared: &Shared, token: &str) -> bool {
+    shared
+        .state()
+        .web
+        .as_ref()
+        .is_some_and(|w| *w.token == *token)
+}
+
+/// A transfer that stopped because sharing did says so.
+fn ended_error(shared: &Shared, token: &str, e: Error) -> Error {
+    match e {
+        Error::Cancelled if !live(shared, token) => Error::WebShareStopped,
+        e => e,
+    }
+}
+
+/// What a link is now.
+enum Link {
+    Live,
+    Ended(StopReason),
+}
+
+/// `None`: not a link any more (or never was).
+fn link(shared: &Shared, token: &str) -> Option<Link> {
+    let mut state = shared.state();
+    if state.web.as_ref().is_some_and(|w| *w.token == *token) {
+        return Some(Link::Live);
+    }
+    let ended = state.web_ended.as_ref().filter(|e| *e.token == *token)?;
+    if ended.until > Instant::now() {
+        return Some(Link::Ended(ended.why));
+    }
+    // Said it for long enough: close the port.
+    state.web_ended = None;
+    None
 }
 
 /// Longest clipboard text a tab may send (about the same as paired devices).
@@ -284,13 +504,16 @@ pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Ou
                 for (id, _, _) in &files {
                     shared.emit(NodeEvent::TransferAccepted { id: *id });
                 }
-                let mut items = jobs.into_iter().map(|(_, item)| item);
-                for (id, name, _) in &files {
+                let items = jobs.into_iter().map(|(_, item)| item);
+                for ((id, name, size), item) in files.iter().zip(items) {
                     tab.queue.push_back(Download {
                         id: *id,
                         batch,
                         name: name.clone(),
-                        item: items.next(),
+                        size: *size,
+                        item,
+                        attempts: 0,
+                        streaming: None,
                     });
                 }
                 tab.advance();
@@ -335,7 +558,7 @@ fn fail_leftovers(shared: &Shared, gone: impl Iterator<Item = Browser>) {
     for tab in gone {
         for d in tab.current.into_iter().chain(tab.queue) {
             // A download in progress finishes (or fails) by itself.
-            if d.item.is_some() {
+            if d.streaming.is_none() {
                 shared.finish(d.id, Err(Error::BrowserGone));
             }
         }
@@ -422,14 +645,18 @@ fn stop_downloads(tab: &mut Browser, batch: Option<u64>, by: CancelledBy) -> Sto
         }
         !ours(d)
     });
-    if let Some(d) = tab.current.as_ref().filter(|d| ours(d)) {
+    if let Some(d) = tab.current.take_if(|d| ours(d)) {
+        // Off the list either way, so a retry can't pick it up again; the
+        // request streaming it ends when its progress is cancelled.
         ids.push(d.id);
-        if d.item.is_some() {
+        if d.streaming.is_none() {
             stopped.unstarted.push(d.id);
-            tab.current = None;
         } else {
             stopped.streaming = Some(d.id);
         }
+    }
+    for id in &ids {
+        tab.remember_down(*id, false);
     }
     if !ids.is_empty() {
         let list: Vec<String> = ids.iter().map(u64::to_string).collect();
@@ -535,24 +762,35 @@ async fn watchdog(shared: Arc<Shared>) {
             shared.emit(NodeEvent::PeersChanged);
         }
         if stop_now {
-            stop(&shared);
+            stop(&shared, StopReason::Idle);
             return;
         }
     }
 }
 
+/// Serves the link while it's live, then while it's ended (`Ended`); closes
+/// the port once it's neither.
 async fn accept_loop(shared: Arc<Shared>, listener: TcpListener, token: Arc<str>) {
     loop {
-        let Ok((tcp, _)) = listener.accept().await else {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            continue;
+        let accepted = tokio::select! {
+            a = listener.accept() => Some(a),
+            () = tokio::time::sleep(Duration::from_secs(30)) => None,
         };
-        let _ = tcp.set_nodelay(true);
-        let shared = shared.clone();
-        let token = token.clone();
-        tokio::spawn(async move {
-            let _ = handle(&shared, &token, tcp).await;
-        });
+        if link(&shared, &token).is_none() {
+            return;
+        }
+        match accepted {
+            Some(Ok((tcp, _))) => {
+                let _ = tcp.set_nodelay(true);
+                let shared = shared.clone();
+                let token = token.clone();
+                tokio::spawn(async move {
+                    let _ = handle(&shared, &token, tcp).await;
+                });
+            }
+            Some(Err(_)) => tokio::time::sleep(Duration::from_millis(100)).await,
+            None => {}
+        }
     }
 }
 
@@ -610,16 +848,22 @@ async fn handle(shared: &Arc<Shared>, token: &str, mut tcp: TcpStream) -> std::i
     };
     let mut parts = req.path.trim_matches('/').split('/');
     let authorized = parts.next() == Some("t") && parts.next().is_some_and(|t| same(t, token));
-    if !authorized {
-        return respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await;
-    }
+    let found = if authorized { link(shared, token) } else { None };
     let route: Vec<&str> = parts.collect();
+    match found {
+        None => return respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
+        Some(Link::Ended(why)) => return ended(&mut tcp, &req.method, &route, why).await,
+        Some(Link::Live) => {}
+    }
     let session = req
         .query
         .get("s")
         .and_then(|s| s.parse::<Fingerprint>().ok());
     match (req.method.as_str(), route.as_slice()) {
         ("GET", []) => page(&mut tcp).await,
+        // The page checks this when its connection drops: an answer means
+        // still sharing (any other answer, not; no answer, out of reach).
+        ("GET", ["ping"]) => respond(&mut tcp, "200 OK", "application/json", b"{}").await,
         ("GET", ["events"]) => events(shared, &mut tcp, session, &req.user_agent).await,
         ("POST", ["answer"]) => {
             let ok = answer(shared, session, &req.query);
@@ -627,7 +871,7 @@ async fn handle(shared: &Arc<Shared>, token: &str, mut tcp: TcpStream) -> std::i
             respond(&mut tcp, status, "application/json", b"{}").await
         }
         ("GET", ["f", id]) => match (session, id.parse::<u64>()) {
-            (Some(s), Ok(id)) => download(shared, &mut tcp, s, id).await,
+            (Some(s), Ok(id)) => download(shared, token, &mut tcp, s, id).await,
             _ => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
         },
         ("POST", ["ask"]) => match session {
@@ -635,7 +879,7 @@ async fn handle(shared: &Arc<Shared>, token: &str, mut tcp: TcpStream) -> std::i
             None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
         },
         ("POST", ["u"]) => match session {
-            Some(s) => upload(shared, &mut tcp, s, req).await,
+            Some(s) => upload(shared, token, &mut tcp, s, req).await,
             None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
         },
         ("POST", ["cancel"]) => {
@@ -717,6 +961,21 @@ async fn ask(
     .await
 }
 
+/// A stopped share's link: the page still loads (and shows that sharing
+/// stopped); everything else is `410 Gone`, with why.
+async fn ended(
+    tcp: &mut TcpStream,
+    method: &str,
+    route: &[&str],
+    why: StopReason,
+) -> std::io::Result<()> {
+    if method == "GET" && route.is_empty() {
+        return page(tcp).await;
+    }
+    let body = format!("{{\"stopped\":\"{}\"}}", why.word());
+    respond(tcp, "410 Gone", "application/json", body.as_bytes()).await
+}
+
 async fn page(tcp: &mut TcpStream) -> std::io::Result<()> {
     let head = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -753,21 +1012,7 @@ async fn events(
             None => {
                 let id = Fingerprint::from_bytes(random_bytes());
                 let name = unique_name(web, name_from_user_agent(user_agent));
-                web.browsers.insert(
-                    id,
-                    Browser {
-                        name,
-                        events: None,
-                        connection: 0,
-                        gone_since: None,
-                        offers: HashMap::new(),
-                        queue: VecDeque::new(),
-                        current: None,
-                        allowance: 0,
-                        asking: None,
-                        uploads: HashSet::new(),
-                    },
-                );
+                web.browsers.insert(id, Browser::new(name));
                 id
             }
         };
@@ -806,7 +1051,7 @@ async fn events(
                     Some(msg) => tcp.write_all(msg.as_bytes()).await?,
                     None => return Ok(()), // sharing stopped, or the tab was replaced
                 },
-                _ = ping.tick() => tcp.write_all(b": ping\n\n").await?,
+                _ = ping.tick() => tcp.write_all(b"event: ping\ndata: {}\n\n").await?,
             }
         }
     }
@@ -847,58 +1092,176 @@ fn answer(shared: &Shared, session: Option<Fingerprint>, query: &HashMap<String,
     }
 }
 
-/// Stream an accepted file to the tab.
+/// Stream an accepted file to the tab: only the one it was last told to
+/// fetch. Asked for again while it's still that one (the browser retrying a
+/// broken download, or the page's Download button), the newer request
+/// takes over from the older.
 async fn download(
     shared: &Arc<Shared>,
+    token: &str,
     tcp: &mut TcpStream,
     session: Fingerprint,
     id: u64,
 ) -> std::io::Result<()> {
-    let taken = {
+    let claimed = {
         let mut state = shared.state();
-        state
+        let tab = state
             .web
             .as_mut()
-            .and_then(|w| w.browsers.get_mut(&session))
-            .and_then(|tab| tab.current.as_mut())
-            .filter(|d| d.id == id)
-            .and_then(|d| d.item.take().map(|item| (item, d.name.clone())))
+            .and_then(|w| w.browsers.get_mut(&session));
+        tab.and_then(|tab| {
+            let d = tab.current.as_mut().filter(|d| d.id == id)?;
+            let item = d.item.try_clone().ok()?;
+            d.attempts += 1;
+            let stop = Arc::new(Notify::new());
+            let (done, done_rx) = watch::channel(());
+            let previous = d.streaming.replace(Streaming {
+                attempt: d.attempts,
+                stop: stop.clone(),
+                done: done_rx,
+            });
+            let claim = (item, d.name.clone(), d.attempts, previous, stop, done);
+            tab.push("started", &format!("{{\"id\":{id}}}"));
+            Some(claim)
+        })
     };
-    let Some((item, name)) = taken else {
+    let Some((item, name, attempt, previous, stop, _done)) = claimed else {
         return respond(tcp, "404 Not Found", "text/plain", b"Not found").await;
     };
+    if let Some(previous) = previous {
+        // Wait for the older request to let go of the file (its `done`
+        // closes), so the two never read it at once.
+        previous.stop.notify_one();
+        let mut done = previous.done;
+        let gone = async { while done.changed().await.is_ok() {} };
+        let _ = tokio::time::timeout(Duration::from_secs(5), gone).await;
+    }
 
     let start = Instant::now();
-    let result = stream_file(shared, tcp, session, id, item, &name).await;
-    let delivered = result.is_ok();
-    shared.finish(
-        id,
-        result.map(|bytes| {
-            (
-                PathBuf::from(&name),
-                TransferStats {
-                    bytes,
-                    resumed_from: 0,
-                    elapsed: start.elapsed(),
-                },
-            )
-        }),
-    );
+    let streamed = tokio::select! {
+        r = stream_file(shared, tcp, session, id, item, &name) => r,
+        // A newer request took over; it settles the file.
+        () = stop.notified() => return Ok(()),
+    };
+    let result = streamed.map(|bytes| {
+        (
+            PathBuf::from(&name),
+            TransferStats {
+                bytes,
+                resumed_from: 0,
+                elapsed: start.elapsed(),
+            },
+        )
+    });
+    match result {
+        // Broken off (not cancelled, and still sharing): the browser may ask
+        // again. Leave it on the list for a moment before failing it.
+        Err(e) if !matches!(e, Error::Cancelled | Error::CancelledThere) && live(shared, token) => {
+            let wait = {
+                let mut state = shared.state();
+                current_of(&mut state, session, id).map(|d| {
+                    let ours = d.streaming.as_ref().is_some_and(|s| s.attempt == attempt);
+                    if ours {
+                        d.streaming = None;
+                    }
+                    ours
+                })
+            };
+            match wait {
+                Some(true) => {
+                    let shared = shared.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(RETRY_WINDOW).await;
+                        settle(&shared, session, id, attempt, Err(e), true);
+                    });
+                }
+                // A newer request has it.
+                Some(false) => {}
+                // Off the list already (the tab went): just fail it.
+                None => shared.finish(id, Err(e)),
+            }
+        }
+        result => {
+            let result = result.map_err(|e| ended_error(shared, token, e));
+            settle(shared, session, id, attempt, result, false);
+        }
+    }
+    Ok(())
+}
 
-    let mut state = shared.state();
-    if let Some(tab) = state
+/// The download `id`, if it's the one `session` is fetching now.
+fn current_of(state: &mut super::State, session: Fingerprint, id: u64) -> Option<&mut Download> {
+    state
         .web
         .as_mut()
         .and_then(|w| w.browsers.get_mut(&session))
-        && tab.current.as_ref().is_some_and(|d| d.id == id)
+        .and_then(|tab| tab.current.as_mut())
+        .filter(|d| d.id == id)
+}
+
+/// A download is over: tell the app and the tab, and move on to the next.
+/// `retried_out`: called after `RETRY_WINDOW`, so only if nobody asked
+/// for it again meanwhile and it wasn't settled some other way.
+fn settle(
+    shared: &Shared,
+    session: Fingerprint,
+    id: u64,
+    attempt: u64,
+    result: Result<(PathBuf, TransferStats)>,
+    retried_out: bool,
+) {
+    let ok = result.is_ok();
     {
-        if delivered {
-            tab.push("delivered", &format!("{{\"id\":{id}}}"));
+        let mut state = shared.state();
+        let tab = state
+            .web
+            .as_mut()
+            .and_then(|w| w.browsers.get_mut(&session))
+            .filter(|tab| tab.current.as_ref().is_some_and(|d| d.id == id));
+        match tab {
+            Some(tab) => {
+                let unclaimed = tab
+                    .current
+                    .as_ref()
+                    .is_some_and(|d| d.attempts == attempt && d.streaming.is_none());
+                if retried_out && !unclaimed {
+                    return;
+                }
+                let d = tab.current.take().expect("checked above");
+                // An older request still going (this one overtook it and
+                // won): stop it quietly.
+                if let Some(other) = d.streaming.filter(|s| s.attempt != attempt) {
+                    other.stop.notify_one();
+                }
+                tab.remember_down(id, ok);
+                let event = if ok { "delivered" } else { "failed" };
+                tab.push(event, &format!("{{\"id\":{id}}}"));
+                tab.advance();
+            }
+            // Settled some other way already (cancelled, or the tab went).
+            None if retried_out => return,
+            None => {}
         }
-        tab.current = None;
-        tab.advance();
     }
-    Ok(())
+    shared.finish(id, result);
+}
+
+/// Read up to `buf.len()` bytes at `at`, without moving the file's position:
+/// a retry's handle to an already-open file shares that position.
+async fn read_chunk(
+    file: Arc<std::fs::File>,
+    mut buf: Vec<u8>,
+    at: u64,
+) -> std::io::Result<(Vec<u8>, usize)> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(&*file, &mut buf, at)?;
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(&*file, &mut buf, at)?;
+        Ok((buf, n))
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 async fn stream_file(
@@ -919,8 +1282,7 @@ async fn stream_file(
     };
     let size = file.metadata()?.len();
     let progress = shared.track(id, browser, size);
-    let mut file = tokio::fs::File::from_std(file);
-    file.seek(SeekFrom::Start(0)).await?;
+    let file = Arc::new(file);
 
     let head = format!(
         "HTTP/1.1 200 OK\r\n\
@@ -935,11 +1297,25 @@ async fn stream_file(
     tcp.write_all(head.as_bytes()).await?;
     let mut buf = vec![0u8; BUFFER];
     let mut sent = 0u64;
+    let mut told = Instant::now();
     while sent < size {
         let step = async {
-            let n = file.read(&mut buf).await?;
+            let (back, n) = read_chunk(file.clone(), std::mem::take(&mut buf), sent).await?;
+            buf = back;
             let n = n.min((size - sent) as usize);
-            tcp.write_all(&buf[..n]).await?;
+            // Written in pieces, so a slow browser isn't mistaken for a
+            // stalled one: only no progress at all for `STALL_LIMIT` is.
+            let mut off = 0;
+            while off < n {
+                let wrote = tokio::time::timeout(STALL_LIMIT, tcp.write(&buf[off..n]))
+                    .await
+                    .map_err(|_| Error::BrowserStalled)??;
+                if wrote == 0 {
+                    return Err(std::io::Error::from(std::io::ErrorKind::WriteZero).into());
+                }
+                off += wrote;
+                progress.set(sent + off as u64);
+            }
             Ok::<usize, Error>(n)
         };
         let n = tokio::select! {
@@ -950,7 +1326,21 @@ async fn stream_file(
             break;
         }
         sent += n as u64;
-        progress.set(sent);
+        // The page shows the same progress as the app.
+        if told.elapsed() >= PAGE_PROGRESS || sent == size {
+            told = Instant::now();
+            if let Some(tab) = shared
+                .state()
+                .web
+                .as_ref()
+                .and_then(|w| w.browsers.get(&browser))
+            {
+                tab.push(
+                    "progress",
+                    &format!("{{\"id\":{id},\"bytes\":{sent},\"size\":{size}}}"),
+                );
+            }
+        }
     }
     if sent < size {
         return Err(Error::Truncated {
@@ -966,6 +1356,7 @@ async fn stream_file(
 /// Save a file the tab sends, once the user here has accepted it (`ask`).
 async fn upload(
     shared: &Arc<Shared>,
+    token: &str,
     tcp: &mut TcpStream,
     session: Fingerprint,
     req: Request,
@@ -997,6 +1388,13 @@ async fn upload(
     let Ok(name) = sanitize_file_name(req.query.get("name").map_or("", String::as_str)) else {
         return respond(tcp, "400 Bad Request", "text/plain", b"Bad file name").await;
     };
+    // The page's name for this upload: it's told over the event stream once
+    // the file is saved, in case this reply never reaches it.
+    let key = req
+        .query
+        .get("k")
+        .filter(|k| k.len() <= 32 && k.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .cloned();
 
     let id = shared
         .next_id
@@ -1034,6 +1432,7 @@ async fn upload(
     .await;
 
     let cancelled = progress.cancel().by();
+    let sharing = live(shared, token);
     if let Some(tab) = shared
         .state()
         .web
@@ -1045,10 +1444,15 @@ async fn upload(
             // The rest of its files aren't wanted either.
             tab.allowance = 0;
         }
-        if cancelled == Some(CancelledBy::Here) {
+        if cancelled == Some(CancelledBy::Here) && sharing {
             tab.push("cancelled", "{\"what\":\"up\",\"by\":\"them\"}");
         }
+        if let (Ok(_), Some(key)) = (&result, key) {
+            tab.push("received", &format!("{{\"k\":{}}}", json_str(&key)));
+            tab.remember_up(key);
+        }
     }
+    let result = result.map_err(|e| ended_error(shared, token, e));
     let ok = result.is_ok();
     shared.finish(
         id,

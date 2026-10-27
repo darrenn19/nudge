@@ -71,6 +71,12 @@ pub enum Error {
     #[error("the browser page was closed")]
     BrowserGone,
 
+    #[error("the browser stopped downloading")]
+    BrowserStalled,
+
+    #[error("sharing was stopped")]
+    WebShareStopped,
+
     #[error("couldn't share with browsers: {0}")]
     WebShare(String),
 

@@ -2,7 +2,7 @@
 /target/
 **/*.rs.bk
 
-# Flutter / Dart (app/ arrives in Phase 2)
+# Flutter / Dart
 app/.dart_tool/
 app/build/
 app/.flutter-plugins*

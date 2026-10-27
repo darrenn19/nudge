@@ -282,9 +282,167 @@ async fn browser_receives_and_sends() {
     .await;
     assert!(node.web_share_url().is_none());
     assert!(node.peers().iter().all(|p| p.fingerprint != id));
+    // The tab is told why, then its stream closes.
+    assert_eq!(field(&tab.next("stopped").await, "why"), "user");
     let mut rest = Vec::new();
     let closed = tokio::time::timeout(Duration::from_secs(5), tab.tcp.read_to_end(&mut rest)).await;
     assert!(closed.is_ok(), "event stream still open");
+}
+
+/// A stopped link says so (so a tab can tell "stopped" from "out of
+/// reach"), until sharing starts again with a new link.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_link_says_it_stopped() {
+    let (node, _events, _dir) = start().await;
+    let url = node.start_web_share().await.unwrap();
+    let (addr, path) = split(&url);
+    assert_eq!(
+        http(&addr, "GET", &format!("{path}/ping"), b"").await.0,
+        200
+    );
+
+    node.stop_web_share();
+    let (status, body) = http(&addr, "GET", &format!("{path}/ping"), b"").await;
+    assert_eq!(status, 410);
+    assert!(String::from_utf8_lossy(&body).contains("\"stopped\":\"user\""));
+    assert_eq!(
+        http(&addr, "GET", &format!("{path}/events"), b"").await.0,
+        410
+    );
+    // The page still loads, to show that sharing stopped.
+    assert_eq!(http(&addr, "GET", &path, b"").await.0, 200);
+    // Other links are still nothing.
+    let wrong = format!("/t/{}/ping", "0".repeat(32));
+    assert_eq!(http(&addr, "GET", &wrong, b"").await.0, 404);
+
+    // Sharing again: a new link; the old one is unknown there. (Tests run
+    // side by side and share the usual port, so the new link may be on
+    // another.)
+    let again = node.start_web_share().await.unwrap();
+    let (new_addr, new_path) = split(&again);
+    assert_ne!(new_path, path);
+    assert_eq!(
+        http(&new_addr, "GET", &format!("{new_path}/ping"), b"").await.0,
+        200
+    );
+    if new_addr == addr {
+        assert_eq!(
+            http(&addr, "GET", &format!("{path}/ping"), b"").await.0,
+            404
+        );
+    }
+}
+
+/// A browser that asks for a file again mid-download (a retry) gets all of
+/// it, and the app hears it finish once, so it never sticks at "sending".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retried_download_takes_over() {
+    let (node, mut events, dir) = start().await;
+    let url = node.start_web_share().await.unwrap();
+    let (addr, path) = split(&url);
+    let mut tab = Events::open(&addr, &path, None).await;
+    let session = field(&tab.next("hello").await, "session");
+    let id: Fingerprint = session.parse().unwrap();
+    let big = dir.path().join("big.bin");
+    let data: Vec<u8> = (0..(64u32 << 20)).map(|i| (i % 253) as u8).collect();
+    std::fs::write(&big, &data).unwrap();
+
+    let ids = node.send_files(id, vec![big]);
+    let batch = field(&tab.next("offer").await, "batch");
+    let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
+    assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
+    assert!(tab.next("download").await.contains("\"streaming\":false"));
+
+    // The first request takes a little, then stops reading.
+    let mut first = TcpStream::connect(&addr).await.unwrap();
+    let head = format!(
+        "GET {path}/f/{}?s={session} HTTP/1.1\r\nHost: {addr}\r\n\r\n",
+        ids[0]
+    );
+    first.write_all(head.as_bytes()).await.unwrap();
+    let mut some = vec![0u8; 1 << 20];
+    first.read_exact(&mut some).await.unwrap();
+    tab.next("started").await;
+
+    // The retry gets the whole file.
+    let (status, body) = http(&addr, "GET", &format!("{path}/f/{}?s={session}", ids[0]), b"").await;
+    assert_eq!(status, 200);
+    assert!(body == data, "retry got {} bytes", body.len());
+    assert_eq!(field(&tab.next("delivered").await, "id"), ids[0].to_string());
+    wait_for(&mut events, |e| match e {
+        NodeEvent::TransferDone { id, .. } if *id == ids[0] => Some(()),
+        NodeEvent::TransferFailed { error, .. } => panic!("send failed: {error}"),
+        _ => None,
+    })
+    .await;
+    // The first request was dropped, not left hanging.
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), first.read_to_end(&mut rest)).await;
+    assert!(read.is_ok(), "first request still open");
+    // Settled for good: no third time, and no second result.
+    assert_eq!(
+        http(&addr, "GET", &format!("{path}/f/{}?s={session}", ids[0]), b"").await.0,
+        404
+    );
+    let late = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match events.recv().await {
+                Some(NodeEvent::TransferDone { id, .. } | NodeEvent::TransferFailed { id, .. })
+                    if id == ids[0] =>
+                {
+                    return;
+                }
+                Some(_) => {}
+                None => std::future::pending().await,
+            }
+        }
+    })
+    .await;
+    assert!(late.is_err(), "finished twice");
+}
+
+/// A tab that reconnects hears where things stand: what's still coming and
+/// how recent files ended, even if it missed those events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reconnecting_tab_is_brought_up_to_date() {
+    let (node, mut events, dir) = start().await;
+    let url = node.start_web_share().await.unwrap();
+    let (addr, path) = split(&url);
+    let mut tab = Events::open(&addr, &path, None).await;
+    let session = field(&tab.next("hello").await, "session");
+    let id: Fingerprint = session.parse().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    std::fs::write(&a, b"first").unwrap();
+    std::fs::write(&b, b"second").unwrap();
+
+    let ids = node.send_files(id, vec![a, b]);
+    let batch = field(&tab.next("offer").await, "batch");
+    let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
+    assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
+    tab.next("download").await;
+    // The tab drops off; its first file arrives meanwhile.
+    drop(tab);
+    let (status, _) = http(&addr, "GET", &format!("{path}/f/{}?s={session}", ids[0]), b"").await;
+    assert_eq!(status, 200);
+    wait_for(&mut events, |e| match e {
+        NodeEvent::TransferDone { id, .. } if *id == ids[0] => Some(()),
+        _ => None,
+    })
+    .await;
+
+    let mut tab = Events::open(&addr, &path, Some(&session)).await;
+    tab.next("hello").await;
+    let sync = tab.next("sync").await;
+    assert!(
+        sync.contains(&format!("\"done\":[{{\"id\":{},\"ok\":true}}]", ids[0])),
+        "{sync}"
+    );
+    assert!(
+        sync.contains(&format!("\"owed\":[{{\"id\":{},\"name\":\"b.txt\"", ids[1])),
+        "{sync}"
+    );
+    assert_eq!(field(&tab.next("download").await, "id"), ids[1].to_string());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

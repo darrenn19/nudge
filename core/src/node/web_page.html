@@ -16,6 +16,7 @@
     --orb: min(68vw, 46vh, 300px);
   }
   * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body {
     margin: 0; color: var(--text); overflow-x: hidden;
@@ -45,6 +46,7 @@
   .status { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); transition: background .3s; }
   .dot.on { background: var(--good); box-shadow: 0 0 10px rgba(123,224,166,.6); }
+  .dot.warn { background: var(--warn); box-shadow: 0 0 10px rgba(255,196,107,.5); }
 
   .stage { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 24px 0 8px; width: 100%; }
 
@@ -138,7 +140,22 @@
   .pill:active { transform: scale(.96); }
   .pill svg { width: 16px; height: 16px; }
   .pill:disabled { opacity: .4; cursor: default; }
-  .pill.stop { color: var(--bad); }
+  .activity { width: 100%; max-width: 420px; margin-top: 16px; display: flex; flex-direction: column; gap: 8px; }
+  .task {
+    display: flex; align-items: center; gap: 12px; padding: 10px 10px 10px 16px; border-radius: 20px;
+    background: var(--glass); border: 1px solid var(--line); animation: rise .35s cubic-bezier(.2,.8,.2,1);
+  }
+  .task .what { flex: 1; min-width: 0; }
+  .task .title { font-size: 14px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .task .detail { font-size: 12px; color: var(--muted); }
+  .task .meter { height: 3px; margin-top: 6px; border-radius: 2px; background: rgba(255,255,255,.12); overflow: hidden; }
+  .task .meter i { display: block; height: 100%; width: 0; background: var(--text); border-radius: 2px; transition: width .4s cubic-bezier(.2,.8,.2,1); }
+  .task .stop {
+    flex: none; border: 0; border-radius: 16px; padding: 8px 14px; cursor: pointer; font-size: 13px; font-weight: 600;
+    color: var(--bad); background: rgba(255,138,128,.14); transition: transform .15s;
+  }
+  .task .stop:active { transform: scale(.96); }
+  .task .stop:disabled { opacity: .5; }
   .sheet textarea, .sheet .text {
     width: 100%; margin: 16px 0 18px; padding: 12px 14px; border-radius: 18px; border: 1px solid var(--line);
     background: rgba(0,0,0,.2); color: var(--text); font: inherit; font-size: 15px;
@@ -146,6 +163,20 @@
   .sheet textarea { min-height: 120px; max-height: 40vh; resize: vertical; }
   .sheet textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .sheet .text { max-height: 40vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+  /* Sharing stopped: replaces the orb. */
+  .ended {
+    flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; max-width: 380px; padding: 24px 0 8px; animation: rise .5s cubic-bezier(.2,.8,.2,1);
+  }
+  .ended .mark {
+    width: 128px; height: 128px; border-radius: 50%; display: grid; place-items: center; margin-bottom: 26px;
+    background: rgba(255,255,255,.05); box-shadow: inset 0 0 0 20px rgba(255,255,255,.035), 0 0 0 1px var(--line);
+    color: var(--muted);
+  }
+  .ended .mark svg { width: 38px; height: 38px; }
+  .ended h1 { margin: 0 0 10px; font-size: 24px; line-height: 1.2; letter-spacing: -.3px; overflow-wrap: anywhere; }
+  .ended p { margin: 0; color: var(--muted); font-size: 15px; }
+  .ended .looking { margin-top: 20px; font-size: 13px; color: var(--faint); }
   .fine { margin-top: 28px; font-size: 12px; color: var(--faint); text-align: center; max-width: 360px; }
 
   /* An offer slides up from the bottom. */
@@ -228,16 +259,40 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M9 10h6M9 14h6"/></svg>
         Send text or a link
       </button>
-      <button class="pill stop" id="cancel" hidden>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        Cancel
+      <button class="pill" id="getFile" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v13M6 11l6 6 6-6M5 20h14"/></svg>
+        <span id="getFileName">Download</span>
       </button>
     </div>
+    <!-- What's under way, each with its own Cancel. -->
+    <div class="activity">
+      <div class="task" id="taskAsk" hidden>
+        <div class="what"><div class="title" id="askTitle"></div><div class="detail" id="askDetail"></div></div>
+        <button class="stop" id="cancelAsk">Cancel</button>
+      </div>
+      <div class="task" id="taskUp" hidden>
+        <div class="what"><div class="title" id="upTitle"></div><div class="detail" id="upDetail"></div>
+          <div class="meter"><i id="upMeter"></i></div></div>
+        <button class="stop" id="cancelUp">Cancel</button>
+      </div>
+      <div class="task" id="taskDown" hidden>
+        <div class="what"><div class="title" id="downTitle"></div><div class="detail" id="downDetail"></div>
+          <div class="meter"><i id="downMeter"></i></div></div>
+        <button class="stop" id="cancelDown">Cancel</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="ended" id="ended" hidden>
+    <div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3.5v8"/><path d="M7.2 6.6a7.5 7.5 0 1 0 9.6 0"/></svg></div>
+    <h1 id="endedTitle"></h1>
+    <p id="endedText"></p>
+    <p class="looking" id="endedLooking" hidden>Still checking, in case it comes back…</p>
   </section>
 
   <section class="list" id="list" hidden></section>
 
-  <p class="fine">This is a temporary connection: it ends soon after you close this page, and nothing is installed or paired. Files go straight between the two devices over this Wi-Fi; nothing is uploaded to the internet.</p>
+  <p class="fine" id="fine">This is a temporary connection: it ends soon after you close this page, and nothing is installed or paired. Files go straight between the two devices over this Wi-Fi; nothing is uploaded to the internet.</p>
 </main>
 
 <div class="backdrop" id="backdrop"></div>
@@ -282,12 +337,24 @@ const ICONS = {
 
 let session = "";
 try { session = sessionStorage.getItem("nudge-session") || ""; } catch (e) {}
-const state = { connected: false, from: "the other device", offers: [], pending: 0, uploading: false, asking: false, flash: null };
+/* link: "connecting" | "live" | "lost" (just dropped) | "away" (can't reach
+   it) | "offline" (this device has no network) | "ended" (sharing stopped). */
+const state = {
+  link: "connecting", connected: false, why: "", from: "the other device",
+  offers: [], uploading: false, asking: false, finishing: false, upProgress: null, flash: null,
+  upName: "", upIndex: 0, upCount: 0,
+};
 let source = null, retry = null, flashTimer = null;
 const isPhone = /iPhone|iPad|Android|Mobile/.test(navigator.userAgent);
 const tap = isPhone ? "Tap" : "Click";
 let dragging = false;
 $("bubble").innerHTML = isPhone ? ICONS.phone : ICONS.laptop;
+
+/* Files on their way here, by ID: accepted and not yet settled. The other
+   device says when each starts, how far it's got and how it ended, and
+   (after a reconnect) what's still owed, so this never drifts from it. */
+const incoming = new Map(); // id -> { name, size, bytes, fetched, started }
+let run = { total: 0, done: 0, failed: 0 };
 
 function size(n) {
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -301,6 +368,7 @@ function el(tag, cls, text) {
   if (text !== undefined) e.textContent = text;
   return e;
 }
+const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 function toast(text) {
   const t = $("toast");
   t.textContent = text;
@@ -313,25 +381,52 @@ function replay(node, cls) {
   void node.offsetWidth; // restart the animation
   node.classList.add(cls);
 }
+function recvProgress() {
+  if (!incoming.size || !run.total) return null;
+  let bytes = run.done;
+  for (const f of incoming.values()) bytes += f.bytes;
+  return bytes > 0 ? Math.min(1, bytes / run.total) : null;
+}
 
 /* One place decides what the orb, the dots and the hint say. */
-function render(progress) {
+function render() {
   const orb = $("orb"), sub = $("orbSub"), flow = $("flow"), bar = $("bar");
-  let label = state.from, text = "", tone = "", busy = false, dir = "";
-  if (!state.connected) {
-    label = "Connecting…"; text = "";
+  let label = state.from, text = "", tone = "", busy = false, dir = "", progress = null, hint;
+  const from = "<b></b>";
+  const receiving = incoming.size > 0;
+  if (state.link === "connecting") {
+    label = "Connecting…";
+    hint = "Opening a connection…";
+  } else if (state.link === "lost") {
+    text = "Reconnecting…"; tone = "warn";
+    hint = "Keep this page open.";
+  } else if (state.link === "away") {
+    label = "Can't reach " + state.from; text = "Looking…"; tone = "warn";
+    hint = from + " may be out of range, asleep or on a different Wi-Fi. Move closer and keep this page open: it reconnects by itself.";
+  } else if (state.link === "offline") {
+    label = "You're offline"; text = "Waiting for Wi-Fi…"; tone = "warn";
+    hint = "Connect to the same Wi-Fi as " + from + ". This page reconnects by itself.";
   } else if (state.asking) {
     text = "Waiting for them to accept"; tone = "warn";
+    hint = "Sent. " + from + " will accept or decline.";
   } else if (state.uploading) {
-    busy = true; dir = "up"; text = "Sending" + (progress != null ? " " + Math.floor(progress * 100) + "%" : "…");
-  } else if (state.pending > 0) {
-    busy = true; dir = "down"; text = "Receiving…";
+    busy = true; dir = "up"; progress = state.upProgress;
+    text = state.finishing ? "Finishing…" : "Sending" + (progress != null ? " " + Math.floor(progress * 100) + "%" : "…");
+    hint = "Keep this page open until it's done.";
+  } else if (receiving) {
+    busy = true; dir = "down"; progress = recvProgress();
+    text = "Receiving" + (progress != null ? " " + Math.floor(progress * 100) + "%" : "…");
+    hint = "Keep this page open until it's done.";
   } else if (dragging) {
     busy = true; text = "Drop to send"; tone = "accent";
   } else if (state.flash) {
     text = state.flash.text; tone = state.flash.tone;
   } else {
     text = tap + " to send files"; tone = "accent";
+  }
+  if (!hint) {
+    hint = "Keep this page open: files from " + from + " appear here.<br>" + tap + " the circle" +
+      (isPhone ? "" : " or drop files here") + " to send files to it.";
   }
   $("orbLabel").textContent = label;
   sub.textContent = text;
@@ -341,22 +436,23 @@ function render(progress) {
   orb.classList.toggle("tint-good", !busy && state.flash && state.flash.tone === "good");
   orb.classList.toggle("tint-bad", !busy && state.flash && state.flash.tone === "bad");
   flow.className = "flow" + (dir ? " " + dir : "");
-  const showBar = state.uploading && progress != null;
-  $("progress").classList.toggle("on", showBar);
-  bar.setAttribute("stroke-dashoffset", String(301.6 * (1 - (showBar ? progress : 0))));
-  $("hint").innerHTML = !state.connected
-    ? "Opening a connection…"
-    : state.asking
-    ? "Sent. <b></b> will accept or decline."
-    : state.uploading || state.pending > 0
-    ? "Keep this page open until it's done."
-    : "Keep this page open: files from <b></b> appear here.<br>" + tap + " the circle" +
-      (isPhone ? "" : " or drop files here") + " to send files to it.";
+  $("progress").classList.toggle("on", progress != null);
+  bar.setAttribute("stroke-dashoffset", String(301.6 * (1 - (progress != null ? progress : 0))));
+  $("hint").innerHTML = hint;
   const b = $("hint").querySelector("b");
   if (b) b.textContent = state.from;
-  const cancellable = state.connected && (state.asking || state.uploading || state.pending > 0);
-  $("cancel").hidden = !cancellable;
-  $("sendText").hidden = cancellable;
+  renderTasks(receiving);
+  $("sendText").hidden = state.asking || state.uploading || receiving;
+  $("sendText").disabled = !state.connected;
+  renderFallback();
+
+  // Header.
+  const status = {
+    connecting: "Connecting…", live: "Connected · temporary", lost: "Reconnecting…",
+    away: "Out of reach", offline: "Offline", ended: "Sharing stopped",
+  }[state.link];
+  $("status").textContent = status;
+  $("dot").className = "dot" + (state.link === "live" ? " on" : state.link === "lost" || state.link === "away" || state.link === "offline" ? " warn" : "");
 }
 
 function flash(text, tone) {
@@ -367,11 +463,13 @@ function flash(text, tone) {
   render();
 }
 
-function setStatus(connected, text) {
-  state.connected = connected;
-  $("sendText").disabled = !connected;
-  $("status").textContent = text;
-  $("dot").classList.toggle("on", connected);
+function setLink(link) {
+  state.link = link;
+  state.connected = link === "live";
+  const ended = link === "ended";
+  $("ended").hidden = !ended;
+  document.querySelector(".stage").hidden = ended;
+  $("fine").hidden = ended;
   render();
 }
 
@@ -385,13 +483,20 @@ function addItem(name, what, ok) {
   list.prepend(row);
 }
 
-/* The connection. */
+/* The connection. The other device pings every 10 s; a page that hears
+   nothing for longer has lost it, even if the browser hasn't noticed. */
+let lastBeat = 0, fails = 0, fastFails = 0, probing = false, softEnd = false;
+const beat = () => { lastBeat = Date.now(); };
+function on(name, handler) {
+  source.addEventListener(name, (e) => { beat(); handler(JSON.parse(e.data)); });
+}
 function connect() {
   clearTimeout(retry);
   if (source) source.close();
   source = new EventSource(base + "/events" + (session ? "?s=" + session : ""));
-  source.addEventListener("hello", (e) => {
-    const d = JSON.parse(e.data);
+  source.onopen = beat;
+  on("ping", () => {});
+  on("hello", (d) => {
     session = d.session;
     try { sessionStorage.setItem("nudge-session", session); } catch (err) {}
     state.from = d.from;
@@ -399,28 +504,125 @@ function connect() {
     $("orbIcon").innerHTML = phoneHost ? ICONS.phone : ICONS.laptop;
     $("orb").setAttribute("aria-label", "Send files to " + d.from);
     $("meName").textContent = "You · " + d.name;
-    setStatus(true, "Connected · temporary");
+    fails = fastFails = 0;
+    softEnd = false;
+    setLink("live");
   });
-  source.addEventListener("offer", (e) => queueOffer(JSON.parse(e.data)));
-  source.addEventListener("withdrawn", (e) => {
-    const batch = JSON.parse(e.data).batch;
-    state.offers = state.offers.filter((o) => o.batch !== batch);
+  on("sync", sync);
+  on("offer", queueOffer);
+  on("withdrawn", (d) => {
+    state.offers = state.offers.filter((o) => o.batch !== d.batch);
     showNextOffer();
   });
-  source.addEventListener("download", (e) => fetchFile(JSON.parse(e.data)));
-  source.addEventListener("delivered", (e) => delivered(JSON.parse(e.data).id));
-  source.addEventListener("clip", (e) => showText(JSON.parse(e.data).text));
-  source.addEventListener("cancelled", (e) => cancelledThere(JSON.parse(e.data)));
-  source.onerror = () => {
-    setStatus(false, "Reconnecting…");
-    source.close();
-    retry = setTimeout(connect, 2000);
-  };
+  on("download", download);
+  on("started", (d) => { const f = incoming.get(d.id); if (f) { f.started = true; render(); } });
+  on("progress", (d) => {
+    const f = incoming.get(d.id);
+    if (!f) return;
+    f.started = true;
+    f.bytes = d.bytes;
+    render();
+  });
+  on("delivered", (d) => settled(d.id, true));
+  on("failed", (d) => settled(d.id, false));
+  on("received", (d) => uploadSaved(d.k));
+  on("clip", (d) => showText(d.text));
+  on("cancelled", cancelledThere);
+  on("stopped", (d) => end(d.why));
+  source.onerror = lost;
+}
+
+/* The connection dropped (or went quiet). Before reconnecting, ask the
+   other device whether it's still sharing: that tells "stopped" (it
+   answers no, or turns the connection away at once) from "out of reach"
+   (no answer at all). */
+function lost() {
+  if (source) { source.close(); source = null; }
+  if (state.link === "ended" && !softEnd) return;
+  if (state.link === "live") setLink("lost");
+  probe();
+}
+async function probe() {
+  clearTimeout(retry);
+  if (probing || (state.link === "ended" && !softEnd)) return;
+  if (document.hidden) return; // picked up again when the page is back
+  if (navigator.onLine === false) {
+    if (state.link !== "ended") setLink("offline");
+    retry = setTimeout(probe, 3000);
+    return;
+  }
+  probing = true;
+  const started = performance.now();
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 6000);
+  let status = 0, why = "";
+  try {
+    const res = await fetch(base + "/ping", { cache: "no-store", signal: ctl.signal });
+    status = res.status;
+    if (status === 410) why = (await res.json().catch(() => ({}))).stopped || "";
+  } catch (err) {}
+  clearTimeout(timer);
+  probing = false;
+  if (state.link === "ended" && !softEnd) return;
+  if (status === 200) {
+    // Still sharing: only the event stream dropped.
+    retry = setTimeout(connect, fails > 0 ? 1000 : 0);
+    fails++;
+    return;
+  }
+  if (status === 410) { end(why || "user"); return; }
+  if (status === 404) { end("gone"); return; }
+  fails++;
+  // Turned away at once, again and again: something answers at that
+  // address, but nothing's sharing there.
+  const refused = status === 0 && performance.now() - started < 1500;
+  fastFails = refused ? fastFails + 1 : 0;
+  if (fastFails >= 3) end("quiet");
+  else if (fails >= 2 && state.link !== "ended") setLink("away");
+  retry = setTimeout(probe, softEnd ? 8000 : Math.min(2000 * fails, 10000));
+}
+setInterval(() => {
+  if (state.link === "live" && !document.hidden && Date.now() - lastBeat > 25000) lost();
+}, 5000);
+
+/* Sharing stopped. "quiet": nothing answers, so it's only likely; keep
+   checking in case it comes back. */
+function end(why) {
+  softEnd = why === "quiet";
+  if (!softEnd) clearTimeout(retry);
+  if (source) { source.close(); source = null; }
+  state.why = why;
+  // What was on its way won't come now.
+  for (const f of incoming.values()) addItem(f.name, "Not received", false);
+  incoming.clear();
+  run = { total: 0, done: 0, failed: 0 };
+  state.offers = [];
+  closeSheet();
+  if (textMode) closeTextSheet();
+  if (state.uploading || state.asking) {
+    stopped = "ended";
+    if (sending) sending.abort();
+    if (asking) asking.abort();
+  }
+  const who = state.from;
+  const [title, text] = {
+    user: [who + " stopped sharing",
+      "This connection has closed. Files you already received are kept. To connect again, ask for a new code on " + who + " and scan it."],
+    idle: ["Sharing ended",
+      who + " stopped sharing after a while with nobody connected. To connect again, ask for a new code and scan it."],
+    gone: ["This link has expired",
+      who + " isn't sharing on this link any more. Scan the code it shows now to connect."],
+    quiet: [who + " isn't sharing",
+      "Nothing is answering on " + who + ": it may have stopped sharing or closed Nudge. If it's still sharing, check you're both on the same Wi-Fi."],
+  }[why] || [who + " stopped sharing", "This connection has closed."];
+  $("endedTitle").textContent = cap(title);
+  $("endedText").textContent = cap(text);
+  $("endedLooking").hidden = !softEnd;
+  setLink("ended");
 }
 
 /* Offers: one at a time, in a sheet. */
 let shown = null;
-const names = new Map();
 function queueOffer(offer) {
   if (state.offers.some((o) => o.batch === offer.batch)) return;
   state.offers.push(offer);
@@ -438,7 +640,6 @@ function showNextOffer() {
   const list = $("offerFiles");
   list.textContent = "";
   for (const f of next.files) {
-    names.set(f.id, f.name);
     const li = el("li");
     li.append(el("span", "name", f.name), el("span", "size", size(f.size)));
     list.append(li);
@@ -450,45 +651,121 @@ function showNextOffer() {
   $("accept").focus({ preventScroll: true });
 }
 function closeSheet() {
-  $("backdrop").classList.remove("on");
   $("sheet").classList.remove("on");
+  if (!textMode) $("backdrop").classList.remove("on");
   shown = null;
+}
+function expect(f) {
+  if (incoming.has(f.id)) return;
+  incoming.set(f.id, { name: f.name, size: f.size, bytes: 0, fetched: false, started: false });
+  run.total += f.size;
 }
 async function answer(yes) {
   const offer = shown;
   if (!offer) return;
   $("accept").disabled = $("decline").disabled = true;
+  let ok = false;
   try {
-    await fetch(base + "/answer?s=" + session + "&batch=" + offer.batch + "&accept=" + (yes ? 1 : 0), { method: "POST" });
+    const res = await fetch(base + "/answer?s=" + session + "&batch=" + offer.batch + "&accept=" + (yes ? 1 : 0), { method: "POST" });
+    ok = res.ok;
   } catch (err) {}
   state.offers = state.offers.filter((o) => o.batch !== offer.batch);
   closeSheet();
-  if (yes) { state.pending += offer.files.length; render(); }
+  if (yes && ok) {
+    for (const f of offer.files) expect(f);
+    render();
+  } else if (yes) {
+    toast("That offer has gone");
+  }
   setTimeout(showNextOffer, 350);
 }
 $("accept").onclick = () => answer(true);
 $("decline").onclick = () => answer(false);
 
 /* Each accepted file downloads to the browser's usual place, one at a
-   time: the other device says which is next, then when it's all gone. */
-function fetchFile(file) {
-  names.set(file.id, file.name);
+   time: the other device says which is next. A browser may hold back a
+   download that no tap started (several in a row, say): then a button
+   lets the person start it. */
+function download(d) {
+  expect(d);
+  const f = incoming.get(d.id);
+  if (d.streaming) { f.started = true; render(); return; } // under way already
+  if (!f.fetched) {
+    f.fetched = true;
+    fetchFile(d.id, f.name);
+    setTimeout(() => { if (incoming.get(d.id) === f && !f.started) render(); }, 4000);
+    f.askedAt = Date.now();
+  } else {
+    f.askedAt = 0; // asked for before and never started: needs a tap
+  }
+  render();
+}
+function fetchFile(id, name) {
   const a = el("a");
-  a.href = base + "/f/" + file.id + "?s=" + session;
-  a.download = file.name;
+  a.href = base + "/f/" + id + "?s=" + session;
+  a.download = name;
   a.rel = "noopener";
   document.body.append(a);
   a.click();
   a.remove();
 }
-function delivered(id) {
-  state.pending = Math.max(0, state.pending - 1);
-  addItem(names.get(id) || "File", "Saved to downloads", true);
-  replay($("bubble"), "pop");
-  $("bubble").classList.add("good");
-  setTimeout(() => $("bubble").classList.remove("good"), 900);
-  replay($("wave"), "go");
-  if (state.pending === 0) flash("Received", "good"); else render();
+/* The file the other device is waiting for, if it hasn't started a while
+   after being asked for. */
+function stuck() {
+  for (const [id, f] of incoming) {
+    if (f.fetched && !f.started && Date.now() - (f.askedAt || 0) >= 3500) return [id, f];
+  }
+  return null;
+}
+function renderFallback() {
+  const s = state.connected ? stuck() : null;
+  $("getFile").hidden = !s;
+  if (s) {
+    $("getFileName").textContent = "Download " + (s[1].name.length > 24 ? s[1].name.slice(0, 22) + "…" : s[1].name);
+    $("sendText").hidden = true;
+  }
+}
+$("getFile").onclick = () => {
+  const s = stuck();
+  if (!s) return;
+  s[1].askedAt = Date.now();
+  fetchFile(s[0], s[1].name);
+  render();
+  setTimeout(render, 4000);
+};
+function settled(id, ok) {
+  const f = incoming.get(id);
+  if (!f) return;
+  incoming.delete(id);
+  if (ok) {
+    run.done += f.size;
+    addItem(f.name, "Saved to downloads", true);
+    replay($("bubble"), "pop");
+    $("bubble").classList.add("good");
+    setTimeout(() => $("bubble").classList.remove("good"), 900);
+    replay($("wave"), "go");
+  } else {
+    run.failed++;
+    run.total -= f.size;
+    addItem(f.name, "Didn't arrive", false);
+  }
+  if (incoming.size > 0) { render(); return; }
+  const failed = run.failed;
+  run = { total: 0, done: 0, failed: 0 };
+  if (failed) flash(failed === 1 ? "A file didn't arrive" : failed + " didn't arrive", "bad");
+  else flash("Received", "good");
+}
+/* Where things stand, after (re)connecting: settle what finished while this
+   page wasn't listening, and pick up what's still coming. */
+function sync(d) {
+  const owed = new Set(d.owed.map((f) => f.id));
+  const done = new Map(d.done.map((r) => [r.id, r.ok]));
+  for (const id of Array.from(incoming.keys())) {
+    if (!owed.has(id)) settled(id, done.get(id) === true);
+  }
+  for (const f of d.owed) expect(f);
+  for (const k of d.up) uploadSaved(k);
+  render();
 }
 
 /* Sending back: tap the orb, pick files, they go one after another. */
@@ -517,20 +794,32 @@ addEventListener("drop", (e) => {
   sendFiles(Array.from(e.dataTransfer.files || []).filter((f) => f.size > 0 || f.type));
 });
 
+let asking = null;    // the open question, so it can be dropped
 async function sendFiles(files) {
   if (!files.length || state.asking) return;
   const total = files.reduce((s, f) => s + f.size, 0) || 1;
   // Ask first: the person on the other device accepts or declines.
   state.asking = true;
+  state.upName = files[0].name;
+  state.upCount = files.length;
+  stopped = null;
   replay($("orb"), "pop");
   render();
   let answer = "none";
+  asking = new AbortController();
   try {
     const q = "?s=" + session + "&count=" + files.length + "&size=" + total + "&name=" + encodeURIComponent(files[0].name);
-    const res = await fetch(base + "/ask" + q, { method: "POST" });
+    const res = await fetch(base + "/ask" + q, { method: "POST", signal: asking.signal });
     answer = (await res.json()).answer;
   } catch (err) {}
+  asking = null;
   state.asking = false;
+  if (stopped === "ended") {
+    for (const f of files) addItem(f.name, "Not sent", false);
+    stopped = null;
+    render();
+    return;
+  }
   if (answer === "cancelled") {
     stopped = null;
     flash("Cancelled", "");
@@ -544,29 +833,67 @@ async function sendFiles(files) {
   let done = 0, failed = 0;
   stopped = null;
   state.uploading = true;
-  render(0);
+  state.upProgress = 0;
+  render();
+  let index = 0;
   for (const f of files) {
-    if (stopped) { addItem(f.name, "Cancelled", false); continue; }
-    const ok = await upload(f, (loaded) => render((done + loaded) / total));
+    state.upName = f.name;
+    state.upIndex = ++index;
+    if (stopped) { addItem(f.name, stopped === "ended" ? "Not sent" : "Cancelled", false); continue; }
+    state.finishing = false;
+    const ok = await upload(f, (loaded) => { state.upProgress = (done + loaded) / total; render(); });
     done += f.size;
     if (ok) addItem(f.name, "Sent", true);
+    else if (stopped === "ended") addItem(f.name, "Not sent", false);
     else if (stopped) addItem(f.name, "Cancelled", false);
     else { failed++; addItem(f.name, "Didn't send", false); }
   }
   state.uploading = false;
-  if (stopped === "you") flash("Cancelled", "");
+  state.finishing = false;
+  state.upProgress = null;
+  if (stopped === "ended") render();
+  else if (stopped === "you") flash("Cancelled", "");
   else if (stopped) flash(state.from + " cancelled", "bad");
   else if (failed) flash(failed === files.length ? "Failed" : failed + " didn't send", "bad");
   else flash("Sent", "good");
   stopped = null;
 }
+
+/* Each upload has a key; the other device also says over the event stream
+   when it has saved that one, so a reply lost on the way doesn't turn a
+   file that arrived into "Didn't send". */
+const saved = new Set(), waiting = new Map();
+let upCount = 0;
+function uploadSaved(key) {
+  saved.add(key);
+  const w = waiting.get(key);
+  if (w) w();
+}
 function upload(file, onProgress) {
+  const key = (Date.now().toString(36) + "x" + (upCount++).toString(36)).replace(/[^a-z0-9]/g, "");
   return new Promise((resolve) => {
+    let over = false;
+    const done = (ok) => {
+      if (over) return;
+      over = true;
+      waiting.delete(key);
+      if (sending === xhr) sending = null;
+      resolve(ok);
+    };
+    waiting.set(key, () => done(true));
     const xhr = new XMLHttpRequest();
-    xhr.open("POST", base + "/u?s=" + session + "&name=" + encodeURIComponent(file.name));
+    xhr.open("POST", base + "/u?s=" + session + "&k=" + key + "&name=" + encodeURIComponent(file.name));
     xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress(ev.loaded); };
-    xhr.onload = () => { sending = null; resolve(xhr.status === 200); };
-    xhr.onerror = xhr.onabort = () => { sending = null; resolve(false); };
+    // Everything's sent: the other device is saving it.
+    xhr.upload.onload = () => { onProgress(file.size); state.finishing = true; render(); };
+    xhr.onload = () => done(xhr.status === 200 || saved.has(key));
+    xhr.onerror = () => {
+      // The file may have arrived anyway: give the event stream (or the
+      // next reconnect) a moment to say so.
+      if (stopped) { done(false); return; }
+      setTimeout(() => done(saved.has(key)), 15000);
+    };
+    xhr.onabort = () => done(false);
     sending = xhr;
     xhr.send(file);
   });
@@ -575,19 +902,59 @@ function upload(file, onProgress) {
 /* Cancel: what this page is sending (or asking to send), or receiving.
    The other device stops too, and keeps nothing. */
 let sending = null;   // the upload under way
-let stopped = null;   // why uploads stopped: "you" or "them"
-$("cancel").onclick = async () => {
-  const what = state.asking || state.uploading ? "up" : "down";
-  if (what === "up") {
-    stopped = "you";
-    if (sending) sending.abort();
-  } else {
-    state.pending = 0;
-    flash("Cancelled", "");
-  }
-  render();
+let stopped = null;   // why uploads stopped: "you", "them" or "ended"
+async function tellCancel(what) {
   try { await fetch(base + "/cancel?s=" + session + "&what=" + what, { method: "POST" }); } catch (err) {}
+}
+// Asking or sending: the question closes on the other device, and what
+// got there is thrown away.
+function cancelUp() {
+  stopped = "you";
+  if (sending) sending.abort();
+  render();
+  tellCancel("up");
+}
+$("cancelAsk").onclick = cancelUp;
+$("cancelUp").onclick = cancelUp;
+// Receiving: this file and the rest still to come.
+$("cancelDown").onclick = () => {
+  for (const f of incoming.values()) addItem(f.name, "Cancelled", false);
+  incoming.clear();
+  run = { total: 0, done: 0, failed: 0 };
+  flash("Cancelled", "");
+  tellCancel("down");
 };
+
+/* A card for each thing under way, saying what it is and how far along. */
+function renderTasks(receiving) {
+  const live = state.connected;
+  $("taskAsk").hidden = !(live && state.asking);
+  if (state.asking) {
+    $("askTitle").textContent = "Asking to send " + (state.upCount === 1 ? state.upName : state.upCount + " files");
+    $("askDetail").textContent = "Waiting for " + state.from + " to accept";
+  }
+  $("taskUp").hidden = !(live && state.uploading);
+  if (state.uploading) {
+    $("upTitle").textContent = "Sending " + state.upName;
+    const pct = state.upProgress != null ? Math.floor(state.upProgress * 100) + "%" : "";
+    const of = state.upCount > 1 ? "File " + state.upIndex + " of " + state.upCount : "";
+    $("upDetail").textContent = state.finishing ? "Finishing…" : [pct, of].filter(Boolean).join(" · ");
+    $("upMeter").style.width = (state.upProgress || 0) * 100 + "%";
+  }
+  $("taskDown").hidden = !(live && receiving);
+  if (receiving) {
+    let now = null;
+    for (const f of incoming.values()) if (f.started) { now = f; break; }
+    now = now || incoming.values().next().value;
+    const left = incoming.size - 1;
+    $("downTitle").textContent = "Receiving " + now.name;
+    const p = recvProgress();
+    const parts = [p != null ? Math.floor(p * 100) + "%" : now.started ? "" : "Starting…"];
+    if (left > 0) parts.push(left === 1 ? "1 more after this" : left + " more after this");
+    $("downDetail").textContent = parts.filter(Boolean).join(" · ");
+    $("downMeter").style.width = (p || 0) * 100 + "%";
+  }
+}
 function cancelledThere(d) {
   if (d.what === "up") {
     // The other device stopped what this page was sending.
@@ -595,9 +962,17 @@ function cancelledThere(d) {
     return;
   }
   if (d.by !== "them") return; // this page cancelled it, and already said so
-  for (const id of d.ids || []) addItem(names.get(id) || "File", "Cancelled by " + state.from, false);
-  state.pending = Math.max(0, state.pending - (d.ids || []).length);
-  flash(state.from + " cancelled", "bad");
+  let any = false;
+  for (const id of d.ids || []) {
+    const f = incoming.get(id);
+    if (!f) continue;
+    any = true;
+    incoming.delete(id);
+    run.total -= f.size;
+    addItem(f.name, "Cancelled by " + state.from, false);
+  }
+  if (!incoming.size) run = { total: 0, done: 0, failed: 0 };
+  if (any) flash(state.from + " cancelled", "bad");
 }
 
 /* Text both ways. A page on plain http can't use the clipboard API, so
@@ -680,9 +1055,19 @@ $("textGo").onclick = async () => {
 };
 $("backdrop").onclick = () => { if (textMode) closeTextSheet(); };
 
-// Phones pause background tabs; reconnect as soon as this one is back.
+// Phones pause background tabs; check the connection as soon as this one
+// is back.
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && (!source || source.readyState === EventSource.CLOSED)) connect();
+  if (document.hidden) return;
+  if (state.link === "live") {
+    if (!source || source.readyState === EventSource.CLOSED || Date.now() - lastBeat > 25000) lost();
+  } else if (!source) {
+    probe();
+  }
+});
+addEventListener("online", () => { if (!source) probe(); });
+addEventListener("offline", () => {
+  if (state.link !== "ended") { if (source) { source.close(); source = null; } setLink("offline"); }
 });
 
 render();

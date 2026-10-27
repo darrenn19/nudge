@@ -577,6 +577,8 @@ struct State {
     last_seen: HashMap<Fingerprint, DiscoveredPeer>,
     /// Sharing with browsers, while it's on.
     web: Option<web::WebShare>,
+    /// The last share's link, still saying it ended (for a while).
+    web_ended: Option<web::Ended>,
     /// The code this device is showing, and when it stops working.
     pairing: Option<(PairingCode, Instant)>,
     active: HashMap<u64, Active>,
@@ -1330,7 +1332,7 @@ impl Node {
     }
 
     pub fn stop_web_share(&self) {
-        web::stop(&self.shared);
+        web::stop(&self.shared, web::StopReason::User);
     }
 
     /// The link, while sharing with browsers.
@@ -1505,7 +1507,9 @@ impl Drop for Node {
     fn drop(&mut self) {
         self.tasks.iter().for_each(JoinHandle::abort);
         // Its tasks hold the node's state; stopping them lets it go.
-        self.shared.state().web = None;
+        let mut state = self.shared.state();
+        state.web = None;
+        state.web_ended = None;
     }
 }
 

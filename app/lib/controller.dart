@@ -104,6 +104,8 @@ class Transfer {
         'no answer' => 'No answer',
         'cancelled' => 'Cancelled',
         'they cancelled' => 'They cancelled',
+        'sharing was stopped' => 'Sharing stopped',
+        'the browser stopped downloading' => 'Download stopped',
         _ => error ?? 'Failed',
       };
     }
