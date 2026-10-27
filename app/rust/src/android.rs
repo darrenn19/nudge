@@ -13,7 +13,7 @@ use jni::JavaVM;
 use jni::objects::{
     GlobalRef, JByteArray, JClass, JIntArray, JObject, JObjectArray, JString, JValue,
 };
-use jni::sys::{jboolean, jlong, jstring};
+use jni::sys::{jboolean, jint, jlong, jstring};
 use nudge_core::{HotspotInfo, NodeConfig, Outgoing, Receiving};
 use serde_json::{Value, json};
 
@@ -188,6 +188,19 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_answerOffer<'l>(
     }
 }
 
+/// Stop a transfer (the Cancel on the progress notification).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_cancel<'l>(
+    _: JNIEnv<'l>,
+    _: JClass<'l>,
+    id: jlong,
+) {
+    if let Some(c) = core() {
+        let _guard = runtime().enter();
+        c.node.cancel(id as u64);
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_darrenn19_nudge_Core_answerPair<'l>(
     _: JNIEnv<'l>,
@@ -227,6 +240,7 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_hotspotReady<'l>(
     ssid: JString<'l>,
     passphrase: JString<'l>,
     wpa3: jboolean,
+    mhz: jint,
 ) {
     let ssid = optional_string(&mut env, &ssid);
     let passphrase = string(&mut env, &passphrase);
@@ -235,6 +249,7 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_hotspotReady<'l>(
             ssid,
             passphrase,
             wpa3: wpa3 != 0,
+            mhz: mhz.max(0) as u32,
         });
         let _guard = runtime().enter();
         c.node.hotspot_ready(id as u64, info);

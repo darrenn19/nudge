@@ -119,6 +119,82 @@ impl Sink for File {
     }
 }
 
+/// Who stopped a transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelledBy {
+    /// The user on this device.
+    Here,
+    /// The user on the other device.
+    There,
+}
+
+impl CancelledBy {
+    /// How the transfer ends, on this side.
+    pub fn error(self) -> Error {
+        match self {
+            Self::Here => Error::Cancelled,
+            Self::There => Error::CancelledThere,
+        }
+    }
+}
+
+/// A way to stop a transfer (or a whole send) from outside it: set once,
+/// seen by everything holding a clone.
+#[derive(Clone, Debug, Default)]
+pub struct Cancel(Arc<CancelInner>);
+
+#[derive(Debug, Default)]
+struct CancelInner {
+    /// 0: not cancelled; 1: here; 2: there.
+    by: std::sync::atomic::AtomicU8,
+    note: tokio::sync::Notify,
+}
+
+impl Cancel {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Stop it. The first call decides who did.
+    pub fn cancel(&self, by: CancelledBy) {
+        let code = match by {
+            CancelledBy::Here => 1,
+            CancelledBy::There => 2,
+        };
+        let _ = self
+            .0
+            .by
+            .compare_exchange(0, code, Ordering::AcqRel, Ordering::Acquire);
+        self.0.note.notify_waiters();
+    }
+
+    pub fn by(&self) -> Option<CancelledBy> {
+        match self.0.by.load(Ordering::Acquire) {
+            1 => Some(CancelledBy::Here),
+            2 => Some(CancelledBy::There),
+            _ => None,
+        }
+    }
+
+    /// Whether `other` is this same signal (not just a lookalike).
+    pub fn same(&self, other: &Cancel) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Finishes once it's cancelled.
+    pub async fn until(&self) -> CancelledBy {
+        loop {
+            let note = self.0.note.notified();
+            tokio::pin!(note);
+            note.as_mut().enable();
+            if let Some(by) = self.by() {
+                return by;
+            }
+            note.await;
+        }
+    }
+}
+
 /// Live position of a transfer, readable from any thread while it runs.
 /// Updating it is one relaxed atomic store per buffer, so it costs nothing.
 #[derive(Clone, Debug, Default)]
@@ -132,6 +208,7 @@ struct ProgressInner {
     held: std::sync::atomic::AtomicBool,
     /// Wakes `until_pending`.
     became_pending: tokio::sync::Notify,
+    cancel: Cancel,
 }
 
 impl Progress {
@@ -183,6 +260,11 @@ impl Progress {
 
     pub(crate) fn mark_held(&self) {
         self.0.held.store(true, Ordering::Relaxed);
+    }
+
+    /// Stops this transfer when cancelled.
+    pub fn cancel(&self) -> &Cancel {
+        &self.0.cancel
     }
 }
 
@@ -280,6 +362,7 @@ where
             Response::Declined => return Err(Error::Declined),
             Response::NoAnswer => return Err(Error::NoAnswer),
             Response::NotPaired => return Err(Error::NotTrustedByPeer),
+            Response::Cancelled => return Err(Error::CancelledThere),
             Response::Done | Response::Held => {
                 return Err(Error::Protocol("unexpected answer before data"));
             }
@@ -331,6 +414,7 @@ where
             Response::Approved => progress.mark_accepted(),
             Response::Declined => return Err(Error::Declined),
             Response::NoAnswer => return Err(Error::NoAnswer),
+            Response::Cancelled => return Err(Error::CancelledThere),
             _ => return Err(Error::Protocol("expected Done after data")),
         }
     }
@@ -377,9 +461,16 @@ pub async fn receive_offered<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
-    let landed = land(stream, offer, dir, peer, progress, std::future::pending())
-        .await?
-        .expect("never stopped");
+    let landed = land(
+        stream,
+        offer,
+        dir,
+        peer,
+        progress,
+        std::future::pending::<Stop>(),
+    )
+    .await?
+    .expect("never stopped");
     let file = landed.keep()?;
     Response::Done.write_to(stream).await?;
     Ok(file)
@@ -441,12 +532,23 @@ impl Landed {
     }
 }
 
+/// Why [`land`] stopped before the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stop {
+    /// The user declined: delete what arrived.
+    Discard,
+    /// Another connection is taking this file over (the sender moved to a
+    /// faster path before this one noticed): keep what arrived, saved, for
+    /// that one to resume from.
+    Keep,
+}
+
 /// Receive an offered file into a partial file: `Accept`, then the data.
 /// Sends nothing after the data; the caller decides between `Done`, `Held`
 /// and a refusal.
 ///
-/// Stops early when `stop` finishes (the user declined), deleting what had
-/// arrived; returns `None` then.
+/// Stops early when `stop` finishes, deleting what had arrived or keeping
+/// it as it says; returns `None` then.
 pub async fn land<S, F>(
     stream: &mut S,
     offer: Offer,
@@ -457,7 +559,7 @@ pub async fn land<S, F>(
 ) -> Result<Option<Landed>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    F: Future<Output = ()>,
+    F: Future<Output = Stop>,
 {
     let start = Instant::now();
     let size = offer.size;
@@ -494,10 +596,13 @@ where
     file.seek(SeekFrom::Start(offset))?;
 
     Response::Accept { offset }.write_to(stream).await?;
-    let Some(pos) = receive_pieces(stream, file, offset, size, Some(meta), progress, stop).await?
-    else {
-        partial.remove();
-        return Ok(None);
+    let pos = match receive_pieces(stream, file, offset, size, Some(meta), progress, stop).await? {
+        Ok(pos) => pos,
+        Err(Stop::Discard) => {
+            partial.remove();
+            return Ok(None);
+        }
+        Err(Stop::Keep) => return Ok(None),
     };
     Ok(Some(Landed {
         partial,
@@ -530,7 +635,7 @@ where
         offer.size,
         None,
         &Progress::new(),
-        std::future::pending(),
+        std::future::pending::<()>(),
     )
     .await?
     .expect("never stopped");
@@ -545,9 +650,9 @@ where
 
 /// Read the data stream from `offset` to `size` and hand it to a writer thread
 /// that checks hashes and writes into `sink`. Returns the end position, or
-/// `None` if `stop` finished first. Network errors are held until the writer
-/// has finished, so its progress is saved before we return.
-async fn receive_pieces<S, W, F>(
+/// what `stop` gave if it finished first. Network errors are held until the
+/// writer has finished, so its progress is saved before we return.
+async fn receive_pieces<S, W, F, T>(
     stream: &mut S,
     sink: W,
     offset: u64,
@@ -555,11 +660,11 @@ async fn receive_pieces<S, W, F>(
     meta: Option<MetaWriter>,
     progress: &Progress,
     stop: F,
-) -> Result<Option<u64>>
+) -> Result<std::result::Result<u64, T>>
 where
     S: AsyncRead + Unpin,
     W: Sink,
-    F: Future<Output = ()>,
+    F: Future<Output = T>,
 {
     progress.set(offset);
     let (tx, rx) = mpsc::channel(PIPELINE_DEPTH);
@@ -609,12 +714,15 @@ where
     // Stopping drops the network side, which closes the channel: the writer
     // then finishes what it has and returns, so nothing is still writing
     // when the caller deletes the file.
-    let network_result: Option<Result<u64>> = tokio::select! {
-        result = network => Some(result),
-        () = stop => None,
+    let network_result: std::result::Result<Result<u64>, T> = tokio::select! {
+        result = network => Ok(result),
+        why = stop => Err(why),
     };
     writer.await.map_err(io::Error::other)??;
-    network_result.transpose()
+    match network_result {
+        Ok(result) => result.map(Ok),
+        Err(why) => Ok(Err(why)),
+    }
 }
 
 /// Disk side of sending: read from `offset`, hash each chunk, and pass data

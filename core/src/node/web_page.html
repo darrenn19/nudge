@@ -138,6 +138,7 @@
   .pill:active { transform: scale(.96); }
   .pill svg { width: 16px; height: 16px; }
   .pill:disabled { opacity: .4; cursor: default; }
+  .pill.stop { color: var(--bad); }
   .sheet textarea, .sheet .text {
     width: 100%; margin: 16px 0 18px; padding: 12px 14px; border-radius: 18px; border: 1px solid var(--line);
     background: rgba(0,0,0,.2); color: var(--text); font: inherit; font-size: 15px;
@@ -226,6 +227,10 @@
       <button class="pill" id="sendText" disabled>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="12" height="17" rx="2"/><path d="M9 4.5V3h6v1.5M9 10h6M9 14h6"/></svg>
         Send text or a link
+      </button>
+      <button class="pill stop" id="cancel" hidden>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        Cancel
       </button>
     </div>
   </section>
@@ -349,6 +354,9 @@ function render(progress) {
       (isPhone ? "" : " or drop files here") + " to send files to it.";
   const b = $("hint").querySelector("b");
   if (b) b.textContent = state.from;
+  const cancellable = state.connected && (state.asking || state.uploading || state.pending > 0);
+  $("cancel").hidden = !cancellable;
+  $("sendText").hidden = cancellable;
 }
 
 function flash(text, tone) {
@@ -402,6 +410,7 @@ function connect() {
   source.addEventListener("download", (e) => fetchFile(JSON.parse(e.data)));
   source.addEventListener("delivered", (e) => delivered(JSON.parse(e.data).id));
   source.addEventListener("clip", (e) => showText(JSON.parse(e.data).text));
+  source.addEventListener("cancelled", (e) => cancelledThere(JSON.parse(e.data)));
   source.onerror = () => {
     setStatus(false, "Reconnecting…");
     source.close();
@@ -522,32 +531,73 @@ async function sendFiles(files) {
     answer = (await res.json()).answer;
   } catch (err) {}
   state.asking = false;
+  if (answer === "cancelled") {
+    stopped = null;
+    flash("Cancelled", "");
+    return;
+  }
   if (answer !== "accepted") {
     for (const f of files) addItem(f.name, answer === "declined" ? "Declined" : "No answer", false);
     flash(answer === "declined" ? "Declined" : "No answer", "bad");
     return;
   }
   let done = 0, failed = 0;
+  stopped = null;
   state.uploading = true;
   render(0);
   for (const f of files) {
+    if (stopped) { addItem(f.name, "Cancelled", false); continue; }
     const ok = await upload(f, (loaded) => render((done + loaded) / total));
     done += f.size;
-    if (ok) addItem(f.name, "Sent", true); else { failed++; addItem(f.name, "Didn't send", false); }
+    if (ok) addItem(f.name, "Sent", true);
+    else if (stopped) addItem(f.name, "Cancelled", false);
+    else { failed++; addItem(f.name, "Didn't send", false); }
   }
   state.uploading = false;
-  if (failed) flash(failed === files.length ? "Failed" : failed + " didn't send", "bad");
+  if (stopped === "you") flash("Cancelled", "");
+  else if (stopped) flash(state.from + " cancelled", "bad");
+  else if (failed) flash(failed === files.length ? "Failed" : failed + " didn't send", "bad");
   else flash("Sent", "good");
+  stopped = null;
 }
 function upload(file, onProgress) {
   return new Promise((resolve) => {
     const xhr = new XMLHttpRequest();
     xhr.open("POST", base + "/u?s=" + session + "&name=" + encodeURIComponent(file.name));
     xhr.upload.onprogress = (ev) => { if (ev.lengthComputable) onProgress(ev.loaded); };
-    xhr.onload = () => resolve(xhr.status === 200);
-    xhr.onerror = () => resolve(false);
+    xhr.onload = () => { sending = null; resolve(xhr.status === 200); };
+    xhr.onerror = xhr.onabort = () => { sending = null; resolve(false); };
+    sending = xhr;
     xhr.send(file);
   });
+}
+
+/* Cancel: what this page is sending (or asking to send), or receiving.
+   The other device stops too, and keeps nothing. */
+let sending = null;   // the upload under way
+let stopped = null;   // why uploads stopped: "you" or "them"
+$("cancel").onclick = async () => {
+  const what = state.asking || state.uploading ? "up" : "down";
+  if (what === "up") {
+    stopped = "you";
+    if (sending) sending.abort();
+  } else {
+    state.pending = 0;
+    flash("Cancelled", "");
+  }
+  render();
+  try { await fetch(base + "/cancel?s=" + session + "&what=" + what, { method: "POST" }); } catch (err) {}
+};
+function cancelledThere(d) {
+  if (d.what === "up") {
+    // The other device stopped what this page was sending.
+    if (d.by === "them") { stopped = stopped || "them"; if (sending) sending.abort(); }
+    return;
+  }
+  if (d.by !== "them") return; // this page cancelled it, and already said so
+  for (const id of d.ids || []) addItem(names.get(id) || "File", "Cancelled by " + state.from, false);
+  state.pending = Math.max(0, state.pending - (d.ids || []).length);
+  flash(state.from + " cancelled", "bad");
 }
 
 /* Text both ways. A page on plain http can't use the clipboard API, so

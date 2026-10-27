@@ -51,7 +51,7 @@ class NudgeService : Service() {
         super.onDestroy()
     }
 
-    private data class Progress(val title: String, val text: String, val percent: Int)
+    private class Progress(val title: String, val text: String, val percent: Int, val ids: LongArray)
 
     companion object {
         @Volatile private var progress: Progress? = null
@@ -81,8 +81,9 @@ class NudgeService : Service() {
         }
 
         /** Files are moving: show progress, and keep the CPU and Wi-Fi awake. */
-        fun showProgress(context: Context, title: String, text: String, percent: Int) {
-            progress = Progress(title, text, percent)
+        /** [ids]: the transfers shown, which its Cancel stops. */
+        fun showProgress(context: Context, title: String, text: String, percent: Int, ids: LongArray) {
+            progress = Progress(title, text, percent, ids)
             holdLocks(context)
             if (running) {
                 Notifications.notify(context, Notifications.SERVICE_ID, current(context))
@@ -104,7 +105,7 @@ class NudgeService : Service() {
         }
 
         private fun current(context: Context) = progress?.let {
-            Notifications.progress(context, it.title, it.text, it.percent)
+            Notifications.progress(context, it.title, it.text, it.percent, it.ids)
         } ?: Notifications.ready(context)
 
         /**

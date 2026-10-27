@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use log::{info, warn};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -25,12 +26,12 @@ use crate::link::{LinkKind, Speeds};
 use crate::pack::{self, PACK_FILE_MAX, PACK_MAX_BYTES, PACK_MAX_FILES, PACK_MIN_FILES, Pack};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
 use crate::protocol::{
-    AwaitAnswer, Batch, Clip, ClipImage, Offer, PairAsk, PairReply, PairRequest, Request, Response,
-    Status,
+    AwaitAnswer, Batch, Cancel as CancelSend, Clip, ClipImage, Offer, PairAsk, PairReply,
+    PairRequest, Request, Response, Status,
 };
 use crate::transfer::{
-    Landed, Progress, TransferStats, land, receive_offered, send_file_tracked, send_from_tracked,
-    send_open_file_tracked,
+    Cancel, CancelledBy, Landed, Progress, Stop, TransferStats, land, send_file_tracked,
+    send_from_tracked, send_open_file_tracked,
 };
 use crate::{DEFAULT_PORT, Error, Result, Tls};
 
@@ -524,6 +525,10 @@ enum Verdict {
     No,
     /// Nobody answered in time.
     Lapsed,
+    /// The sender's user stopped the send.
+    SenderCancelled,
+    /// The receiver's user stopped it.
+    ReceiverCancelled,
 }
 
 impl Verdict {
@@ -533,6 +538,7 @@ impl Verdict {
             Self::Yes => Response::Approved,
             Self::No => Response::Declined,
             Self::Lapsed => Response::NoAnswer,
+            Self::SenderCancelled | Self::ReceiverCancelled => Response::Cancelled,
         }
     }
 
@@ -540,7 +546,9 @@ impl Verdict {
     fn error_here(self) -> Error {
         match self {
             Self::No => Error::YouDeclined,
-            _ => Error::NoAnswer,
+            Self::SenderCancelled => Error::CancelledThere,
+            Self::ReceiverCancelled => Error::Cancelled,
+            Self::Yes | Self::Lapsed => Error::NoAnswer,
         }
     }
 
@@ -548,7 +556,9 @@ impl Verdict {
     fn error_there(self) -> Error {
         match self {
             Self::No => Error::Declined,
-            _ => Error::NoAnswer,
+            Self::SenderCancelled => Error::Cancelled,
+            Self::ReceiverCancelled => Error::CancelledThere,
+            Self::Yes | Self::Lapsed => Error::NoAnswer,
         }
     }
 }
@@ -601,7 +611,70 @@ struct State {
     join_waits: HashMap<u64, tokio::sync::oneshot::Sender<bool>>,
     /// Incoming files whose connection dropped, by sender, name and size:
     /// one that picks up again soon (a path change) keeps its transfer.
-    interrupted: HashMap<(Fingerprint, String, u64), u64>,
+    interrupted: HashMap<InKey, u64>,
+    /// Incoming files arriving right now, the same way.
+    incoming: HashMap<InKey, Incoming>,
+    /// Each file of a send to a paired device, with its send's way to stop
+    /// it (stopping one file stops the send).
+    sending: HashMap<u64, (Fingerprint, Cancel)>,
+    /// Incoming sends cancelled lately, so a sender that reconnects (it
+    /// only saw its connection drop) hears it was cancelled. Files sent on
+    /// their own (batch 0) go by file.
+    cancelled_batches: HashMap<BatchKey, (Instant, CancelledBy)>,
+    cancelled_files: HashMap<InKey, (Instant, CancelledBy)>,
+}
+
+/// How long a cancelled incoming send is remembered.
+const CANCELLED_MEMORY: Duration = Duration::from_secs(10 * 60);
+
+/// An incoming file: its sender, name and size.
+type InKey = (Fingerprint, String, u64);
+
+/// A file being received on one connection. When the sender moves to
+/// another path, the old connection can look alive for minutes (TCP only
+/// notices a vanished network when it next sends); a new connection for the
+/// same file stops it and takes over, rather than waiting it out.
+struct Incoming {
+    id: u64,
+    batch: u64,
+    stop: Arc<tokio::sync::Notify>,
+    done: tokio::sync::watch::Receiver<bool>,
+}
+
+/// This connection's hold on an incoming file; let go when dropped.
+struct Claim {
+    shared: Arc<Shared>,
+    key: InKey,
+    stop: Arc<tokio::sync::Notify>,
+    done: tokio::sync::watch::Sender<bool>,
+    taken: std::sync::atomic::AtomicBool,
+}
+
+impl Claim {
+    /// Finishes when another connection takes the file over.
+    async fn taken_over(&self) -> Stop {
+        self.stop.notified().await;
+        self.taken.store(true, Ordering::Relaxed);
+        Stop::Keep
+    }
+
+    fn was_taken(&self) -> bool {
+        self.taken.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        let _ = self.done.send(true);
+        let mut state = self.shared.state();
+        if state
+            .incoming
+            .get(&self.key)
+            .is_some_and(|i| Arc::ptr_eq(&i.stop, &self.stop))
+        {
+            state.incoming.remove(&self.key);
+        }
+    }
 }
 
 /// A running transfer, for progress reporting.
@@ -625,10 +698,10 @@ enum Asking {
     Wait(BatchKey, AnswerRx),
 }
 
-/// Finishes when `answer` turns out to be no (or lapses); never otherwise.
+/// Finishes when `answer` turns out to be anything but yes; never otherwise.
 async fn said_no(mut answer: AnswerRx) {
     let no = answer
-        .wait_for(|v| matches!(v, Some(Verdict::No | Verdict::Lapsed)))
+        .wait_for(|v| v.is_some_and(|v| v != Verdict::Yes))
         .await
         .is_ok();
     if !no {
@@ -678,13 +751,10 @@ impl OutBatch {
         self.lock().verdict
     }
 
-    /// Finishes when the answer is no (or lapsed); never otherwise.
+    /// Finishes when the answer is anything but yes; never otherwise.
     async fn until_no(&self) -> Verdict {
         let mut rx = self.verdict.subscribe();
-        let no = match rx
-            .wait_for(|v| matches!(v, Some(Verdict::No | Verdict::Lapsed)))
-            .await
-        {
+        let no = match rx.wait_for(|v| v.is_some_and(|v| v != Verdict::Yes)).await {
             Ok(v) => *v,
             Err(_) => None,
         };
@@ -1227,6 +1297,13 @@ impl Node {
     /// Send files to a paired, nearby device, one after another, in the
     /// background. Returns the transfer IDs (one per file, in order) that
     /// progress events will use.
+    /// Stop a transfer: one going out stops with the rest of its send, and
+    /// the other device deletes what arrived; one coming in stops the same
+    /// way, and its sender is told. False if `id` isn't running (any more).
+    pub fn cancel(&self, id: u64) -> bool {
+        self.shared.cancel(id)
+    }
+
     pub fn send_files(&self, peer: Fingerprint, paths: Vec<PathBuf>) -> Vec<u64> {
         self.send(peer, paths.into_iter().map(Outgoing::Path).collect())
     }
@@ -1294,6 +1371,13 @@ impl Node {
                 count: jobs.iter().map(|(_, item)| item.files()).sum::<usize>() as u32,
                 size: jobs.iter().map(|(_, item)| item.size()).sum(),
             };
+            // Stopping any file of the send stops the rest.
+            let cancel = Cancel::new();
+            shared
+                .state()
+                .sending
+                .extend(jobs.iter().map(|(id, _)| (*id, (peer, cancel.clone()))));
+            let mut told = false;
             // If they're asked, the files still go, one after another; the
             // answer arrives on its own connection (`await_answer`).
             let out = Arc::new(OutBatch::new());
@@ -1322,7 +1406,20 @@ impl Node {
                 match out.verdict() {
                     Some(Verdict::No) => refused = Some(|| Error::Declined),
                     Some(Verdict::Lapsed) => refused = Some(|| Error::NoAnswer),
+                    Some(Verdict::ReceiverCancelled) => refused = Some(|| Error::CancelledThere),
                     _ => {}
+                }
+                if let Some(by) = cancel.by() {
+                    // Cancelled between files: tell them, once.
+                    if by == CancelledBy::Here && !std::mem::replace(&mut told, true) {
+                        info!("send {id}: cancelled before it started");
+                        shared.tell_cancelled(peer, batch.id, name.clone(), size);
+                        out.settle(&shared, Verdict::SenderCancelled);
+                    }
+                    refused.get_or_insert(match by {
+                        CancelledBy::Here => || Error::Cancelled,
+                        CancelledBy::There => || Error::CancelledThere,
+                    });
                 }
                 if let Some(error) = refused {
                     shared.finish(id, Err(error()));
@@ -1343,6 +1440,7 @@ impl Node {
                             }
                             // They said no: stop sending.
                             v = out.until_no() => break Err(v.error_there()),
+                            by = cancel.until() => break Err(by.error()),
                         }
                     }
                 };
@@ -1359,6 +1457,21 @@ impl Node {
                 match &result {
                     Err(Error::Declined) => refused = Some(|| Error::Declined),
                     Err(Error::NoAnswer) => refused = Some(|| Error::NoAnswer),
+                    Err(Error::CancelledThere) => {
+                        cancel.cancel(CancelledBy::There);
+                        refused = Some(|| Error::CancelledThere);
+                    }
+                    Err(Error::Cancelled) => {
+                        refused = Some(|| Error::Cancelled);
+                        // Tell them, once: they delete what arrived and
+                        // close any question about it.
+                        if !std::mem::replace(&mut told, true) {
+                            info!("send {id}: cancelled at byte {}", progress.position());
+                            shared.tell_cancelled(peer, batch.id, name.clone(), size);
+                        }
+                        // Files already there, waiting for their answer, go too.
+                        out.settle(&shared, Verdict::SenderCancelled);
+                    }
                     _ => {}
                 }
                 // Whether they asked tells us their setting for this device.
@@ -1381,6 +1494,8 @@ impl Node {
                     Err(e) => shared.finish(id, Err(e)),
                 }
             }
+            let mut state = shared.state();
+            state.sending.retain(|_, (_, c)| !c.same(&cancel));
         });
         ids
     }
@@ -1627,6 +1742,7 @@ impl Shared {
             Response::Approved => Ok(Verdict::Yes),
             Response::Declined => Ok(Verdict::No),
             Response::NoAnswer => Ok(Verdict::Lapsed),
+            Response::Cancelled => Ok(Verdict::ReceiverCancelled),
             _ => Err(Error::Protocol("unexpected reply to AwaitAnswer")),
         }
     }
@@ -1877,10 +1993,16 @@ impl Shared {
                 Ok(())
             }
             Request::Link(request) if trusted => self.answer_link(stream, peer, request).await,
+            Request::Cancel(cancel) if trusted => {
+                self.sender_cancelled(peer, cancel);
+                let _ = stream.shutdown().await;
+                Ok(())
+            }
             Request::AwaitAnswer(_)
             | Request::Clip(_)
             | Request::ClipImage(_)
-            | Request::Link(_) => {
+            | Request::Link(_)
+            | Request::Cancel(_) => {
                 let _ = Response::NotPaired.write_to(&mut stream).await;
                 Err(Error::UntrustedPeer(peer))
             }
@@ -1912,6 +2034,10 @@ impl Shared {
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
+        if self.was_cancelled(peer, &offer) {
+            let _ = Response::Cancelled.write_to(&mut stream).await;
+            return Ok(());
+        }
         let asked = match self.start_asking(
             peer,
             offer.batch.id,
@@ -1934,7 +2060,8 @@ impl Shared {
         // moved to a faster path, or Wi-Fi blinked) carries on as the same
         // transfer.
         let resumed_key = (peer, offer.name.clone(), offer.size);
-        let resumed = self.state().interrupted.remove(&resumed_key);
+        let taken = self.take_over(&resumed_key).await;
+        let resumed = taken.or_else(|| self.state().interrupted.remove(&resumed_key));
         let id = match resumed {
             Some(id) => id,
             None => {
@@ -1949,6 +2076,7 @@ impl Shared {
                 id
             }
         };
+        let claim = self.claim(resumed_key.clone(), id, offer.batch.id);
         let progress = self.track(id, peer, offer.size);
         let dir = self.download_dir();
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -1958,10 +2086,39 @@ impl Shared {
         }
 
         let Some((key, answer)) = asked else {
-            let result = receive_offered(&mut stream, offer, &dir, Some(peer), &progress)
-                .await
-                .map(|f| (f.path, f.stats));
+            let stop = async {
+                tokio::select! {
+                    keep = claim.taken_over() => keep,
+                    _ = progress.cancel().until() => Stop::Discard,
+                }
+            };
+            let landed = land(&mut stream, offer, &dir, Some(peer), &progress, stop).await;
+            let result = match landed {
+                Ok(Some(landed)) => landed.keep().map(|f| (f.path, f.stats)),
+                // Another connection has it now, and carries on as this transfer.
+                Ok(None) if claim.was_taken() => return Ok(()),
+                // Cancelled, here or there: what arrived is deleted.
+                Ok(None) => {
+                    let by = progress.cancel().by().unwrap_or(CancelledBy::Here);
+                    if by == CancelledBy::Here {
+                        let _ = Response::Cancelled.write_to(&mut stream).await;
+                    }
+                    self.finish(id, Err(by.error()));
+                    return Ok(());
+                }
+                Err(e) => Err(e),
+            };
+            let result = match result {
+                Ok(done) => Response::Done.write_to(&mut stream).await.map(|()| done),
+                Err(e) => Err(e),
+            };
             let ok = result.is_ok();
+            if let Err(e) = &result {
+                warn!(
+                    "receive {id}: stopped at byte {} ({e})",
+                    progress.position()
+                );
+            }
             self.end_incoming(id, resumed_key, result);
             if ok {
                 let _ = stream.shutdown().await;
@@ -1970,20 +2127,24 @@ impl Shared {
         };
 
         let batch = offer.batch.id;
-        let landed = match land(
-            &mut stream,
-            offer,
-            &dir,
-            Some(peer),
-            &progress,
-            said_no(answer.clone()),
-        )
-        .await
-        {
+        let stop = async {
+            tokio::select! {
+                () = said_no(answer.clone()) => Stop::Discard,
+                keep = claim.taken_over() => keep,
+                _ = progress.cancel().until() => Stop::Discard,
+            }
+        };
+        let landed = match land(&mut stream, offer, &dir, Some(peer), &progress, stop).await {
             Ok(Some(landed)) => landed,
-            // Declined (or lapsed) while it was arriving: already deleted.
+            Ok(None) if claim.was_taken() => return Ok(()),
+            // Declined, lapsed or cancelled while it was arriving: already
+            // deleted.
             Ok(None) => {
-                let v = (*answer.borrow()).unwrap_or(Verdict::Lapsed);
+                let v = (*answer.borrow()).unwrap_or(match progress.cancel().by() {
+                    Some(CancelledBy::There) => Verdict::SenderCancelled,
+                    Some(CancelledBy::Here) => Verdict::ReceiverCancelled,
+                    None => Verdict::Lapsed,
+                });
                 let _ = v.reply().write_to(&mut stream).await;
                 let _ = stream.shutdown().await;
                 self.finish(id, Err(v.error_here()));
@@ -2032,18 +2193,214 @@ impl Shared {
         Ok(())
     }
 
+    /// Take the file `key` over from a connection still receiving it (see
+    /// [`Incoming`]): stop that one, wait for it to save what it has, and
+    /// return its transfer's ID to carry on as.
+    async fn take_over(&self, key: &InKey) -> Option<u64> {
+        let old = self.state().incoming.remove(key)?;
+        info!(
+            "receive {}: a new connection takes over from the old one",
+            old.id
+        );
+        old.stop.notify_one();
+        let mut done = old.done;
+        let _ = tokio::time::timeout(Duration::from_secs(10), done.wait_for(|d| *d)).await;
+        Some(old.id)
+    }
+
+    fn claim(self: &Arc<Self>, key: InKey, id: u64, batch: u64) -> Claim {
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let (done, watching) = tokio::sync::watch::channel(false);
+        self.state().incoming.insert(
+            key.clone(),
+            Incoming {
+                id,
+                batch,
+                stop: stop.clone(),
+                done: watching,
+            },
+        );
+        Claim {
+            shared: self.clone(),
+            key,
+            stop,
+            done,
+            taken: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    /// See [`Node::cancel`].
+    fn cancel(self: &Arc<Self>, id: u64) -> bool {
+        // A send to a paired device: stop it, file by file.
+        let sending = self.state().sending.get(&id).map(|(_, c)| c.clone());
+        if let Some(cancel) = sending {
+            cancel.cancel(CancelledBy::Here);
+            return true;
+        }
+        if web::cancel(self, id, CancelledBy::Here) {
+            return true;
+        }
+        // Coming in from a paired device.
+        let incoming = {
+            let state = self.state();
+            state
+                .incoming
+                .iter()
+                .find(|(_, i)| i.id == id)
+                .map(|(key, i)| (key.clone(), i.batch))
+                .or_else(|| {
+                    state
+                        .interrupted
+                        .iter()
+                        .find(|(_, i)| **i == id)
+                        .map(|(key, _)| (key.clone(), 0))
+                })
+        };
+        if let Some((key, batch)) = incoming {
+            info!("receive {id}: cancelled here");
+            self.stop_incoming(&key, batch, CancelledBy::Here);
+            return true;
+        }
+        // Anything else still moving (from a browser).
+        let progress = self.state().active.get(&id).map(|a| a.progress.clone());
+        match progress {
+            Some(p) => {
+                p.cancel().cancel(CancelledBy::Here);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The sender's user stopped a send to us.
+    fn sender_cancelled(self: &Arc<Self>, peer: Fingerprint, cancel: CancelSend) {
+        info!("receive: {} cancelled by the sender", cancel.name);
+        self.stop_incoming(
+            &(peer, cancel.name, cancel.size),
+            cancel.batch,
+            CancelledBy::There,
+        );
+    }
+
+    /// Stop an incoming send: the file arriving as `key`, the rest of its
+    /// batch, and any question about it. Remembered for a while, so the
+    /// sender hears about it if it reconnects.
+    fn stop_incoming(self: &Arc<Self>, key: &InKey, batch: u64, by: CancelledBy) {
+        let peer = key.0;
+        let (ids, interrupted, question) = {
+            let mut state = self.state();
+            let now = Instant::now();
+            state
+                .cancelled_batches
+                .retain(|_, (t, _)| t.elapsed() < CANCELLED_MEMORY);
+            state
+                .cancelled_files
+                .retain(|_, (t, _)| t.elapsed() < CANCELLED_MEMORY);
+            state.cancelled_files.insert(key.clone(), (now, by));
+            if batch != 0 {
+                state.cancelled_batches.insert((peer, batch), (now, by));
+            }
+            // Arriving now: this file, and any other of the same send.
+            let ids: Vec<u64> = state
+                .incoming
+                .iter()
+                .filter(|(k, i)| *k == key || (batch != 0 && k.0 == peer && i.batch == batch))
+                .map(|(_, i)| i.id)
+                .collect();
+            // Between connections: nothing is running to stop it.
+            let interrupted = state.interrupted.remove(key);
+            let question = state
+                .questions
+                .iter()
+                .find(|(_, (k, _))| batch != 0 && *k == (peer, batch))
+                .map(|(qid, _)| *qid);
+            let question =
+                question.and_then(|qid| state.questions.remove(&qid).map(|q| (qid, q.1)));
+            (ids, interrupted, question)
+        };
+        for id in ids {
+            let progress = self.state().active.get(&id).map(|a| a.progress.clone());
+            if let Some(p) = progress {
+                p.cancel().cancel(by);
+            }
+        }
+        if let Some(id) = interrupted {
+            crate::resume::discard(&self.download_dir(), key.0.as_bytes(), &key.1, key.2);
+            self.state().active.remove(&id);
+            self.emit(NodeEvent::TransferFailed {
+                id,
+                error: by.error().to_string(),
+            });
+        }
+        // Files of the send already here, waiting for an answer, go too.
+        if let Some((qid, tx)) = question {
+            let _ = tx.send(Some(match by {
+                CancelledBy::Here => Verdict::ReceiverCancelled,
+                CancelledBy::There => Verdict::SenderCancelled,
+            }));
+            self.emit(NodeEvent::OfferClosed { id: qid });
+        }
+    }
+
+    /// A send we cancelled, coming back (see [`Shared::stop_incoming`]).
+    fn was_cancelled(&self, peer: Fingerprint, offer: &Offer) -> bool {
+        let state = self.state();
+        let fresh = |(t, _): &(Instant, CancelledBy)| t.elapsed() < CANCELLED_MEMORY;
+        (offer.batch.id != 0
+            && state
+                .cancelled_batches
+                .get(&(peer, offer.batch.id))
+                .is_some_and(fresh))
+            || state
+                .cancelled_files
+                .get(&(peer, offer.name.clone(), offer.size))
+                .is_some_and(fresh)
+    }
+
+    /// Tell `peer` we stopped sending (best effort, in the background).
+    fn tell_cancelled(self: &Arc<Self>, peer: Fingerprint, batch: u64, name: String, size: u64) {
+        let shared = self.clone();
+        tokio::spawn(async move {
+            let told = async {
+                let mut stream = connect_any(&shared.tls, &shared.addrs_of(&peer), peer).await?;
+                CancelSend { batch, name, size }
+                    .write_to(&mut stream)
+                    .await?;
+                let _ = stream.shutdown().await;
+                Ok::<_, Error>(())
+            };
+            if let Err(e) = tokio::time::timeout(Duration::from_secs(10), told)
+                .await
+                .unwrap_or(Err(Error::Unreachable))
+            {
+                warn!("couldn't tell the other device about the cancel ({e})");
+            }
+        });
+    }
+
     /// End an incoming transfer. If its connection dropped, wait a while
     /// first: the sender may be moving to a faster path, and then the same
     /// file picks up again as the same transfer.
     fn end_incoming(
         self: &Arc<Self>,
         id: u64,
-        key: (Fingerprint, String, u64),
+        key: InKey,
         result: Result<(PathBuf, TransferStats)>,
     ) {
         let dropped = matches!(result, Err(Error::Io(_) | Error::Truncated { .. }));
         if !dropped {
             return self.finish(id, result);
+        }
+        // Cancelled just before it was under way here: it won't resume.
+        let cancelled = self
+            .state()
+            .cancelled_files
+            .get(&key)
+            .filter(|(t, _)| t.elapsed() < CANCELLED_MEMORY)
+            .map(|(_, by)| *by);
+        if let Some(by) = cancelled {
+            crate::resume::discard(&self.download_dir(), key.0.as_bytes(), &key.1, key.2);
+            return self.finish(id, Err(by.error()));
         }
         let message = result.err().map(|e| e.to_string()).unwrap_or_default();
         self.state().interrupted.insert(key.clone(), id);
@@ -2982,5 +3339,294 @@ mod tests {
             let text = std::fs::read_to_string(downloads.join(format!("photo {i}.txt"))).unwrap();
             assert_eq!(text, format!("shared {i}"));
         }
+    }
+
+    /// The sender moves to another path while the old connection still
+    /// looks alive (no error, just silence): the new connection takes the
+    /// file over at once, as the same transfer, instead of waiting minutes
+    /// for the old one to time out.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn new_connection_takes_over_a_silent_one() {
+        use std::io::Read;
+
+        let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+        let (laptop, mut laptop_events, laptop_dir) = start("Laptop", udp_a, udp_b).await;
+        let (phone, mut phone_events, phone_dir) = start("Phone", udp_b, udp_a).await;
+        let phone_fp = phone.fingerprint();
+        until(|| laptop.peers().iter().any(|p| p.fingerprint == phone_fp)).await;
+        until(|| {
+            phone
+                .peers()
+                .iter()
+                .any(|p| p.fingerprint == laptop.fingerprint())
+        })
+        .await;
+        phone.pair(&laptop.start_pairing()).await.unwrap();
+        until(|| laptop.peers().iter().any(|p| p.paired)).await;
+
+        let size = 5 * crate::transfer::CHUNK_SIZE + 12_345;
+        let data: Vec<u8> = (0..size).map(|i| (i * 31 % 251) as u8).collect();
+        let src = laptop_dir.path().join("big.bin");
+        std::fs::write(&src, &data).unwrap();
+        let modified = crate::transfer::modified_time(&std::fs::metadata(&src).unwrap());
+
+        // The first connection sends two chunks, then goes silent but open.
+        struct Stalls {
+            data: Vec<u8>,
+            pos: usize,
+            stop_at: usize,
+            gate: std::sync::mpsc::Receiver<()>,
+        }
+        impl Read for Stalls {
+            fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+                if self.pos >= self.stop_at {
+                    // Until the test ends.
+                    let _ = self.gate.recv();
+                    return Err(std::io::ErrorKind::BrokenPipe.into());
+                }
+                let n = buf.len().min(self.stop_at - self.pos);
+                buf[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+                self.pos += n;
+                Ok(n)
+            }
+        }
+        impl std::io::Seek for Stalls {
+            fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+                if let std::io::SeekFrom::Start(p) = to {
+                    self.pos = p as usize;
+                }
+                Ok(self.pos as u64)
+            }
+        }
+        let (hold, gate) = std::sync::mpsc::channel::<()>();
+        let source = Stalls {
+            data: data.clone(),
+            pos: 0,
+            stop_at: 2 * crate::transfer::CHUNK_SIZE as usize,
+            gate,
+        };
+        let offer = Offer {
+            name: "big.bin".into(),
+            size,
+            modified,
+            batch: Batch {
+                id: 0,
+                count: 1,
+                size,
+            },
+            pack: false,
+        };
+        let mut old = connect_any(
+            &laptop.shared.tls,
+            &laptop.shared.addrs_of(&phone_fp),
+            phone_fp,
+        )
+        .await
+        .unwrap();
+        let progress = Progress::new();
+        let watching = progress.clone();
+        let first = tokio::spawn(async move {
+            let _ = send_from_tracked(&mut old, source, offer, &watching).await;
+            old
+        });
+        let NodeEvent::TransferStarted { id, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::TransferStarted { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        until(|| progress.position() >= 2 * crate::transfer::CHUNK_SIZE).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The same file again, on a new connection.
+        let ids = laptop.send_files(phone_fp, vec![src]);
+        loop {
+            match laptop_events.recv().await.unwrap() {
+                NodeEvent::TransferDone { id, stats, .. } if id == ids[0] => {
+                    assert!(
+                        stats.resumed_from >= crate::transfer::CHUNK_SIZE,
+                        "{stats:?}"
+                    );
+                    break;
+                }
+                NodeEvent::TransferFailed { error, .. } => panic!("send failed: {error}"),
+                _ => {}
+            }
+        }
+        // The phone saw one transfer, start to finish.
+        let event = next(&mut phone_events, |e| {
+            matches!(
+                e,
+                NodeEvent::TransferDone { .. }
+                    | NodeEvent::TransferFailed { .. }
+                    | NodeEvent::TransferStarted { .. }
+            )
+        })
+        .await;
+        assert!(
+            matches!(event, NodeEvent::TransferDone { id: done, .. } if done == id),
+            "{event:?}"
+        );
+        let downloads = phone_dir.path().join("downloads");
+        assert_eq!(std::fs::read(downloads.join("big.bin")).unwrap(), data);
+        assert_eq!(names_in(&downloads), vec!["big.bin".to_owned()]);
+        drop(hold);
+        let _ = first.await;
+    }
+
+    /// A laptop and a phone, paired; neither asks before taking files.
+    async fn paired_quiet() -> (
+        (Node, mpsc::UnboundedReceiver<NodeEvent>, tempfile::TempDir),
+        (Node, mpsc::UnboundedReceiver<NodeEvent>, tempfile::TempDir),
+    ) {
+        let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+        let laptop = start("Laptop", udp_a, udp_b).await;
+        let phone = start("Phone", udp_b, udp_a).await;
+        let (l, p) = (&laptop.0, &phone.0);
+        until(|| p.peers().iter().any(|x| x.fingerprint == l.fingerprint())).await;
+        until(|| l.peers().iter().any(|x| x.fingerprint == p.fingerprint())).await;
+        p.pair(&l.start_pairing()).await.unwrap();
+        until(|| l.peers().iter().any(|x| x.paired)).await;
+        (laptop, phone)
+    }
+
+    /// Big files, so a cancel lands while bytes are still moving.
+    fn big_files(dir: &std::path::Path, count: usize) -> Vec<PathBuf> {
+        (0..count)
+            .map(|i| {
+                let path = dir.join(format!("big{i}.bin"));
+                let f = std::fs::File::create(&path).unwrap();
+                f.set_len(256 << 20).unwrap();
+                path
+            })
+            .collect()
+    }
+
+    /// How each transfer ended: its ID and error ("" when done).
+    async fn outcomes(
+        events: &mut mpsc::UnboundedReceiver<NodeEvent>,
+        count: usize,
+    ) -> Vec<(u64, String)> {
+        let mut ended = Vec::new();
+        while ended.len() < count {
+            match next(events, |e| {
+                matches!(
+                    e,
+                    NodeEvent::TransferDone { .. } | NodeEvent::TransferFailed { .. }
+                )
+            })
+            .await
+            {
+                NodeEvent::TransferDone { id, .. } => ended.push((id, String::new())),
+                NodeEvent::TransferFailed { id, error } => ended.push((id, error)),
+                _ => unreachable!(),
+            }
+        }
+        ended
+    }
+
+    /// No partial files left behind.
+    fn no_partials(dir: &std::path::Path) {
+        let left: Vec<String> = names_in(dir)
+            .into_iter()
+            .filter(|n| n.ends_with(".nudgepart") || n.ends_with(".nudgemeta"))
+            .collect();
+        assert!(left.is_empty(), "left behind: {left:?}");
+    }
+
+    /// The sender cancels mid-file: the rest of the send stops, and the
+    /// receiver ends the file as cancelled by them and deletes what arrived.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn sender_cancels() {
+        let ((laptop, mut laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_quiet().await;
+        let files = big_files(laptop_dir.path(), 3);
+        let ids = laptop.send_files(phone.fingerprint(), files);
+        next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::TransferStarted { .. })
+        })
+        .await;
+        assert!(laptop.cancel(ids[0]));
+
+        let ended = outcomes(&mut laptop_events, 3).await;
+        assert!(ended.iter().all(|(_, e)| e == "cancelled"), "{ended:?}");
+        let theirs = outcomes(&mut phone_events, 1).await;
+        assert_eq!(theirs[0].1, "they cancelled");
+        no_partials(&phone_dir.path().join("downloads"));
+        assert!(!laptop.cancel(ids[0]), "nothing left to cancel");
+    }
+
+    /// The receiver cancels mid-file: the sender hears it and sends no more.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn receiver_cancels() {
+        let ((laptop, mut laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_quiet().await;
+        let files = big_files(laptop_dir.path(), 2);
+        let _ids = laptop.send_files(phone.fingerprint(), files);
+        let NodeEvent::TransferStarted { id, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::TransferStarted { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        assert!(phone.cancel(id));
+
+        let theirs = outcomes(&mut phone_events, 1).await;
+        assert_eq!(theirs[0], (id, "cancelled".to_owned()));
+        let ended = outcomes(&mut laptop_events, 2).await;
+        assert!(
+            ended.iter().all(|(_, e)| e == "they cancelled"),
+            "{ended:?}"
+        );
+        // Nothing more arrives.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        while let Ok(e) = phone_events.try_recv() {
+            assert!(!matches!(e, NodeEvent::TransferStarted { .. }), "{e:?}");
+        }
+        no_partials(&phone_dir.path().join("downloads"));
+    }
+
+    /// Cancelling while the receiver's user is being asked closes the
+    /// question there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancel_closes_their_question() {
+        let ((laptop, mut laptop_events, laptop_dir), (phone, mut phone_events, phone_dir)) =
+            paired_pair().await;
+        let src = laptop_dir.path().join("note.txt");
+        std::fs::write(&src, b"small").unwrap();
+        let big = big_files(laptop_dir.path(), 1).remove(0);
+        let ids = laptop.send_files(phone.fingerprint(), vec![src, big]);
+        let NodeEvent::OfferReceived { id: question, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::OfferReceived { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        // The small one is there, held, when the sender cancels.
+        next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::TransferDelivered { .. })
+        })
+        .await;
+        assert!(laptop.cancel(ids[1]));
+        next(
+            &mut phone_events,
+            |e| matches!(e, NodeEvent::OfferClosed { id } if *id == question),
+        )
+        .await;
+        let ended = outcomes(&mut laptop_events, 2).await;
+        assert!(ended.iter().all(|(_, e)| e == "cancelled"), "{ended:?}");
+        // The held one goes; the big one never started there.
+        let theirs = outcomes(&mut phone_events, 1).await;
+        assert_eq!(theirs[0].1, "they cancelled");
+        let downloads = phone_dir.path().join("downloads");
+        no_partials(&downloads);
+        assert!(
+            names_in(&downloads).is_empty(),
+            "{:?}",
+            names_in(&downloads)
+        );
     }
 }

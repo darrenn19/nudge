@@ -138,6 +138,30 @@ pub(crate) fn find(dir: &Path, key: &TransferKey) -> io::Result<Option<Partial>>
     Ok(found)
 }
 
+/// Delete every partial of `name` (as offered, `size` bytes) from `peer`:
+/// a cancelled transfer won't be resumed.
+pub(crate) fn discard(dir: &Path, peer: &[u8; 32], name: &str, size: u64) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(base_name) = file_name.to_str().and_then(|n| n.strip_suffix(META_SUFFIX)) else {
+            continue;
+        };
+        let Some((stored, chunks_done)) = read_meta(&entry.path()) else {
+            continue;
+        };
+        if stored.peer == *peer && stored.name == name && stored.size == size {
+            Partial {
+                base: dir.join(base_name),
+                chunks_done,
+            }
+            .remove();
+        }
+    }
+}
+
 /// Header and number of whole chunk hashes in a meta file.
 fn read_meta(path: &Path) -> Option<(TransferKey, u64)> {
     let mut file = File::open(path).ok()?;

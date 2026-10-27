@@ -80,6 +80,13 @@ class Transfer {
   /// Something is actually happening: bytes moving or about to.
   bool get active => state == TransferState.running && !awaitingAnswer && !waitingForYou;
 
+  /// It can be stopped: on its way, or (to a web page) offered and not yet
+  /// accepted. Files waiting for an answer are settled by the answer.
+  bool get cancellable => active || (toBrowser && awaitingAnswer);
+
+  /// Stopped by this side's user ("cancelled") or the other's.
+  bool get cancelled => error == 'cancelled' || error == 'they cancelled';
+
   /// How it's travelling, for people: "USB cable", "direct Wi-Fi"...
   String? get via => switch (route) {
     'usb' => 'USB cable',
@@ -95,6 +102,8 @@ class Transfer {
       return switch (error) {
         'they declined' || 'you declined' => 'Declined',
         'no answer' => 'No answer',
+        'cancelled' => 'Cancelled',
+        'they cancelled' => 'They cancelled',
         _ => error ?? 'Failed',
       };
     }
@@ -503,6 +512,18 @@ class NudgeController extends ChangeNotifier {
   }
 
   /// Take one finished transfer off the list.
+  /// Stop [t], and the rest of the send it's part of.
+  void cancel(Transfer t) {
+    if (t.cancellable) app.cancelTransfer(id: t.id);
+  }
+
+  /// Stop everything going to or coming from [device].
+  void cancelWith(DeviceInfo device) {
+    for (final t in transfers) {
+      if (t.deviceId == device.id && t.cancellable) app.cancelTransfer(id: t.id);
+    }
+  }
+
   void removeTransfer(Transfer t) {
     if (t.state == TransferState.running) return;
     transfers.remove(t);

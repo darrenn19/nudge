@@ -114,6 +114,7 @@ object Background : Core.Listener {
                     h?.get("ssid") as String?,
                     h?.get("passphrase") as String? ?: "",
                     h?.get("wpa3") == true,
+                    h?.get("mhz") as Int? ?: 0,
                 )
             }
             "hotspotDone" -> Hotspot.stop()
@@ -191,7 +192,8 @@ object Background : Core.Listener {
             }
         }.joinToString(" · ")
         val percent = if (size == 0L || bytes == 0L) -1 else (bytes * 100 / size).toInt()
-        NudgeService.showProgress(context, title, text, percent)
+        val ids = transfers.filterValues { it.active }.keys.toLongArray()
+        NudgeService.showProgress(context, title, text, percent, ids)
     }
 
     private fun goIdle() {

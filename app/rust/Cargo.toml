@@ -12,6 +12,7 @@ crate-type = ["cdylib", "staticlib"]
 [dependencies]
 anyhow = "1"
 flutter_rust_bridge = "=2.13.0"
+log = "0.4"
 nudge-core = { path = "../../core" }
 tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 

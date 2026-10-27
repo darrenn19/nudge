@@ -782,6 +782,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ? _browserMenu(targets[i])
                                     : _deviceMenu(targets[i]),
                                 onAway: () => _explainAway(targets[i]),
+                                onCancel: controller.cancelWith,
                               )
                             : _AddPage(size: orb, focused: _focusId == null, onTap: _openPairing),
                       ),
@@ -1431,6 +1432,7 @@ class _DevicePage extends StatefulWidget {
     required this.onMark,
     required this.onTap,
     required this.onMenu,
+    required this.onCancel,
     required this.onAway,
   });
 
@@ -1445,6 +1447,9 @@ class _DevicePage extends StatefulWidget {
   final VoidCallback onMark;
   final VoidCallback onTap;
   final VoidCallback onMenu;
+
+  /// Stop what's moving with this device.
+  final void Function(DeviceInfo device) onCancel;
 
   /// The "!" was tapped: say what it means.
   final VoidCallback onAway;
@@ -1510,7 +1515,9 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
     final last = _last;
     if (last == null || last.id == _seen) return;
     _seen = last.id;
-    if (last.state == TransferState.failed) {
+    if (last.state == TransferState.failed && last.error == 'cancelled') {
+      _show('Cancelled', Palette.text);
+    } else if (last.state == TransferState.failed) {
       _show(last.outcome, Palette.bad, tint: Palette.bad, bad: true);
     } else if (last.incoming) {
       _show('Received', Palette.good, tint: Palette.good);
@@ -1632,7 +1639,31 @@ class _DevicePageState extends State<_DevicePage> with TickerProviderStateMixin 
           child: AnimatedOpacity(
             opacity: widget.focused && (d.paired || d.isBrowser) ? 1 : 0,
             duration: const Duration(milliseconds: 250),
-            child: d.paired || d.isBrowser
+            child: running.any((t) => t.cancellable)
+                ? Tooltip(
+                    message: running.every((t) => t.incoming) ? 'Stop receiving' : 'Stop sending',
+                    child: Pressable(
+                      onTap: () => widget.onCancel(d),
+                      child: Container(
+                        height: 34,
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(17),
+                          color: Palette.glass,
+                          border: Border.all(color: Palette.glassBorder),
+                        ),
+                        child: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(CupertinoIcons.xmark, size: 13, color: Palette.text),
+                            SizedBox(width: 6),
+                            Text('Cancel', style: TextStyle(color: Palette.text, fontSize: 14)),
+                          ],
+                        ),
+                      ),
+                    ),
+                  )
+                : d.paired || d.isBrowser
                 ? Tooltip(
                     message: 'More',
                     child: Pressable(
@@ -2053,6 +2084,18 @@ class _ActivityPillState extends State<_ActivityPill> {
                           style: Fonts.label,
                         ),
                       ),
+                      if (t.cancellable) ...[
+                        const SizedBox(width: 4),
+                        Tooltip(
+                          message: t.incoming ? 'Stop receiving' : 'Stop sending',
+                          child: CupertinoButton(
+                            padding: EdgeInsets.zero,
+                            minimumSize: const Size(32, 32),
+                            onPressed: () => controller.cancel(t!),
+                            child: const Icon(CupertinoIcons.xmark, size: 15, color: Palette.muted),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -2075,8 +2118,10 @@ class _TransferIcon extends StatelessWidget {
       _ when t.awaitingAnswer || t.waitingForYou => (CupertinoIcons.hourglass, Palette.warn),
       TransferState.done => (CupertinoIcons.checkmark_alt, Palette.good),
       TransferState.failed => (
-        t.error == 'they declined' ? CupertinoIcons.xmark : CupertinoIcons.exclamationmark,
-        Palette.bad,
+        t.error == 'they declined' || t.cancelled
+            ? CupertinoIcons.xmark
+            : CupertinoIcons.exclamationmark,
+        t.error == 'cancelled' ? Palette.muted : Palette.bad,
       ),
       TransferState.running => (
         t.incoming ? CupertinoIcons.arrow_down : CupertinoIcons.arrow_up,
@@ -2229,6 +2274,12 @@ class _TransferRow extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 12),
               onPressed: () => OpenFilex.open(path),
               child: const Text('Open', style: TextStyle(color: Palette.accent, fontSize: 15)),
+            ),
+          if (t.cancellable)
+            CupertinoButton(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              onPressed: () => controller.cancel(t),
+              child: const Text('Cancel', style: TextStyle(color: Palette.bad, fontSize: 15)),
             ),
           if (t.state != TransferState.running)
             Tooltip(

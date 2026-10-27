@@ -194,6 +194,9 @@ async fn start_node(
         &device_name(),
         std::env::consts::OS,
     );
+    if std::env::var_os("NUDGE_LOG").is_some() {
+        nudge_core::logging::to_stderr();
+    }
     // No one to ask at a terminal: take whatever paired devices send.
     config.ask_before_receiving = false;
     let (node, events) = Node::start(config).await?;

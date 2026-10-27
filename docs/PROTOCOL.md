@@ -57,12 +57,21 @@ All integers are big-endian. Every connection starts with a header:
 | 4 | No answer (nobody answered in time) | none |
 | 5 | Not paired (the receiver doesn't trust the sender) | none |
 | 6 | Asking (not an answer: the user is being asked; another response follows) | none |
+| 7 | Held (all there, kept until the user answers) | none |
+| 8 | Approved (the user said yes; the reply to `AwaitAnswer`) | none |
+| 9 | Cancelled (the receiver's user stopped the send) | none |
 
 **3. Data** (sender → receiver): the file from `offset` to `size`, in chunks of `CHUNK_SIZE` = 4 MiB (4,194,304 bytes; the last may be shorter). Each chunk is its raw bytes followed by the 32-byte BLAKE3 hash of those bytes. Chunk boundaries are fixed multiples of `CHUNK_SIZE` from the start of the file. An empty file has no chunks.
 
 The receiver hashes each chunk as it arrives. On a mismatch it closes the connection and reports `ChunkMismatch { chunk }` (`chunk` counts from the start of the file); the file is never renamed into place.
 
 **4. Done** (receiver → sender): sent only after every byte is written, synced to disk, and the file renamed into place.
+
+### Cancelling (kind 10)
+Either user can stop a send while it moves; stopping one file stops the rest of its batch.
+
+- **The sender's user:** the sender drops the data connection, then opens a new one and sends **Cancel**: `batch_id` (u64), `name_len` (u16, ≤ 1024), `name` and `size` (u64) of the file it was on. No reply. The receiver stops that file and any other of the batch arriving, deletes their partial files (they won't resume), closes any open question about the batch, and ends files of it held for an answer.
+- **The receiver's user:** the receiver deletes what arrived, replies Cancelled (tag 9) where it can, and closes the connection. For 10 minutes it answers any offer from that batch (or of that file, for batch 0) with Cancelled, so a sender that only saw the connection drop learns why when it reconnects; `AwaitAnswer` for the batch is answered Cancelled too. The sender ends the rest of the batch as cancelled there.
 
 ### Folders and packs (kind 8)
 A file from a folder is offered under its path in that folder, `/`-separated (`Trip/day 2/plan.txt`). The receiver sanitizes each part like a file name, refuses empty, `.` and `..` parts, and puts the file in those folders under its download folder (never overwriting: a clash gets a " (1)" suffix).
@@ -150,6 +159,7 @@ A chunk's hash is appended only after it passed its check **and** the data file 
 - **v2:** BLAKE3 hash after every 4 MiB chunk.
 - **v3:** `Offer` carries the file's modified time; receivers resume interrupted transfers.
 - **v4:** connections start with a header carrying a request kind; adds QR pairing (`PairRequest` / `PairReply`).
+- **v7:** cancelling: `Cancel` (kind 10) and the Cancelled response (tag 9).
 
 ## Receiver file handling
 - Writes to `<name>.nudgepart` (preallocated to `size`) plus `<name>.nudgemeta`; on completion the data file is renamed to `<name>` and the meta file deleted. A failed transfer leaves both for resume.
@@ -173,11 +183,12 @@ Code: `core/src/node/web.rs`, page: `core/src/node/web_page.html`. For people wi
 | Route | Purpose |
 |---|---|
 | `GET /` | The page. |
-| `GET /events[?s=]` | Server-sent events. Opening it makes the tab a device; an unknown or missing `s` starts a new session. Events: `hello` (`session`, `from` = this device's name, `platform` = its platform tag, `name` = what the tab appears as), `offer` (`batch`, `files[]` of `id`, `name`, `size`), `withdrawn` (`batch`; no answer in 5 minutes), `download` (`id`, `name`: fetch this file now), `delivered` (`id`: that file has been streamed in full), `clip` (`text`: clipboard text from the app; the page shows it with a Copy button, since a page can't write the clipboard by itself). A `: ping` comment every 15 s. |
+| `GET /events[?s=]` | Server-sent events. Opening it makes the tab a device; an unknown or missing `s` starts a new session. Events: `hello` (`session`, `from` = this device's name, `platform` = its platform tag, `name` = what the tab appears as), `offer` (`batch`, `files[]` of `id`, `name`, `size`), `withdrawn` (`batch`; no answer in 5 minutes), `download` (`id`, `name`: fetch this file now), `delivered` (`id`: that file has been streamed in full), `clip` (`text`: clipboard text from the app; the page shows it with a Copy button, since a page can't write the clipboard by itself), `cancelled` (a send stopped: `what` = `down` with the `ids` taken off its list, or `up` for what the tab was sending; `by` = `them` when this device's user stopped it, `you` when the tab did). A `: ping` comment every 15 s. |
 | `POST /answer?s=&batch=&accept=1\|0` | Accept or decline an offer. |
 | `GET /f/<id>?s=` | Download an accepted file (`Content-Disposition: attachment`). Only the file the last `download` event named, once. |
-| `POST /ask?s=&count=&size=&name=` | "Can I send you these?": asks the user here (like a file offer). Replies when they answer: `{"answer":"accepted"|"declined"|"none"}`. Accepting allows `count` uploads. |
+| `POST /ask?s=&count=&size=&name=` | "Can I send you these?": asks the user here (like a file offer). Replies when they answer: `{"answer":"accepted"|"declined"|"none"|"cancelled"}`. Accepting allows `count` uploads. |
 | `POST /u?s=&name=` | Send a file to this device. Needs `Content-Length`; the body is the file. Only as many as accepted through `/ask` (else 403); the name is sanitized like an `Offer` name. |
+| `POST /cancel?s=&what=up\|down` | The tab's Cancel. `up`: stop its upload under way, its open `/ask` (answered `cancelled`) and any uploads still allowed. `down`: stop the download under way and drop the rest it accepted. Uploads this device's user stops are answered 409. |
 | `POST /clip?s=` | Clipboard text for this device (UTF-8 body, at most 1 MiB, needs `Content-Length`). Lands on the clipboard like text from a paired device, without a question. |
 
 **Sessions.** A tab is listed while its event stream is open. When the stream drops (phone locked, tab in the background) it keeps its place for 30 s; reconnecting with its `s` within that time restores it, including any unanswered offer and the pending download. Tabs are named after the device type from the User-Agent ("iPhone", "Android phone", ...), with " 2", " 3" for repeats. Apps see them as peers with platform `browser`. A tab is temporary: it's never paired or remembered, and there's no "always accept" for it.

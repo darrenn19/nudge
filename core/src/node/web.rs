@@ -13,7 +13,7 @@
 //! in the link, so the page is meant for a trusted network.
 //! See docs/PROTOCOL.md ("Browser sharing").
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Write as _;
 use std::io::SeekFrom;
 use std::net::IpAddr;
@@ -26,11 +26,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-use super::{Direction, NodeEvent, Outgoing, Shared, Verdict, local_addrs};
+use super::{BatchKey, Direction, NodeEvent, Outgoing, Shared, Verdict, local_addrs};
 use crate::identity::Fingerprint;
 use crate::pairing::random_bytes;
 use crate::resume::with_suffix;
-use crate::transfer::{TransferStats, sanitize_file_name, unique_path};
+use crate::transfer::{CancelledBy, TransferStats, sanitize_file_name, unique_path};
 use crate::{Error, Result};
 
 /// Port for the page; any free port if it's taken.
@@ -87,6 +87,10 @@ pub(super) struct Browser {
     /// "can I send you these?" question. Every send is asked about: a tab
     /// is temporary, so there's no "always accept".
     allowance: u32,
+    /// Its question to the user here, while open.
+    asking: Option<BatchKey>,
+    /// Files it's sending now.
+    uploads: HashSet<u64>,
 }
 
 impl Browser {
@@ -123,11 +127,16 @@ impl Browser {
 
 struct Offer {
     event: String,
-    answer: oneshot::Sender<bool>,
+    /// Its files' transfer IDs.
+    ids: Vec<u64>,
+    /// Accept or decline; `None`: cancelled here.
+    answer: oneshot::Sender<Option<bool>>,
 }
 
 struct Download {
     id: u64,
+    /// The send it's part of (its first file's ID).
+    batch: u64,
     name: String,
     /// Taken when the tab starts downloading.
     item: Option<Outgoing>,
@@ -256,7 +265,8 @@ pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Ou
                 return;
             };
             tab.push("offer", &event);
-            tab.offers.insert(batch, Offer { event, answer });
+            let ids = files.iter().map(|(id, _, _)| *id).collect();
+            tab.offers.insert(batch, Offer { event, ids, answer });
         }
         // Delivered to the page; now it's up to them.
         for (id, _, _) in &files {
@@ -270,7 +280,7 @@ pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Ou
             .as_mut()
             .and_then(|w| w.browsers.get_mut(&browser));
         match (result, tab) {
-            (Ok(Ok(true)), Some(tab)) => {
+            (Ok(Ok(Some(true))), Some(tab)) => {
                 for (id, _, _) in &files {
                     shared.emit(NodeEvent::TransferAccepted { id: *id });
                 }
@@ -278,15 +288,23 @@ pub(super) fn send(shared: Arc<Shared>, browser: Fingerprint, jobs: Vec<(u64, Ou
                 for (id, name, _) in &files {
                     tab.queue.push_back(Download {
                         id: *id,
+                        batch,
                         name: name.clone(),
                         item: items.next(),
                     });
                 }
                 tab.advance();
             }
-            (Ok(Ok(false)), _) => {
+            (Ok(Ok(Some(false))), _) => {
                 drop(state);
                 fail_all(&shared, &files, || Error::Declined);
+            }
+            (Ok(Ok(None)), tab) => {
+                if let Some(tab) = tab {
+                    tab.push("withdrawn", &format!("{{\"batch\":{batch}}}"));
+                }
+                drop(state);
+                fail_all(&shared, &files, || Error::Cancelled);
             }
             (Err(_), tab) => {
                 if let Some(tab) = tab {
@@ -322,6 +340,165 @@ fn fail_leftovers(shared: &Shared, gone: impl Iterator<Item = Browser>) {
             }
         }
     }
+}
+
+/// Stop the send to a tab that file `id` is part of: still waiting for an
+/// answer, queued, or downloading. False if `id` isn't one.
+pub(super) fn cancel(shared: &Shared, id: u64, by: CancelledBy) -> bool {
+    let found = {
+        let mut state = shared.state();
+        let Some(web) = state.web.as_mut() else {
+            return false;
+        };
+        let mut found = None;
+        for tab in web.browsers.values_mut() {
+            let offer = tab
+                .offers
+                .iter()
+                .find(|(_, o)| o.ids.contains(&id))
+                .map(|(batch, _)| *batch);
+            if let Some(batch) = offer {
+                // Its send task fails the files and tells the tab.
+                if let Some(offer) = tab.offers.remove(&batch) {
+                    let _ = offer.answer.send(None);
+                }
+                return true;
+            }
+            let batch = tab
+                .current
+                .iter()
+                .chain(&tab.queue)
+                .find(|d| d.id == id)
+                .map(|d| d.batch);
+            if let Some(batch) = batch {
+                found = Some(stop_downloads(tab, Some(batch), by));
+                break;
+            }
+        }
+        found
+    };
+    match found {
+        Some(stopped) => {
+            stopped.finish(shared, by);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Downloads stopped: those not started yet, and the one under way.
+struct Stopped {
+    unstarted: Vec<u64>,
+    streaming: Option<u64>,
+}
+
+impl Stopped {
+    fn finish(self, shared: &Shared, by: CancelledBy) {
+        for id in self.unstarted {
+            shared.finish(id, Err(by.error()));
+        }
+        if let Some(id) = self.streaming {
+            let progress = shared.state().active.get(&id).map(|a| a.progress.clone());
+            if let Some(p) = progress {
+                p.cancel().cancel(by);
+            }
+        }
+    }
+}
+
+/// Take a tab's downloads of `batch` (or all of them) off its list, and
+/// tell it. The one downloading now ends when its stream does.
+fn stop_downloads(tab: &mut Browser, batch: Option<u64>, by: CancelledBy) -> Stopped {
+    let ours = |d: &Download| batch.is_none_or(|b| d.batch == b);
+    let mut stopped = Stopped {
+        unstarted: Vec::new(),
+        streaming: None,
+    };
+    let mut ids = Vec::new();
+    tab.queue.retain(|d| {
+        if ours(d) {
+            stopped.unstarted.push(d.id);
+            ids.push(d.id);
+        }
+        !ours(d)
+    });
+    if let Some(d) = tab.current.as_ref().filter(|d| ours(d)) {
+        ids.push(d.id);
+        if d.item.is_some() {
+            stopped.unstarted.push(d.id);
+            tab.current = None;
+        } else {
+            stopped.streaming = Some(d.id);
+        }
+    }
+    if !ids.is_empty() {
+        let list: Vec<String> = ids.iter().map(u64::to_string).collect();
+        tab.push(
+            "cancelled",
+            &format!(
+                "{{\"what\":\"down\",\"by\":\"{}\",\"ids\":[{}]}}",
+                by_word(by),
+                list.join(",")
+            ),
+        );
+    }
+    tab.advance();
+    stopped
+}
+
+/// Who stopped it, as the page sees it: "here" is this device, which is
+/// "there" for the page.
+fn by_word(by: CancelledBy) -> &'static str {
+    match by {
+        CancelledBy::Here => "them",
+        CancelledBy::There => "you",
+    }
+}
+
+/// The tab's Cancel: stop what it's sending (`what=up`, including its
+/// question to the user here) or receiving (`what=down`).
+fn cancel_from_tab(shared: &Shared, session: Fingerprint, what: &str) -> bool {
+    let (stopped, uploads, question) = {
+        let mut state = shared.state();
+        let Some(tab) = state
+            .web
+            .as_mut()
+            .and_then(|w| w.browsers.get_mut(&session))
+        else {
+            return false;
+        };
+        if what == "down" {
+            let stopped = stop_downloads(tab, None, CancelledBy::There);
+            (Some(stopped), Vec::new(), None)
+        } else {
+            tab.allowance = 0;
+            let uploads: Vec<u64> = tab.uploads.iter().copied().collect();
+            let asking = tab.asking.take();
+            let question = asking.and_then(|key| {
+                let qid = state
+                    .questions
+                    .iter()
+                    .find(|(_, (k, _))| *k == key)
+                    .map(|(qid, _)| *qid)?;
+                state.questions.remove(&qid).map(|(_, tx)| (qid, tx))
+            });
+            (None, uploads, question)
+        }
+    };
+    if let Some(stopped) = stopped {
+        stopped.finish(shared, CancelledBy::There);
+    }
+    for id in uploads {
+        let progress = shared.state().active.get(&id).map(|a| a.progress.clone());
+        if let Some(p) = progress {
+            p.cancel().cancel(CancelledBy::There);
+        }
+    }
+    if let Some((qid, tx)) = question {
+        let _ = tx.send(Some(Verdict::SenderCancelled));
+        shared.emit(NodeEvent::OfferClosed { id: qid });
+    }
+    true
 }
 
 /// Forget tabs that have been gone too long, and stop sharing after a long
@@ -461,6 +638,12 @@ async fn handle(shared: &Arc<Shared>, token: &str, mut tcp: TcpStream) -> std::i
             Some(s) => upload(shared, &mut tcp, s, req).await,
             None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
         },
+        ("POST", ["cancel"]) => {
+            let what = req.query.get("what").map_or("up", String::as_str);
+            let ok = session.is_some_and(|s| cancel_from_tab(shared, s, what));
+            let status = if ok { "200 OK" } else { "404 Not Found" };
+            respond(&mut tcp, status, "application/json", b"{}").await
+        }
         ("POST", ["clip"]) => match session {
             Some(s) => clip(shared, &mut tcp, s, req).await,
             None => respond(&mut tcp, "404 Not Found", "text/plain", b"Not found").await,
@@ -489,7 +672,26 @@ async fn ask(
     let name = query.get("name").cloned().unwrap_or_default();
     let answer = match shared.start_asking(session, 0, &name, count, size) {
         super::Asking::Now(answer) => answer,
-        super::Asking::Wait(key, rx) => shared.wait_answer(key, rx).await,
+        super::Asking::Wait(key, rx) => {
+            if let Some(tab) = shared
+                .state()
+                .web
+                .as_mut()
+                .and_then(|w| w.browsers.get_mut(&session))
+            {
+                tab.asking = Some(key);
+            }
+            let answer = shared.wait_answer(key, rx).await;
+            if let Some(tab) = shared
+                .state()
+                .web
+                .as_mut()
+                .and_then(|w| w.browsers.get_mut(&session))
+            {
+                tab.asking = None;
+            }
+            answer
+        }
     };
     if answer == Verdict::Yes
         && let Some(tab) = shared
@@ -504,6 +706,7 @@ async fn ask(
         Verdict::Yes => "accepted",
         Verdict::No => "declined",
         Verdict::Lapsed => "none",
+        Verdict::SenderCancelled | Verdict::ReceiverCancelled => "cancelled",
     };
     respond(
         tcp,
@@ -561,6 +764,8 @@ async fn events(
                         queue: VecDeque::new(),
                         current: None,
                         allowance: 0,
+                        asking: None,
+                        uploads: HashSet::new(),
                     },
                 );
                 id
@@ -637,7 +842,7 @@ fn answer(shared: &Shared, session: Option<Fingerprint>, query: &HashMap<String,
         .and_then(|w| w.browsers.get_mut(&session))
         .and_then(|tab| tab.offers.remove(&batch));
     match offer {
-        Some(offer) => offer.answer.send(accept).is_ok(),
+        Some(offer) => offer.answer.send(Some(accept)).is_ok(),
         None => false,
     }
 }
@@ -731,12 +936,19 @@ async fn stream_file(
     let mut buf = vec![0u8; BUFFER];
     let mut sent = 0u64;
     while sent < size {
-        let n = file.read(&mut buf).await?;
+        let step = async {
+            let n = file.read(&mut buf).await?;
+            let n = n.min((size - sent) as usize);
+            tcp.write_all(&buf[..n]).await?;
+            Ok::<usize, Error>(n)
+        };
+        let n = tokio::select! {
+            n = step => n?,
+            by = progress.cancel().until() => return Err(by.error()),
+        };
         if n == 0 {
             break;
         }
-        let n = n.min((size - sent) as usize);
-        tcp.write_all(&buf[..n]).await?;
         sent += n as u64;
         progress.set(sent);
     }
@@ -799,6 +1011,14 @@ async fn upload(
     let progress = shared.track(id, session, size);
     let start = Instant::now();
     let dir = shared.download_dir();
+    if let Some(tab) = shared
+        .state()
+        .web
+        .as_mut()
+        .and_then(|w| w.browsers.get_mut(&session))
+    {
+        tab.uploads.insert(id);
+    }
     let result = async {
         tokio::fs::create_dir_all(&dir).await?;
         let part = with_suffix(&dir.join(&name), UPLOAD_SUFFIX);
@@ -813,6 +1033,22 @@ async fn upload(
     }
     .await;
 
+    let cancelled = progress.cancel().by();
+    if let Some(tab) = shared
+        .state()
+        .web
+        .as_mut()
+        .and_then(|w| w.browsers.get_mut(&session))
+    {
+        tab.uploads.remove(&id);
+        if cancelled.is_some() {
+            // The rest of its files aren't wanted either.
+            tab.allowance = 0;
+        }
+        if cancelled == Some(CancelledBy::Here) {
+            tab.push("cancelled", "{\"what\":\"up\",\"by\":\"them\"}");
+        }
+    }
     let ok = result.is_ok();
     shared.finish(
         id,
@@ -829,6 +1065,8 @@ async fn upload(
     );
     if ok {
         respond(tcp, "200 OK", "application/json", b"{}").await
+    } else if cancelled.is_some() {
+        respond(tcp, "409 Conflict", "text/plain", b"Cancelled").await
     } else {
         respond(tcp, "500 Internal Server Error", "text/plain", b"Not saved").await
     }
@@ -888,7 +1126,10 @@ async fn receive_body(
     let mut buf = vec![0u8; BUFFER];
     while got < size {
         let want = buf.len().min((size - got) as usize);
-        let n = tcp.read(&mut buf[..want]).await?;
+        let n = tokio::select! {
+            n = tcp.read(&mut buf[..want]) => n?,
+            by = progress.cancel().until() => return Err(by.error()),
+        };
         if n == 0 {
             return Err(Error::Truncated {
                 got,

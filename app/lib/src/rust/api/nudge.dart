@@ -28,6 +28,10 @@ abstract class NudgeApp implements RustOpaqueInterface {
 
   void cancelPairing();
 
+  /// Stop a transfer, and the rest of its send. The other device is told
+  /// and deletes what arrived. False if it isn't running any more.
+  bool cancelTransfer({required PlatformInt64 id});
+
   String deviceId();
 
   String deviceName();

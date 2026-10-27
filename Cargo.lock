@@ -551,6 +551,7 @@ dependencies = [
  "cpu-time",
  "httparse",
  "if-addrs",
+ "log",
  "mdns-sd",
  "rcgen",
  "rustls",

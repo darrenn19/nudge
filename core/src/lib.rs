@@ -8,6 +8,7 @@ pub mod discovery;
 pub mod error;
 pub mod identity;
 pub mod link;
+pub mod logging;
 pub mod node;
 pub mod pack;
 pub mod pairing;
@@ -24,7 +25,7 @@ pub use tls::Tls;
 pub use transfer::{ReceivedFile, TransferStats, receive_file, send_file};
 
 /// Protocol version spoken by this build. Bumped on any wire-format change.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Crate version, for logs and the `--version` output of tools.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

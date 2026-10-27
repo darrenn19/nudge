@@ -33,7 +33,10 @@ pub(crate) fn runtime() -> &'static Runtime {
 
 #[frb(init)]
 pub fn init_app() {
-    flutter_rust_bridge::setup_default_user_utils();
+    // Nudge's own log (see `nudge_core::logging`), not the console one
+    // `setup_default_user_utils` would claim the logger for.
+    nudge_core::logging::install();
+    flutter_rust_bridge::setup_backtrace();
 }
 
 /// A device as the app shows it.
@@ -328,6 +331,8 @@ pub(crate) fn running_core() -> Option<Arc<Core>> {
 pub(crate) async fn start_core(config: NodeConfig) -> Result<Arc<Core>> {
     let core = CORE
         .get_or_try_init(|| async move {
+            nudge_core::logging::to_file(&config.data_dir);
+            log::info!("nudge {} starting on {}", nudge_core::VERSION, config.platform);
             let (node, mut rx) = runtime()
                 .spawn(Node::start(config))
                 .await
@@ -491,6 +496,14 @@ impl NudgeApp {
         Ok(self.node.answer_offer(id as u64, accept, always)?)
     }
 
+    /// Stop a transfer, and the rest of its send. The other device is told
+    /// and deletes what arrived. False if it isn't running any more.
+    #[frb(sync)]
+    pub fn cancel_transfer(&self, id: i64) -> bool {
+        let _guard = runtime().enter();
+        self.node.cancel(id as u64)
+    }
+
     /// The code both screens show while pairing with a nearby device.
     #[frb(sync)]
     pub fn pair_code(&self, device_id: String) -> Result<String> {
@@ -623,6 +636,7 @@ impl NudgeApp {
             ssid,
             passphrase,
             wpa3,
+            mhz: 0,
         });
         self.node.hotspot_ready(id as u64, info);
     }

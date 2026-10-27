@@ -52,6 +52,29 @@ What this says:
 | 2026-10-20 | uncommitted (Phase 1 step 4) | Same, checkpoints disabled (A/B control) | Same Windows PC, release build | 1 × 2 GB random file, 6 runs | 535 / 473 / 563 / 467 / 509 / 414 (mean 494) | not measured | not measured | ~6% gap, inside the ±100 MB/s run-to-run noise. Checkpoints kept. |
 | 2026-10-22 | uncommitted (buffer pool) | Loopback, protocol over TLS, memory → memory | Same Windows PC, release build | 2 GB generated, `nudge bench --size 2G` | before 417; after 742 / 569 | before 4.74 CPU s/GB; after 2.67 / 3.60 | not measured | Reused 1 MB buffers instead of allocating and zeroing one per buffer on both sides. Raw TLS on the same runs: 660–787 MB/s, so the protocol now runs close to TLS speed. |
 
+## Start then upgrade: phone hotspot (step 5)
+
+2026-10-24, uncommitted. Galaxy S24 (SM-S921W, Android 16) → Windows laptop (MediaTek MT7925 Wi-Fi 7, on the router's 6 GHz at 2.4 Gbps). 1 × 2 GB random file shared to Nudge on the phone; the phone decides. Router speed is the phone's link to the router (its signal was −74 dBm), which swung a lot between runs.
+
+| Run | Router (start) | Decision | Hotspot band | Hotspot speed | Notes |
+|---|---|---|---|---|---|
+| 1 | 10.6 MB/s | Hotspot up in 0.6 s, PC joined in 4 s | 2.4 GHz | stalled | **Bug:** the send stayed on the dead router connection (no progress, no error); the PC gave up after ~70 s. Fixed: a send with nothing moving for 3 s moves to another path. |
+| 2 | 31.5 MB/s | Moved after 3 s stalled at 186 MB | 2.4 GHz | never reconnected | **Bug:** closing the dead connection waited minutes (TLS goodbye into a full buffer). Fixed: 1 s cap. |
+| 3 | 9.9 MB/s | Moved at 51 MB, reconnected in 1.3 s, resumed at the exact byte | 2.4 GHz (2437 MHz, 20 MHz) | 9.5 MB/s | Works end to end, but no faster: the phone hosts on 2.4 GHz. |
+| 4 | 19.0 MB/s | Asked for 5 GHz (Android 16 `startLocalOnlyHotspotWithConfiguration`) | 5745 MHz, then 2412 MHz within 1 ms | 9.4 MB/s | Phone's own Wi-Fi on 5 GHz (5220 MHz): the hotspot is moved off 5 GHz. |
+| 5 | 38.3 MB/s | Asked for 5 GHz with the phone's Wi-Fi on 6 GHz | 5745 → 2412 MHz again | 8.3 MB/s | Same: Samsung keeps the local-only hotspot on 2.4 GHz while connected to Wi-Fi. A 38 MB/s router path was given up on a guess ("2× the router"); the guess is now capped at 25 MB/s until a hotspot speed has been measured. Also a 4.5 min wait after the last byte, not yet explained (needs PC-side logs). |
+
+**Takeaways.** Switching mid-transfer works: hotspot up in < 1 s, PC on it in ~4 s, resume at the exact byte. But on this phone the local-only hotspot only runs on 2.4 GHz while the phone stays on Wi-Fi, which caps it near 9–10 MB/s, no better than the router here. Once measured, Nudge stops switching with this phone.
+
+**Changes after these runs (not yet measured on the phone):**
+- The direct link is now a **Wi-Fi Direct group** owned by the phone, asked for on 5 GHz (on the phone's own channel when its Wi-Fi is on 5 GHz), with the local-only hotspot as fallback. The PC joins it with `netsh` like any Wi-Fi network. The group's real frequency goes into the log.
+- Direct-link speeds are stored under a new name (`direct`), so the 2.4 GHz hotspot measurements above don't stop the phone from trying the new link.
+- When both speeds are known from earlier transfers and the direct link wins, it starts at the beginning of the send instead of after a few seconds of measuring.
+- **Likely cause of the 4.5 min wait in run 5:** the PC's old router connection still looked alive (TCP doesn't notice a vanished network while it's only reading), so it kept its hold on the file and the resumed one ran as a second transfer alongside it. Now a new connection for the same file stops the old one, waits for it to save, and carries on as the same transfer (test: `new_connection_takes_over_a_silent_one`). To confirm on the next run.
+- Both apps now write `nudge.log` in their data folder (Windows: `%APPDATA%\Nudge\nudge.log`), so runs can be read from both sides.
+
+To measure next: the run-5 setup again (2 GB, phone on 6 GHz, then on 5 GHz), reading the direct link's frequency from the log.
+
 ## Many small files (`many_small_files`)
 
 2026-10-23, uncommitted (Phase 4: packs), this Windows PC, two nodes over loopback TLS, 1,000 files × 10 KB, from send until every file is saved:

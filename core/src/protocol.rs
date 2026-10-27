@@ -70,6 +70,7 @@ const KIND_LINK: u8 = 7;
 /// A file offer whose data is a pack of files (see `pack`).
 const KIND_PACK: u8 = 8;
 const KIND_CLIP_IMAGE: u8 = 9;
+const KIND_CANCEL: u8 = 10;
 
 /// Header that opens every connection.
 fn put_header(buf: &mut Vec<u8>, kind: u8) {
@@ -144,6 +145,8 @@ pub enum Request {
     ClipImage(ClipImage),
     /// Move to a faster, direct network (the phone's hotspot).
     Link(Link),
+    /// The sender's user stopped a send. No reply.
+    Cancel(Cancel),
 }
 
 impl Request {
@@ -159,6 +162,7 @@ impl Request {
             })),
             KIND_CLIP => Ok(Self::Clip(Clip::read_body(r).await?)),
             KIND_CLIP_IMAGE => Ok(Self::ClipImage(ClipImage::read_body(r).await?)),
+            KIND_CANCEL => Ok(Self::Cancel(Cancel::read_body(r).await?)),
             KIND_LINK => match r.read_u8().await? {
                 1 => Ok(Self::Link(Link::Ask)),
                 2 => Ok(Self::Link(Link::Offer)),
@@ -247,6 +251,41 @@ impl AwaitAnswer {
         w.write_all(&buf).await?;
         w.flush().await?;
         Ok(())
+    }
+}
+
+/// "My user stopped sending this": the file on its way (or about to be),
+/// and the rest of its batch. The receiver deletes what arrived and closes
+/// any question about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cancel {
+    /// The send's batch ID (0: a file sent on its own).
+    pub batch: u64,
+    /// The file being sent when it stopped, as offered.
+    pub name: String,
+    pub size: u64,
+}
+
+impl Cancel {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        if self.name.len() > MAX_NAME_LEN {
+            return Err(Error::BadFileName(self.name.clone()));
+        }
+        let mut buf = Vec::with_capacity(7 + 8 + 2 + self.name.len() + 8);
+        put_header(&mut buf, KIND_CANCEL);
+        buf.extend_from_slice(&self.batch.to_be_bytes());
+        put_string(&mut buf, &self.name);
+        buf.extend_from_slice(&self.size.to_be_bytes());
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    async fn read_body<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        let batch = r.read_u64().await?;
+        let name = read_string(r, MAX_NAME_LEN, "file name too long").await?;
+        let size = r.read_u64().await?;
+        Ok(Self { batch, name, size })
     }
 }
 
@@ -521,6 +560,8 @@ pub enum Response {
     Held,
     /// The receiver's user said yes (the reply to `AwaitAnswer`).
     Approved,
+    /// The receiver's user cancelled the send: don't send the rest.
+    Cancelled,
 }
 
 const TAG_REJECT: u8 = 0;
@@ -532,6 +573,7 @@ const TAG_NOT_PAIRED: u8 = 5;
 const TAG_ASKING: u8 = 6;
 const TAG_HELD: u8 = 7;
 const TAG_APPROVED: u8 = 8;
+const TAG_CANCELLED: u8 = 9;
 
 impl Response {
     pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
@@ -550,6 +592,7 @@ impl Response {
             Self::Asking => w.write_u8(TAG_ASKING).await?,
             Self::Held => w.write_u8(TAG_HELD).await?,
             Self::Approved => w.write_u8(TAG_APPROVED).await?,
+            Self::Cancelled => w.write_u8(TAG_CANCELLED).await?,
         }
         w.flush().await?;
         Ok(())
@@ -568,6 +611,7 @@ impl Response {
             TAG_ASKING => Ok(Self::Asking),
             TAG_HELD => Ok(Self::Held),
             TAG_APPROVED => Ok(Self::Approved),
+            TAG_CANCELLED => Ok(Self::Cancelled),
             _ => Err(Error::Protocol("unknown response tag")),
         }
     }

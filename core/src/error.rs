@@ -60,6 +60,14 @@ pub enum Error {
     #[error("no answer")]
     NoAnswer,
 
+    /// The user on this device stopped it.
+    #[error("cancelled")]
+    Cancelled,
+
+    /// The other device's user stopped it.
+    #[error("they cancelled")]
+    CancelledThere,
+
     #[error("the browser page was closed")]
     BrowserGone,
 

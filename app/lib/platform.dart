@@ -326,17 +326,20 @@ Future<void> leaveApp() async {
 }
 
 /// Show (or update) the ongoing transfer notification. [progress] is 0–100,
-/// or -1 when unknown. Also keeps Android from stopping the app mid-transfer.
+/// or -1 when unknown; its Cancel stops [ids]. Also keeps Android from
+/// stopping the app mid-transfer.
 Future<void> showTransferProgress({
   required String title,
   required String text,
   required int progress,
+  List<int> ids = const [],
 }) async {
   if (!Platform.isAndroid) return;
   await _channel.invokeMethod('transfersActive', {
     'title': title,
     'text': text,
     'progress': progress,
+    'ids': ids,
   });
 }
 

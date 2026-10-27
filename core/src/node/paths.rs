@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use log::{info, warn};
 use tokio::io::AsyncWriteExt;
 
 use super::{Conn, NodeEvent, Outgoing, Shared, connect_any, send_over};
@@ -42,6 +43,14 @@ const LINK_IDLE: Duration = Duration::from_secs(30);
 
 /// After a hotspot attempt (worked or not), don't try again for this long.
 const LINK_RETRY: Duration = Duration::from_secs(10 * 60);
+
+/// A send that hasn't moved for this long is stuck on a path that's gone
+/// (the other side moved to the hotspot, or left the network): it moves to
+/// another path if there is one...
+const STALL: Duration = Duration::from_secs(3);
+
+/// ...or, with none, reconnects on the best one after this long.
+const STALL_RECONNECT: Duration = Duration::from_secs(10);
 
 /// A path that didn't connect when switched to isn't tried again for this long.
 const DEAD_PATH: Duration = Duration::from_secs(5 * 60);
@@ -75,6 +84,9 @@ pub struct HotspotInfo {
     pub passphrase: String,
     /// WPA3 only, no WPA2 fallback.
     pub wpa3: bool,
+    /// Its frequency in MHz, 0 if the phone didn't say. For the log: 2.4 GHz
+    /// (below 3000) is rarely faster than the router.
+    pub mhz: u32,
 }
 
 impl Shared {
@@ -194,6 +206,7 @@ impl Shared {
             let mut stream = match conn {
                 Ok(stream) => stream,
                 Err(e) => {
+                    warn!("send {id}: couldn't connect ({e})");
                     if self.retry(peer, &mut failures, &e).await {
                         continue;
                     }
@@ -212,6 +225,15 @@ impl Shared {
             }
             self.emit(NodeEvent::TransferRoute { id, route: kind });
             let before = progress.position();
+            info!(
+                "send {id}: over {} to {}, from byte {before} of {size}",
+                kind.name(),
+                stream
+                    .get_ref()
+                    .0
+                    .peer_addr()
+                    .map_or("?".into(), |a| a.to_string())
+            );
             let outcome = tokio::select! {
                 result = send_over(&mut stream, item, batch, progress) => Some(result),
                 target = self.watch_path(peer, kind, progress, size, after) => {
@@ -221,6 +243,13 @@ impl Shared {
             };
             match outcome {
                 Some(Ok(stats)) => {
+                    info!(
+                        "send {id}: done over {}, {} MB in {:.1} s ({:.1} MB/s)",
+                        kind.name(),
+                        stats.bytes / 1_000_000,
+                        stats.elapsed.as_secs_f64(),
+                        stats.bytes as f64 / 1e6 / stats.elapsed.as_secs_f64().max(1e-3)
+                    );
                     self.speeds.record(peer, kind, stats.bytes, stats.elapsed);
                     moved += stats.bytes;
                     return Ok(TransferStats {
@@ -230,6 +259,10 @@ impl Shared {
                     });
                 }
                 Some(Err(e @ (Error::Io(_) | Error::Truncated { .. } | Error::Unreachable))) => {
+                    warn!(
+                        "send {id}: connection lost at byte {} ({e})",
+                        progress.position()
+                    );
                     first_offset.get_or_insert(before.min(progress.position()));
                     moved += progress.position().saturating_sub(before);
                     let Some(spare) = spare else {
@@ -240,11 +273,17 @@ impl Shared {
                         return Err(e);
                     }
                 }
-                Some(Err(e)) => return Err(e),
+                Some(Err(e)) => {
+                    warn!("send {id}: failed ({e})");
+                    return Err(e);
+                }
                 None => {
+                    info!("send {id}: moving at byte {}", progress.position());
                     // Moving to a faster path: drop this connection; the
-                    // receiver keeps what arrived and the send resumes.
-                    let _ = stream.shutdown().await;
+                    // receiver keeps what arrived and the send resumes. The
+                    // old path may be dead with a full send buffer, so don't
+                    // wait long to say goodbye on it.
+                    let _ = tokio::time::timeout(Duration::from_secs(1), stream.shutdown()).await;
                     first_offset.get_or_insert(before.min(progress.position()));
                     moved += progress.position().saturating_sub(before);
                     item = spare.ok_or(Error::Protocol("couldn't reopen the file to move it"))?;
@@ -294,11 +333,33 @@ impl Shared {
         size: u64,
         after: u64,
     ) -> LinkKind {
+        // Both speeds known from before, and the direct link wins: start it
+        // now rather than after a few seconds of measuring.
+        if kind != LinkKind::Hotspot
+            && let (Some(now), Some(direct)) = (
+                self.speeds.measured(&peer, kind),
+                self.speeds.measured(&peer, LinkKind::Hotspot),
+            )
+        {
+            let remaining = size
+                .saturating_sub(progress.position())
+                .saturating_add(after);
+            if self.may_link(&peer) && link::worth_switching(remaining, now, direct, LINK_SETUP) {
+                info!(
+                    "path: from history, {} {:.1} MB/s vs direct {:.1} MB/s: starting the direct link",
+                    kind.name(),
+                    now / 1e6,
+                    direct / 1e6
+                );
+                self.start_link(peer);
+            }
+        }
         let mut tick = tokio::time::interval(CHECK_EVERY);
         tick.tick().await;
         let mut last = (progress.position(), Instant::now());
         let mut speed = 0.0;
         let mut samples = 0;
+        let mut stalled_since: Option<Instant> = None;
         loop {
             tick.tick().await;
             let (pos, now) = (progress.position(), Instant::now());
@@ -306,8 +367,35 @@ impl Shared {
             let sample = pos.saturating_sub(last.0) as f64 / secs;
             last = (pos, now);
             if sample <= 0.0 {
+                // Nothing moved. All sent and waiting for the reply is fine;
+                // otherwise the connection may be dead without an error yet
+                // (TCP takes minutes to notice the other side left).
+                if pos >= size {
+                    continue;
+                }
+                let stalled = now.duration_since(*stalled_since.get_or_insert(now));
+                if stalled >= STALL
+                    && let Some(other) = self.other_path(peer, kind)
+                {
+                    info!(
+                        "path: nothing moving over {} for {} s: moving to {}",
+                        kind.name(),
+                        stalled.as_secs(),
+                        other.name()
+                    );
+                    return other;
+                }
+                if stalled >= STALL_RECONNECT {
+                    info!(
+                        "path: nothing moving over {} for {} s: reconnecting",
+                        kind.name(),
+                        stalled.as_secs()
+                    );
+                    return kind;
+                }
                 continue;
             }
+            stalled_since = None;
             speed = if samples == 0 {
                 sample
             } else {
@@ -320,17 +408,26 @@ impl Shared {
             }
             let remaining = size.saturating_sub(pos).saturating_add(after);
             if let Some(better) = self.better_path(peer, kind, speed, remaining) {
+                info!(
+                    "path: {} at {:.1} MB/s, {} MB left: moving to {}",
+                    kind.name(),
+                    speed / 1e6,
+                    remaining / 1_000_000,
+                    better.name()
+                );
                 return better;
             }
-            if kind != LinkKind::Hotspot
-                && self.may_link(&peer)
-                && link::worth_switching(
-                    remaining,
-                    speed,
-                    self.hotspot_speed(&peer, speed),
-                    LINK_SETUP,
-                )
-            {
+            let hotspot = self.hotspot_speed(&peer, speed);
+            let may = kind != LinkKind::Hotspot && self.may_link(&peer);
+            let pays = link::worth_switching(remaining, speed, hotspot, LINK_SETUP);
+            info!(
+                "path: {} at {:.1} MB/s, {} MB left; direct link would do {:.1} MB/s, allowed now: {may}, pays: {pays}",
+                kind.name(),
+                speed / 1e6,
+                remaining / 1_000_000,
+                hotspot / 1e6
+            );
+            if may && pays {
                 self.start_link(peer);
             }
         }
@@ -363,12 +460,32 @@ impl Shared {
             })
     }
 
+    /// Any path to `peer` other than `current` (and not known dead), fastest
+    /// expected first: for when `current` has stopped moving.
+    fn other_path(&self, peer: Fingerprint, current: LinkKind) -> Option<LinkKind> {
+        let nets = link::local_nets();
+        let extra = self.state().extra.get(&peer).cloned().unwrap_or_default();
+        let dead = |kind: LinkKind| {
+            self.state()
+                .dead_paths
+                .get(&(peer, kind))
+                .is_some_and(|t| t.elapsed() < DEAD_PATH)
+        };
+        self.addrs_of(&peer)
+            .iter()
+            .filter_map(|a| self.kind_toward(&peer, &nets, a.ip(), &extra))
+            .find(|kind| *kind != current && !dead(*kind))
+    }
+
     /// What the hotspot would likely do for `peer`: as measured before, or
-    /// twice the router path (one hop over the air instead of two).
+    /// twice the router path (one hop over the air instead of two), but no
+    /// more than the modest guess for a hotspot. Phones often put their
+    /// hotspot on 2.4 GHz (about 10 MB/s) while on Wi-Fi themselves, so a
+    /// fast router path is never given up on a guess; a measurement decides.
     fn hotspot_speed(&self, peer: &Fingerprint, now: f64) -> f64 {
         self.speeds
             .measured(peer, LinkKind::Hotspot)
-            .unwrap_or(2.0 * now)
+            .unwrap_or_else(|| (2.0 * now).min(self.speeds.expected(peer, LinkKind::Hotspot)))
     }
 
     /// Whether this side should start setting up a hotspot with `peer` now:
@@ -397,11 +514,19 @@ impl Shared {
         self.state().link_tried.insert(peer, Instant::now());
         let shared = self.clone();
         tokio::spawn(async move {
-            let _ = if can_host(&shared.platform) {
+            let hosting = can_host(&shared.platform);
+            info!(
+                "link: setting up the hotspot ({})",
+                if hosting { "offering" } else { "asking" }
+            );
+            let result = if hosting {
                 shared.offer_link(peer).await
             } else {
                 shared.ask_link(peer).await
             };
+            if let Err(e) = result {
+                warn!("link: setup failed ({e})");
+            }
         });
     }
 
@@ -435,6 +560,7 @@ impl Shared {
                 .await
                 .map_err(|_| Error::NoAnswer)??;
         if reply != LinkReply::Ready {
+            info!("link: the other side said no ({reply:?})");
             return Ok(());
         }
         let answer = match self.host_link(peer).await {
@@ -495,7 +621,11 @@ impl Shared {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.state().hotspot_waits.insert(id, tx);
         self.emit(NodeEvent::HotspotWanted { id });
-        let info = tokio::time::timeout(HOST_WAIT, rx).await.ok()?.ok()??;
+        let Some(info) = tokio::time::timeout(HOST_WAIT, rx).await.ok()?.ok()? else {
+            warn!("link: the app couldn't start a hotspot");
+            return None;
+        };
+        info!("link: {} is up at {} MHz", info.ssid, info.mhz);
         // The hotspot's own address appears shortly after it starts.
         let mut addrs = Vec::new();
         for _ in 0..15 {
@@ -546,6 +676,10 @@ impl Shared {
             wpa3: hotspot.wpa3,
         });
         let joined = matches!(tokio::time::timeout(JOIN_WAIT, rx).await, Ok(Ok(true)));
+        info!(
+            "link: joining the hotspot {}",
+            if joined { "worked" } else { "failed" }
+        );
         if !joined {
             self.end_link(peer);
             return;
@@ -598,6 +732,7 @@ impl Shared {
             state.extra.remove(&peer);
             state.link.take().map(|l| l.role)
         };
+        info!("link: ending the direct link");
         self.emit(match role {
             Some(Role::Host) => NodeEvent::HotspotDone,
             _ => NodeEvent::LeaveWanted,

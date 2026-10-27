@@ -362,3 +362,137 @@ async fn tab_keeps_its_place_when_it_reconnects() {
     assert_ne!(field(&hello, "session"), session);
     assert_eq!(field(&hello, "name"), "iPhone 2");
 }
+
+/// The next transfer to fail: its ID and error.
+async fn failed(events: &mut UnboundedReceiver<NodeEvent>) -> (u64, String) {
+    wait_for(events, |e| match e {
+        NodeEvent::TransferFailed { id, error } => Some((*id, error.clone())),
+        NodeEvent::TransferDone { .. } => panic!("shouldn't finish"),
+        _ => None,
+    })
+    .await
+}
+
+/// Every way a send to or from a tab can be cancelled, from either end.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sends_can_be_cancelled_from_either_end() {
+    let (node, mut events, dir) = start().await;
+    let url = node.start_web_share().await.unwrap();
+    let (addr, path) = split(&url);
+    let mut tab = Events::open(&addr, &path, None).await;
+    let session = field(&tab.next("hello").await, "session");
+    let id: Fingerprint = session.parse().unwrap();
+    let small = dir.path().join("small.txt");
+    std::fs::write(&small, b"hello").unwrap();
+    let big = dir.path().join("big.bin");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(512 << 20)
+        .unwrap();
+
+    // Cancelled here while the page is still deciding: the offer goes.
+    let ids = node.send_files(id, vec![small.clone()]);
+    tab.next("offer").await;
+    assert!(node.cancel(ids[0]));
+    tab.next("withdrawn").await;
+    assert_eq!(failed(&mut events).await, (ids[0], "cancelled".into()));
+
+    // The page cancels what it accepted, before downloading it.
+    let ids = node.send_files(id, vec![small.clone(), big.clone()]);
+    let batch = field(&tab.next("offer").await, "batch");
+    let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
+    assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
+    tab.next("download").await;
+    let cancel_down = format!("{path}/cancel?s={session}&what=down");
+    assert_eq!(http(&addr, "POST", &cancel_down, b"").await.0, 200);
+    assert!(tab.next("cancelled").await.contains("\"by\":\"you\""));
+    for _ in 0..2 {
+        let (gone, error) = failed(&mut events).await;
+        assert!(ids.contains(&gone));
+        assert_eq!(error, "they cancelled");
+    }
+
+    // Cancelled here mid-download: the stream stops.
+    let ids = node.send_files(id, vec![big.clone()]);
+    let batch = field(&tab.next("offer").await, "batch");
+    let answer = format!("{path}/answer?s={session}&batch={batch}&accept=1");
+    assert_eq!(http(&addr, "POST", &answer, b"").await.0, 200);
+    tab.next("download").await;
+    let mut download = TcpStream::connect(&addr).await.unwrap();
+    let head = format!(
+        "GET {path}/f/{}?s={session} HTTP/1.1\r\nHost: {addr}\r\n\r\n",
+        ids[0]
+    );
+    download.write_all(head.as_bytes()).await.unwrap();
+    let mut some = vec![0u8; 1 << 20];
+    download.read_exact(&mut some).await.unwrap();
+    assert!(node.cancel(ids[0]));
+    assert!(tab.next("cancelled").await.contains("\"by\":\"them\""));
+    assert_eq!(failed(&mut events).await, (ids[0], "cancelled".into()));
+    let mut rest = Vec::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), download.read_to_end(&mut rest)).await;
+    assert!(read.is_ok(), "download still open");
+    assert!((rest.len() as u64) < 512 << 20);
+
+    // The page cancels its question before it's answered.
+    let ask = format!("{path}/ask?s={session}&count=1&size=5&name=x.txt");
+    let (ask_addr, ask_path) = (addr.clone(), ask.clone());
+    let asking = tokio::spawn(async move { http(&ask_addr, "POST", &ask_path, b"").await });
+    let question = wait_for(&mut events, |e| match e {
+        NodeEvent::OfferReceived { id, .. } => Some(*id),
+        _ => None,
+    })
+    .await;
+    let cancel_up = format!("{path}/cancel?s={session}&what=up");
+    assert_eq!(http(&addr, "POST", &cancel_up, b"").await.0, 200);
+    wait_for(&mut events, |e| match e {
+        NodeEvent::OfferClosed { id } if *id == question => Some(()),
+        _ => None,
+    })
+    .await;
+    assert!(String::from_utf8_lossy(&asking.await.unwrap().1).contains("cancelled"));
+
+    // Uploads, cancelled from either end.
+    for here in [false, true] {
+        let (ask_addr, ask_path) = (addr.clone(), ask.clone());
+        let asking = tokio::spawn(async move { http(&ask_addr, "POST", &ask_path, b"").await });
+        let question = wait_for(&mut events, |e| match e {
+            NodeEvent::OfferReceived { id, .. } => Some(*id),
+            _ => None,
+        })
+        .await;
+        node.answer_offer(question, true, false).unwrap();
+        asking.await.unwrap();
+        let mut up = TcpStream::connect(&addr).await.unwrap();
+        let size = 512u64 << 20;
+        let head = format!(
+            "POST {path}/u?s={session}&name=up.bin HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {size}\r\n\r\n"
+        );
+        up.write_all(head.as_bytes()).await.unwrap();
+        up.write_all(&vec![1u8; 1 << 20]).await.unwrap();
+        let started = wait_for(&mut events, |e| match e {
+            NodeEvent::TransferStarted { id, .. } => Some(*id),
+            _ => None,
+        })
+        .await;
+        if here {
+            assert!(node.cancel(started));
+            assert!(tab.next("cancelled").await.contains("\"what\":\"up\""));
+            assert_eq!(failed(&mut events).await, (started, "cancelled".into()));
+        } else {
+            assert_eq!(http(&addr, "POST", &cancel_up, b"").await.0, 200);
+            assert_eq!(
+                failed(&mut events).await,
+                (started, "they cancelled".into())
+            );
+        }
+        // Nothing kept, and no more uploads from that send.
+        let downloads = dir.path().join("downloads");
+        let kept: Vec<_> = std::fs::read_dir(&downloads)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect())
+            .unwrap_or_default();
+        assert!(kept.is_empty(), "{kept:?}");
+        let again = format!("{path}/u?s={session}&name=x.txt");
+        assert_eq!(http(&addr, "POST", &again, b"x").await.0, 403);
+    }
+}

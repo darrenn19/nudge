@@ -32,13 +32,19 @@ object Core {
 
     @JvmStatic external fun answerOffer(id: Long, accept: Boolean)
 
+    /** Stop a transfer and the rest of its send. */
+    @JvmStatic external fun cancel(id: Long)
+
     @JvmStatic external fun answerPair(id: Long, accept: Boolean)
 
     /** "usual", "ask" or "refuse". */
     @JvmStatic external fun setReceiving(mode: String)
 
-    /** Answer a "hotspotWanted" event; null [ssid] if the hotspot didn't start. */
-    @JvmStatic external fun hotspotReady(id: Long, ssid: String?, passphrase: String, wpa3: Boolean)
+    /**
+     * Answer a "hotspotWanted" event; null [ssid] if no direct link started.
+     * [mhz]: its frequency, 0 if unknown.
+     */
+    @JvmStatic external fun hotspotReady(id: Long, ssid: String?, passphrase: String, wpa3: Boolean, mhz: Int)
 
     @JvmStatic external fun warm(deviceId: String)
 

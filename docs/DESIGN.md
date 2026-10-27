@@ -21,7 +21,7 @@ Nudge's niche: **the fastest possible transfer with zero decisions**, by choosin
 | Path | Speed | Setup | Downsides |
 |---|---|---|---|
 | Router (shared Wi-Fi) | Slowest | Instant | Shares airtime; depends on router; blocked on networks with client isolation |
-| Direct (phone hotspot / Wi-Fi Direct) | ~2× router | ~3 s | Laptop briefly loses its normal Wi-Fi; permissions; Wi-Fi Direct flaky on Windows (local-only hotspot more reliable) |
+| Direct (phone hotspot / Wi-Fi Direct) | ~2× router | ~3 s | Laptop briefly loses its normal Wi-Fi; permissions; Windows' own Wi-Fi Direct stack is flaky, so the PC joins the phone's Wi-Fi Direct group as an ordinary Wi-Fi client (by name and passphrase, via `netsh`). Phones keep that group on 5 GHz, where a local-only hotspot often drops to 2.4 GHz; the hotspot is the fallback |
 | USB-C (USB 3) | Fastest (hundreds of MB/s; usually storage-limited) | Plug in | Needs a USB 3 cable; not available on iPhone |
 
 The **start-then-upgrade** strategy gets the best of all: instant start for small files, automatic move to the fastest path for large ones, no probe time wasted (the probe *is* the start of the transfer). Google Quick Share uses a similar upgrade-mid-transfer approach.

@@ -41,11 +41,22 @@ impl LinkKind {
         }
     }
 
+    /// The name in the speeds file. The direct link was once only a
+    /// local-only hotspot, which phones put on 2.4 GHz; its speeds were
+    /// stored as "hotspot" and say nothing about today's 5 GHz Wi-Fi Direct
+    /// group, so they're left behind.
+    fn stored_name(self) -> &'static str {
+        match self {
+            Self::Hotspot => "direct",
+            other => other.name(),
+        }
+    }
+
     fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "usb" => Self::Usb,
             "wired" => Self::Wired,
-            "hotspot" => Self::Hotspot,
+            "direct" => Self::Hotspot,
             "wifi" => Self::Wifi,
             "other" => Self::Other,
             _ => return None,
@@ -79,12 +90,14 @@ pub fn classify(interface: &str) -> LinkKind {
     {
         LinkKind::Usb
     } else if n.starts_with("swlan")
+        || n.starts_with("p2p")
         || n.starts_with("softap")
         || n.starts_with("ap_")
         || numbered("ap")
         || (numbered("wlan") && n != "wlan0")
     {
-        // The phone's own access point (Samsung swlan0, Pixel wlan1, ap0).
+        // The phone's own access point (Samsung swlan0, Pixel wlan1, ap0),
+        // or the Wi-Fi Direct group it owns (p2p-wlan0-0).
         LinkKind::Hotspot
     } else if n.starts_with("wlan")
         || n.starts_with("wl")
@@ -221,7 +234,7 @@ impl Speeds {
             known.insert((peer, kind), blended);
             let mut text = String::from("# Measured speeds: device, path, bytes per second.\n");
             for ((fp, kind), speed) in known.iter() {
-                text.push_str(&format!("{fp} {} {speed:.0}\n", kind.name()));
+                text.push_str(&format!("{fp} {} {speed:.0}\n", kind.stored_name()));
             }
             text
         };
@@ -247,6 +260,8 @@ mod tests {
         assert_eq!(classify("swlan0"), LinkKind::Hotspot);
         assert_eq!(classify("wlan1"), LinkKind::Hotspot);
         assert_eq!(classify("ap0"), LinkKind::Hotspot);
+        assert_eq!(classify("p2p-wlan0-0"), LinkKind::Hotspot);
+        assert_eq!(classify("p2p0"), LinkKind::Hotspot);
         assert_eq!(classify("Ethernet 3"), LinkKind::Wired);
         assert_eq!(classify("eth0"), LinkKind::Wired);
         assert_eq!(classify("rmnet_data0"), LinkKind::Other);
@@ -296,7 +311,23 @@ mod tests {
         assert_eq!(speeds.measured(&fp, LinkKind::Wifi), None);
         speeds.record(fp, LinkKind::Wifi, 100_000_000, Duration::from_secs(10));
         speeds.record(fp, LinkKind::Wifi, 1_000, Duration::from_secs(1)); // too short
+        speeds.record(fp, LinkKind::Hotspot, 100_000_000, Duration::from_secs(4));
         let again = Speeds::load(dir.path());
         assert_eq!(again.measured(&fp, LinkKind::Wifi), Some(10_000_000.0));
+        assert_eq!(again.measured(&fp, LinkKind::Hotspot), Some(25_000_000.0));
+    }
+
+    #[test]
+    fn forgets_old_hotspot_speeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let fp = Fingerprint::from_bytes([3; 32]);
+        std::fs::write(
+            dir.path().join(Speeds::FILE),
+            format!("{fp} hotspot 9000000\n{fp} wifi 20000000\n"),
+        )
+        .unwrap();
+        let speeds = Speeds::load(dir.path());
+        assert_eq!(speeds.measured(&fp, LinkKind::Hotspot), None);
+        assert_eq!(speeds.measured(&fp, LinkKind::Wifi), Some(20_000_000.0));
     }
 }

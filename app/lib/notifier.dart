@@ -165,6 +165,7 @@ class TransferNotifier {
         title: title,
         text: text,
         progress: size == 0 || bytes == 0 ? -1 : (bytes * 100 ~/ size),
+        ids: [for (final t in running) t.id],
       ),
     );
   }

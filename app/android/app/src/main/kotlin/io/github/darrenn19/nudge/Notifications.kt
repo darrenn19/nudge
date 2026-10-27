@@ -69,8 +69,11 @@ object Notifications {
         PendingIntent.FLAG_IMMUTABLE,
     )
 
-    /** The ongoing notification shown while files are moving. [progress] is 0–100, or -1 if unknown. */
-    fun progress(context: Context, title: String, text: String, progress: Int): Notification =
+    /**
+     * The ongoing notification shown while files are moving. [progress] is
+     * 0–100, or -1 if unknown. Its Cancel stops [ids].
+     */
+    fun progress(context: Context, title: String, text: String, progress: Int, ids: LongArray): Notification =
         NotificationCompat.Builder(context, TRANSFERS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
@@ -81,7 +84,17 @@ object Notifications {
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setContentIntent(openApp(context))
+            .addAction(0, "Cancel", cancel(context, ids))
             .build()
+
+    private fun cancel(context: Context, ids: LongArray): PendingIntent = PendingIntent.getBroadcast(
+        context,
+        CANCEL_REQUEST,
+        Intent(context, CancelReceiver::class.java).putExtra(CancelReceiver.EXTRA_IDS, ids),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
+    private const val CANCEL_REQUEST = 1900
 
     /** "Received photo.jpg from Laptop", with an action that opens the file. */
     /**

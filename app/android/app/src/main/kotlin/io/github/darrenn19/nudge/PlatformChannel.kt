@@ -62,6 +62,8 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                     call.argument<String>("title") ?: "Nudge",
                     call.argument<String>("text") ?: "",
                     call.argument<Int>("progress") ?: -1,
+                    // Dart sends small IDs as Int and big ones as Long.
+                    (call.argument<List<Number>>("ids") ?: emptyList()).map { it.toLong() }.toLongArray(),
                 )
                 result.success(null)
             }
