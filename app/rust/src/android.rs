@@ -143,7 +143,9 @@ fn event_json(event: &AppEvent) -> Option<Value> {
             path,
             mime,
         } => json!({"type": "clipboardImage", "device": device_id, "path": path, "mime": mime}),
-        AppEvent::HotspotWanted { id } => json!({"type": "hotspotWanted", "id": id}),
+        AppEvent::HotspotWanted { id, direct_only } => {
+            json!({"type": "hotspotWanted", "id": id, "directOnly": direct_only})
+        }
         AppEvent::HotspotDone => json!({"type": "hotspotDone"}),
         AppEvent::MirrorAsked { id, device_id } => {
             json!({"type": "mirrorAsked", "id": id, "device": device_id})

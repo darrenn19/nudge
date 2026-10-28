@@ -15,6 +15,11 @@ pub(super) const FRAGMENT: u8 = 3;
 pub(super) const NACK: u8 = 4;
 pub(super) const KEY_REQUEST: u8 = 5;
 pub(super) const BYE: u8 = 6;
+/// "My addresses now": sent every second, so a network that appears during
+/// a session (a cable plugged in, the phone's hotspot joined) becomes a path.
+pub(super) const ADDRS: u8 = 7;
+/// Most addresses in one `ADDRS`.
+pub(super) const MAX_ADDRS: usize = 16;
 
 /// Fragment flags.
 pub(super) const F_KEY: u8 = 1;
@@ -38,6 +43,7 @@ pub(super) enum Message<'a> {
     Nack { stream: u8, frame: u32, missing: Option<Vec<u16>> },
     KeyRequest { stream: u8 },
     Bye,
+    Addrs(Vec<std::net::Ipv4Addr>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +107,16 @@ pub(super) fn bye() -> Vec<u8> {
     vec![BYE]
 }
 
+/// kind, count u8, count × IPv4.
+pub(super) fn addrs(ips: &[std::net::Ipv4Addr]) -> Vec<u8> {
+    let ips = &ips[..ips.len().min(MAX_ADDRS)];
+    let mut m = vec![ADDRS, ips.len() as u8];
+    for ip in ips {
+        m.extend_from_slice(&ip.octets());
+    }
+    m
+}
+
 fn u16_at(b: &[u8], i: usize) -> u16 {
     u16::from_be_bytes([b[i], b[i + 1]])
 }
@@ -152,6 +168,14 @@ pub(super) fn parse(m: &[u8]) -> Option<Message<'_>> {
         }
         KEY_REQUEST if !b.is_empty() => Message::KeyRequest { stream: b[0] },
         BYE => Message::Bye,
+        ADDRS if !b.is_empty() => {
+            let n = (b[0] as usize).min(MAX_ADDRS).min((b.len() - 1) / 4);
+            Message::Addrs(
+                (0..n)
+                    .map(|i| std::net::Ipv4Addr::new(b[1 + i * 4], b[2 + i * 4], b[3 + i * 4], b[4 + i * 4]))
+                    .collect(),
+            )
+        }
         _ => return None,
     })
 }
@@ -184,6 +208,8 @@ mod tests {
         );
         assert_eq!(parse(&key_request(3)), Some(Message::KeyRequest { stream: 3 }));
         assert_eq!(parse(&bye()), Some(Message::Bye));
+        let ips = vec![[192, 168, 49, 1].into(), [10, 0, 0, 7].into()];
+        assert_eq!(parse(&addrs(&ips)), Some(Message::Addrs(ips)));
     }
 
     #[test]

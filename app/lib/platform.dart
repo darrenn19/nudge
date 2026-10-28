@@ -247,6 +247,12 @@ Future<void> askToRunInBackground() async {
 
 /// Android: whether the "Send latest" tile may send while the phone is
 /// locked (off unless turned on; then the phone asks to unlock first).
+/// Android: show this phone's screen on a paired device (Android asks
+/// first; then a notification shows it's being shared, with Stop).
+Future<void> showScreenOn(String deviceId) async {
+  if (Platform.isAndroid) await _channel.invokeMethod('showScreenOn', {'device': deviceId});
+}
+
 Future<bool> latestTileWhileLocked() async {
   if (!Platform.isAndroid) return false;
   return await _channel.invokeMethod<bool>('latestTileWhileLocked') ?? false;

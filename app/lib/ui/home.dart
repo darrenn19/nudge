@@ -569,6 +569,15 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  /// Windows: ask to see [d]'s screen; it opens in a window of its own.
+  Future<void> _mirror(DeviceInfo d) async {
+    showToast(context, 'Asking ${d.name}: tap Allow on the phone', icon: CupertinoIcons.device_phone_portrait);
+    final problem = await controller.mirror(d);
+    if (problem != null && mounted) {
+      showToast(context, "Couldn't show ${d.name}'s screen: $problem", icon: CupertinoIcons.xmark_circle);
+    }
+  }
+
   Future<void> _deviceMenu(DeviceInfo d) async {
     if (!d.paired || DateTime.now().isBefore(_quietUntil)) return;
     await showMenuSheet(
@@ -586,6 +595,20 @@ class _HomeScreenState extends State<HomeScreen> {
           icon: CupertinoIcons.folder,
           onTap: () => unawaited(_sendFolderTo(d)),
         ),
+        // Screen mirroring: a PC sees a phone's screen (its user is asked);
+        // a phone shows its own on a PC.
+        if (!isPhone && d.platform == 'android')
+          MenuItem(
+            label: 'Show its screen',
+            icon: CupertinoIcons.device_phone_portrait,
+            onTap: () => unawaited(_mirror(d)),
+          ),
+        if (isPhone && d.platform == 'windows')
+          MenuItem(
+            label: 'Show my screen on ${d.name}',
+            icon: CupertinoIcons.rectangle_on_rectangle,
+            onTap: () => unawaited(showScreenOn(d.id)),
+          ),
         MenuItem(
           label: 'Always accept files',
           icon: CupertinoIcons.checkmark_shield,

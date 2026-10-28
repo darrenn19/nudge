@@ -728,6 +728,17 @@ class NudgeController extends ChangeNotifier {
     }
   }
 
+  /// Windows: see [d]'s screen in a window of its own. Its user is asked
+  /// first. Returns null once it's showing, or why not.
+  Future<String?> mirror(DeviceInfo d) async {
+    try {
+      await app.mirrorDevice(deviceId: d.id);
+      return null;
+    } catch (e) {
+      return '$e'.replaceFirst(RegExp(r'^[^:]*Exception: ?'), '');
+    }
+  }
+
   /// Send clipboard text to every paired device that syncs it. Returns the
   /// names of the devices it reached. Text that just arrived from one of
   /// them isn't sent back.

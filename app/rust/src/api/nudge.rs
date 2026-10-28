@@ -180,6 +180,9 @@ pub enum AppEvent {
     /// Android: start the hotspot for a direct link, then `hotspot_ready`.
     HotspotWanted {
         id: i64,
+        /// For screen mirroring: only a Wi-Fi Direct group, never a
+        /// local-only hotspot.
+        direct_only: bool,
     },
     /// Android: stop that hotspot.
     HotspotDone,
@@ -294,7 +297,10 @@ impl From<NodeEvent> for AppEvent {
                     mime,
                 }
             }
-            NodeEvent::HotspotWanted { id } => Self::HotspotWanted { id: id as i64 },
+            NodeEvent::HotspotWanted { id, direct_only } => Self::HotspotWanted {
+                id: id as i64,
+                direct_only,
+            },
             NodeEvent::HotspotDone => Self::HotspotDone,
             NodeEvent::JoinWanted {
                 id,
@@ -387,7 +393,19 @@ pub(crate) async fn start_core(config: NodeConfig) -> Result<Arc<Core>> {
                     match &event {
                         // Pacing the real-time channel needs ~1 ms timers;
                         // Windows gives ~16 ms unless asked.
-                        NodeEvent::MirrorStarted { id, .. } => timer.hold(*id),
+                        NodeEvent::MirrorStarted { id, peer, role } => {
+                            timer.hold(*id);
+                            // The phone offered its screen: show it. (One this
+                            // device asked for is shown by `mirror_device`.)
+                            #[cfg(windows)]
+                            if *role == MirrorRole::Viewing
+                                && let Some(session) = delivering.node.take_mirror(*id)
+                            {
+                                crate::mirror::show(session, mirror_title(&delivering.node, peer));
+                            }
+                            #[cfg(not(windows))]
+                            let _ = (peer, role);
+                        }
                         NodeEvent::MirrorEnded { id } => timer.release(*id),
                         // Sharing this computer's screen isn't built yet:
                         // say no at once rather than leave it waiting.
@@ -674,6 +692,26 @@ impl NudgeApp {
         });
     }
 
+    /// Windows: see a paired phone's screen in a window of its own. The
+    /// phone's user is asked first; returns once they've agreed (or with
+    /// why not: "they declined", "the other device is locked"...).
+    pub async fn mirror_device(&self, device_id: String) -> Result<()> {
+        let peer = parse_id(&device_id)?;
+        let node = self.node.clone();
+        let (_, session) = runtime()
+            .spawn(async move {
+                node.start_mirror(peer, MirrorRole::Viewing, nudge_core::realtime::Config::default())
+                    .await
+            })
+            .await
+            .context("Nudge runtime stopped")??;
+        #[cfg(windows)]
+        crate::mirror::show(session, mirror_title(&self.node, &peer));
+        #[cfg(not(windows))]
+        drop(session);
+        Ok(())
+    }
+
     /// Answer `AppEvent::MirrorAsked`.
     #[frb(sync)]
     pub fn answer_mirror(&self, id: i64, accept: bool) {
@@ -789,4 +827,13 @@ fn route_name(kind: LinkKind) -> &'static str {
 
 pub(crate) fn parse_id(id: &str) -> Result<Fingerprint> {
     Ok(id.parse()?)
+}
+
+/// The mirror window's title: the device's name.
+#[cfg(windows)]
+fn mirror_title(node: &Node, peer: &Fingerprint) -> String {
+    node.peers()
+        .into_iter()
+        .find(|p| p.fingerprint == *peer)
+        .map_or_else(|| "Nudge".into(), |p| format!("{} - Nudge", p.device_name))
 }

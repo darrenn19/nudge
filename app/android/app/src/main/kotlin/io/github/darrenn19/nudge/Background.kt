@@ -113,14 +113,13 @@ object Background : Core.Listener {
                 "Only allow devices you trust",
                 mirror = true,
             )
-            "mirrorStarted" -> if (e.getBoolean("sharing")) {
-                Notifications.sharing(context, id, name(e.getString("device")))
-            }
-            "mirrorEnded" -> Notifications.sharingEnded(context, id)
+            // MirrorService captures the screen and shows "being shared".
+            "mirrorStarted" -> if (e.getBoolean("sharing")) MirrorService.onStarted(id, e.getString("device"))
+            "mirrorEnded" -> MirrorService.onEnded(id)
             "offerClosed" -> Notifications.cancelOffer(context, id)
             "clipboard" -> ClipSync.set(context, e.getString("text"))
             "clipboardImage" -> ClipSync.setImage(context, java.io.File(e.getString("path")), e.getString("mime"))
-            "hotspotWanted" -> Hotspot.start(context) { h ->
+            "hotspotWanted" -> Hotspot.start(context, directOnly = e.optBoolean("directOnly")) { h ->
                 Core.hotspotReady(
                     id,
                     h?.get("ssid") as String?,

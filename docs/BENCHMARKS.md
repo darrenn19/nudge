@@ -159,6 +159,19 @@ What this says:
 - Tried and no effect: the PC sending a tiny packet every 5 ms (to stop its Wi-Fi from dozing). Wi-Fi "media streaming mode" (`WlanSetInterface`) is on in the spike but not shown to help here.
 - What's left: the first frame (window, decoder and encoder starting: 220–260 ms, once per session), occasional phone encoder hiccups (a few frames up to 70–140 ms), and the PC waiting for the display's next refresh (draw p95 ~12 ms).
 
+## Mirroring in the app (mirroring step 4)
+
+2026-10-28, the real apps (not the spike): S24 `MirrorService` → core real-time session (encrypted, NACK recovery, pacing) → the Windows app's mirror window. Capture to screen, before display time, from the PC log's 10-second reports. Phone showing the spike's clock (changes every frame) unless noted.
+
+| Path | fps | Median | p95 | p99 | Max | Notes |
+|---|---|---|---|---|---|---|
+| USB cable, 60 s steady | 60 | 16-19 | 18-21 | 20-31 | 34 | phone side (encode + network) ~14 ms; PC side 1-8 ms, drifting with the monitor's refresh |
+| Cable pulled out mid-session | 41-60 | 18 | 27 | 42 | 50 | moved to Wi-Fi by itself |
+| Wi-Fi, local-only hotspot (fallback; no longer used) | 36-50 | 52-68 | 300-470 | 430-510 | 525 | 406 frames given up: why mirroring is Wi-Fi Direct only |
+| Wi-Fi, Wi-Fi Direct (link set up before the stream) | 42-60 | 22-30 | 29-42 | 34-47 | 72-76 | plus one 255 ms at the start and one 221 ms on the PC side |
+
+Notes: the app beats the spike over the cable (16-19 vs ~24 ms median) because pacing and recovery moved into the core and the window and decoder open before the first frame. Rotation re-creates the encoder; the PC shows the turned picture ~0.25 s later.
+
 ## Real-time channel, one PC (mirroring step 2)
 
 2026-10-28, `nudge mirror-bench` (both ends in one process, real TLS + UDP over this PC's Wi-Fi address), 30 Mbit/s, 60 fps, 6 s, keyframe (~500 KB) every 120 frames, `--drop` throwing away fragments on arrival. Latency is send-to-arrival (pacing + network + recovery), no encoder or display.

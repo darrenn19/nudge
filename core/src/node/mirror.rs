@@ -57,6 +57,8 @@ pub(super) struct Mirrors {
     /// Questions waiting for this device's user, by ID.
     asks: HashMap<u64, (Fingerprint, oneshot::Sender<bool>)>,
     running: HashMap<u64, Running>,
+    /// Devices this one is asking to mirror with, until they answer.
+    starting: std::collections::HashSet<Fingerprint>,
 }
 
 struct Running {
@@ -83,6 +85,23 @@ impl Node {
         }
         if role == MirrorRole::Sharing && shared.screen_locked.load(Ordering::Relaxed) {
             return Err(Error::ScreenLocked);
+        }
+        shared.mirrors().starting.insert(peer);
+        let started = Self::ask_to_mirror(shared, peer, role, config).await;
+        shared.mirrors().starting.remove(&peer);
+        started
+    }
+
+    async fn ask_to_mirror(
+        shared: &Arc<Shared>,
+        peer: Fingerprint,
+        role: MirrorRole,
+        config: Config,
+    ) -> Result<(u64, Session)> {
+        // Over Wi-Fi, onto the direct link first (the PC changing networks
+        // mid-stream would freeze the picture for seconds).
+        if role == MirrorRole::Viewing {
+            shared.link_up_for_mirror(peer).await;
         }
         let mut stream = connect_any(&shared.tls, &shared.addrs_of(&peer), peer).await?;
         match role {
@@ -192,6 +211,14 @@ impl Shared {
         self.mirrors.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// A session with `peer` is running, or being asked for.
+    pub(super) fn mirroring_with(&self, peer: &Fingerprint) -> bool {
+        let m = self.mirrors();
+        m.starting.contains(peer)
+            || m.asks.values().any(|(p, _)| p == peer)
+            || m.running.values().any(|r| r.peer == *peer && !r.handle.is_closed())
+    }
+
     /// A `Mirror` request from a paired device.
     pub(super) async fn answer_mirror_request<S: Control>(
         self: &Arc<Self>,
@@ -270,6 +297,7 @@ impl Shared {
             },
         );
         self.emit(NodeEvent::MirrorStarted { id, peer, role });
+        self.link_for_mirror(peer);
         let shared = self.clone();
         tokio::spawn(async move {
             if waits {

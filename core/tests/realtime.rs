@@ -142,3 +142,62 @@ async fn a_failed_decoder_gets_a_keyframe() {
         .unwrap();
     collect(&mut phone, 5, |e| *e == Event::KeyframeRequested { stream: 0 }).await;
 }
+
+/// The TLS connection breaks mid-session (its network went away: a cable
+/// pulled out, the PC moved to the phone's hotspot). Frames keep flowing over
+/// UDP, and hanging up still reaches the other side.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_broken_setup_connection_doesnt_end_the_session() {
+    let (laptop_tls, phone_tls) = paired_tls();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    // A relay between the two, killed later with a reset.
+    let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let relay_addr = relay.local_addr().unwrap();
+    let (kill, killed) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        let (a, _) = relay.accept().await.unwrap();
+        let b = TcpStream::connect(addr).await.unwrap();
+        let (mut a2, mut b2) = (a, b);
+        tokio::select! {
+            _ = tokio::io::copy_bidirectional(&mut a2, &mut b2) => {}
+            _ = killed => {
+                // Reset rather than close: like a network that vanished.
+                let _ = socket2::SockRef::from(&a2).set_linger(Some(Duration::ZERO));
+                let _ = socket2::SockRef::from(&b2).set_linger(Some(Duration::ZERO));
+            }
+        }
+    });
+    let accepting = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let (stream, _) = phone_tls.accept(tcp).await.unwrap();
+        Session::accept(stream, Config::default()).await.unwrap()
+    });
+    let (stream, _) = laptop_tls.connect(TcpStream::connect(relay_addr).await.unwrap()).await.unwrap();
+    let mut laptop = Session::open(stream, Config::default()).await.unwrap();
+    let phone = accepting.await.unwrap();
+    collect(&mut laptop, 5, |e| matches!(e, Event::PathChanged(Some(_)))).await;
+
+    kill.send(()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let frame = |i: u8| OutFrame {
+        stream: 0,
+        data: vec![i; 3_000],
+        key: i == 0,
+        intra_refresh: false,
+        capture_us: 0,
+    };
+    for i in 0..3 {
+        phone.send(frame(i)).unwrap();
+    }
+    let mut got = 0;
+    collect(&mut laptop, 5, |e| {
+        got += matches!(e, Event::Frame(_)) as u32;
+        got == 3
+    })
+    .await;
+
+    // Hanging up still gets through (as a bye over UDP).
+    drop(phone);
+    collect(&mut laptop, 5, |e| *e == Event::Closed).await;
+}

@@ -41,6 +41,10 @@ class PlatformChannel(private val context: Context) : MethodChannel.MethodCallHa
                 result.success(null)
             }
             "latestTileWhileLocked" -> result.success(Latest.whileLocked(context))
+            "showScreenOn" -> {
+                MirrorConsentActivity.showOn(context, call.argument<String>("device") ?: "")
+                result.success(null)
+            }
             "setLatestTileWhileLocked" -> {
                 Latest.setWhileLocked(context, call.argument<Boolean>("on") == true)
                 result.success(null)

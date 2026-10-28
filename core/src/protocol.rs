@@ -178,6 +178,7 @@ impl Request {
             KIND_LINK => match r.read_u8().await? {
                 1 => Ok(Self::Link(Link::Ask)),
                 2 => Ok(Self::Link(Link::Offer)),
+                3 => Ok(Self::Link(Link::AskDirect)),
                 _ => Err(Error::Protocol("unknown link request")),
             },
             KIND_MIRROR => match r.read_u8().await? {
@@ -324,6 +325,11 @@ pub enum Link {
     Ask,
     /// "I'll start my hotspot: will you join it?"
     Offer,
+    /// Like `Ask`, for screen mirroring: only a Wi-Fi Direct network on the
+    /// phone's own channel will do. A slower hotspot (often 2.4 GHz, or a
+    /// second channel the radio hops to) is worse than the router for live
+    /// video. Builds from before it refuse it.
+    AskDirect,
 }
 
 impl Link {
@@ -333,6 +339,7 @@ impl Link {
         buf.push(match self {
             Self::Ask => 1,
             Self::Offer => 2,
+            Self::AskDirect => 3,
         });
         w.write_all(&buf).await?;
         w.flush().await?;
@@ -927,7 +934,7 @@ mod tests {
 
     #[tokio::test]
     async fn link_messages_round_trip() {
-        for link in [Link::Ask, Link::Offer] {
+        for link in [Link::Ask, Link::Offer, Link::AskDirect] {
             let mut buf = Vec::new();
             link.write_to(&mut buf).await.unwrap();
             assert_eq!(

@@ -156,6 +156,13 @@ class MirrorSpikeActivity : Activity() {
             }
         }
         if (intent?.getBooleanExtra("hotspotStop", false) == true) io.github.darrenn19.nudge.Hotspot.stop()
+        // The app's real mirroring (not the spike): show this screen on a
+        // paired device, as its "Show my screen on ..." does. --es showOn <device id>
+        intent?.getStringExtra("showOn")?.let {
+            io.github.darrenn19.nudge.MirrorConsentActivity.showOn(this, it)
+            finish()
+            return
+        }
         if (intent?.getBooleanExtra("auto", false) == true) root.post { start.performClick() }
     }
 

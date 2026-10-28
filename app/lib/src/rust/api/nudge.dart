@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'nudge.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `deliver`, `into_outgoing`, `parse_id`, `route_name`, `running_core`, `runtime`, `set_native`, `start_core`, `take_early`
+// These functions are ignored because they are not marked as `pub`: `deliver`, `into_outgoing`, `mirror_title`, `parse_id`, `route_name`, `running_core`, `runtime`, `set_native`, `start_core`, `take_early`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
@@ -65,6 +65,11 @@ abstract class NudgeApp implements RustOpaqueInterface {
 
   /// Answer `AppEvent::JoinWanted`.
   void joined({required PlatformInt64 id, required bool ok});
+
+  /// Windows: see a paired phone's screen in a window of its own. The
+  /// phone's user is asked first; returns once they've agreed (or with
+  /// why not: "they declined", "the other device is locked"...).
+  Future<void> mirrorDevice({required String deviceId});
 
   /// Pair with the device showing `code` (scanned or pasted).
   Future<DeviceInfo> pair({required String code});
@@ -259,8 +264,13 @@ sealed class AppEvent with _$AppEvent {
   }) = AppEvent_ClipboardImageReceived;
 
   /// Android: start the hotspot for a direct link, then `hotspot_ready`.
-  const factory AppEvent.hotspotWanted({required PlatformInt64 id}) =
-      AppEvent_HotspotWanted;
+  const factory AppEvent.hotspotWanted({
+    required PlatformInt64 id,
+
+    /// For screen mirroring: only a Wi-Fi Direct group, never a
+    /// local-only hotspot.
+    required bool directOnly,
+  }) = AppEvent_HotspotWanted;
 
   /// Android: stop that hotspot.
   const factory AppEvent.hotspotDone() = AppEvent_HotspotDone;

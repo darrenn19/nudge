@@ -81,6 +81,23 @@ impl Paths {
         }
     }
 
+    /// What kind of path `remote` is, as this side's networks change.
+    pub(super) fn set_kind(&mut self, remote: SocketAddr, kind: LinkKind) {
+        if let Some(p) = self.list.iter_mut().find(|p| p.remote == remote) {
+            p.kind = kind;
+        }
+    }
+
+    /// Every path's address.
+    pub(super) fn remotes(&self) -> Vec<SocketAddr> {
+        self.list.iter().map(|p| p.remote).collect()
+    }
+
+    /// The paths that are alive.
+    pub(super) fn alive(&self, now: u64) -> Vec<SocketAddr> {
+        self.list.iter().filter(|p| p.alive(now)).map(|p| p.remote).collect()
+    }
+
     pub(super) fn knows(&self, remote: SocketAddr) -> bool {
         self.list.iter().any(|p| p.remote == remote)
     }

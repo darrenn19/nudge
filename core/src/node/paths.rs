@@ -351,7 +351,7 @@ impl Shared {
                     now / 1e6,
                     direct / 1e6
                 );
-                self.start_link(peer);
+                self.start_link(peer, false);
             }
         }
         let mut tick = tokio::time::interval(CHECK_EVERY);
@@ -428,7 +428,7 @@ impl Shared {
                 hotspot / 1e6
             );
             if may && pays {
-                self.start_link(peer);
+                self.start_link(peer, false);
             }
         }
     }
@@ -509,8 +509,53 @@ impl Shared {
                 .is_some_and(|t| t.elapsed() < LINK_RETRY)
     }
 
-    /// Set up the hotspot with `peer`, in the background.
-    fn start_link(self: &Arc<Self>, peer: Fingerprint) {
+    /// A screen-mirroring session started with `peer`. Over Wi-Fi, bring up
+    /// the direct link: through the router Wi-Fi pauses for 50-300 ms now
+    /// and then, on the direct link the worst is ~50 ms (docs/BENCHMARKS.md).
+    /// Not over a cable or Ethernet, which are better still. Only the side
+    /// that joins (the PC) starts it, so the two don't both try. The session
+    /// moves onto the link by itself (`realtime`: new addresses become paths).
+    pub(super) fn link_for_mirror(self: &Arc<Self>, peer: Fingerprint) {
+        if !can_join(&self.platform) || !self.may_link(&peer) {
+            return;
+        }
+        let nets = link::local_nets();
+        let wired = self.addrs_of(&peer).iter().any(|a| {
+            matches!(link::kind_toward(&nets, a.ip()), Some(LinkKind::Usb | LinkKind::Wired))
+        });
+        if !wired {
+            info!("link: for mirroring");
+            self.start_link(peer, true);
+        }
+    }
+
+    /// Before asking `peer` to show its screen over Wi-Fi: move onto the
+    /// direct link first, so the picture doesn't freeze for the seconds the
+    /// PC takes to change networks once it's running. Returns once joined,
+    /// or straight away if there's nothing to do (a cable, not allowed,
+    /// tried lately), or when it didn't work (mirroring then goes through
+    /// the router).
+    pub(super) async fn link_up_for_mirror(self: &Arc<Self>, peer: Fingerprint) {
+        if !can_join(&self.platform) || !self.may_link(&peer) {
+            return;
+        }
+        let nets = link::local_nets();
+        let wired = self.addrs_of(&peer).iter().any(|a| {
+            matches!(link::kind_toward(&nets, a.ip()), Some(LinkKind::Usb | LinkKind::Wired))
+        });
+        if wired {
+            return;
+        }
+        info!("link: for mirroring, before it starts");
+        self.state().link_tried.insert(peer, Instant::now());
+        if let Err(e) = self.ask_link(peer, true).await {
+            warn!("link: setup failed ({e})");
+        }
+    }
+
+    /// Set up the hotspot with `peer`, in the background. `direct_only`:
+    /// for mirroring (see `Link::AskDirect`).
+    fn start_link(self: &Arc<Self>, peer: Fingerprint, direct_only: bool) {
         self.state().link_tried.insert(peer, Instant::now());
         let shared = self.clone();
         tokio::spawn(async move {
@@ -522,7 +567,7 @@ impl Shared {
             let result = if hosting {
                 shared.offer_link(peer).await
             } else {
-                shared.ask_link(peer).await
+                shared.ask_link(peer, direct_only).await
             };
             if let Err(e) = result {
                 warn!("link: setup failed ({e})");
@@ -531,9 +576,9 @@ impl Shared {
     }
 
     /// The PC side: ask the phone to start its hotspot, then join it.
-    async fn ask_link(self: &Arc<Self>, peer: Fingerprint) -> Result<()> {
+    async fn ask_link(self: &Arc<Self>, peer: Fingerprint, direct_only: bool) -> Result<()> {
         let mut stream = connect_any(&self.tls, &self.addrs_of(&peer), peer).await?;
-        Link::Ask.write_to(&mut stream).await?;
+        if direct_only { Link::AskDirect } else { Link::Ask }.write_to(&mut stream).await?;
         let reply = tokio::time::timeout(
             HOST_WAIT + Duration::from_secs(10),
             LinkReply::read_from(&mut stream),
@@ -563,7 +608,7 @@ impl Shared {
             info!("link: the other side said no ({reply:?})");
             return Ok(());
         }
-        let answer = match self.host_link(peer).await {
+        let answer = match self.host_link(peer, false).await {
             Some(hotspot) => LinkReply::Join(hotspot),
             None => LinkReply::Refused,
         };
@@ -586,9 +631,9 @@ impl Shared {
     {
         let allowed = self.direct_link.load(Ordering::Relaxed) && self.state().link.is_none();
         match request {
-            Link::Ask if allowed && can_host(&self.platform) => {
+            Link::Ask | Link::AskDirect if allowed && can_host(&self.platform) => {
                 self.state().link_tried.insert(peer, Instant::now());
-                let reply = match self.host_link(peer).await {
+                let reply = match self.host_link(peer, request == Link::AskDirect).await {
                     Some(hotspot) => LinkReply::Join(hotspot),
                     None => LinkReply::Refused,
                 };
@@ -615,12 +660,12 @@ impl Shared {
     }
 
     /// Have the app start a hotspot; returns how to join it.
-    async fn host_link(self: &Arc<Self>, peer: Fingerprint) -> Option<Hotspot> {
+    async fn host_link(self: &Arc<Self>, peer: Fingerprint, direct_only: bool) -> Option<Hotspot> {
         let before: Vec<_> = link::local_nets().iter().map(|n| n.ip).collect();
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.state().hotspot_waits.insert(id, tx);
-        self.emit(NodeEvent::HotspotWanted { id });
+        self.emit(NodeEvent::HotspotWanted { id, direct_only });
         let Some(info) = tokio::time::timeout(HOST_WAIT, rx).await.ok()?.ok()? else {
             warn!("link: the app couldn't start a hotspot");
             return None;
@@ -708,6 +753,8 @@ impl Shared {
                     let busy = state.active.values().any(|a| a.peer == peer);
                     (current, busy)
                 };
+                // Mirroring keeps it up for as long as it runs.
+                let busy = busy || shared.mirroring_with(&peer);
                 if !current {
                     return;
                 }

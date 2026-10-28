@@ -33,9 +33,16 @@ const MAX_CATCH_UP_US: u64 = 20_000;
 const POLL_US: u64 = 2_000;
 /// Clock samples older than this are forgotten.
 const CLOCK_WINDOW_US: u64 = 10_000_000;
+/// How often each side tells the other its addresses, and looks at its own
+/// networks.
+const ADDRS_EVERY_US: u64 = 1_000_000;
+/// With no path working for this long, the session ends.
+const NO_PATH_US: u64 = 10_000_000;
 
-/// The TLS connection a session is set up over. It stays open for the whole
-/// session; closing it ends the session.
+/// The TLS connection a session is set up over. It stays open for the
+/// session: the other side closing it ends the session. If it breaks
+/// instead (its network went away: a cable pulled out, the PC moved to the
+/// phone's hotspot), the session carries on over whatever paths still work.
 pub trait Control: AsyncRead + AsyncWrite + Unpin + Send + 'static {
     /// TLS key export (RFC 8446 §7.5).
     fn export_keys(&self, out: &mut [u8], label: &[u8], context: &[u8]) -> Result<()>;
@@ -182,8 +189,9 @@ impl Session {
             let kind = link::kind_toward(&nets, ip).unwrap_or(LinkKind::Other);
             paths.add(SocketAddr::new(ip, their_port), kind);
         }
-        // Their other networks, where one of ours reaches it directly.
-        for ip in theirs {
+        // Their other networks, where one of ours reaches it directly (the
+        // rest are kept in case one of ours comes to: see `on_nets`).
+        for &ip in &theirs {
             if let Some(kind) = link::kind_toward(&nets, IpAddr::V4(ip)) {
                 paths.add(SocketAddr::new(IpAddr::V4(ip), their_port), kind);
             }
@@ -193,6 +201,8 @@ impl Session {
         let stats = Arc::new(Mutex::new(Stats::default()));
         let (commands, command_rx) = mpsc::unbounded_channel();
         let (event_tx, events) = mpsc::unbounded_channel();
+        let (nets_tx, nets_rx) = mpsc::unbounded_channel();
+        tokio::spawn(watch_nets(nets.clone(), nets_tx));
         let driver = Driver {
             socket,
             control,
@@ -200,6 +210,13 @@ impl Session {
             opener: Opener::new(&recv_key, tag),
             paths,
             nets,
+            nets_rx,
+            their_port,
+            theirs,
+            control_open: true,
+            last_path_us: 0,
+            last_addrs_us: 0,
+            ending: false,
             senders: HashMap::new(),
             receivers: HashMap::new(),
             ns_per_byte: if config.pace_mbps > 0 { 8_000.0 / config.pace_mbps as f64 } else { 0.0 },
@@ -307,6 +324,28 @@ impl Drop for Session {
     }
 }
 
+/// Looks at this device's networks every `ADDRS_EVERY_US` (off the driver:
+/// on Windows it can take milliseconds) and passes them on when they
+/// change. Ends with the session.
+async fn watch_nets(mut last: Vec<link::LocalNet>, tx: mpsc::UnboundedSender<Vec<link::LocalNet>>) {
+    let key = |nets: &[link::LocalNet]| -> Vec<(Ipv4Addr, Ipv4Addr, LinkKind)> {
+        nets.iter().map(|n| (n.ip, n.netmask, n.kind)).collect()
+    };
+    loop {
+        tokio::time::sleep(Duration::from_micros(ADDRS_EVERY_US)).await;
+        if tx.is_closed() {
+            return;
+        }
+        let Ok(nets) = tokio::task::spawn_blocking(link::local_nets).await else { return };
+        if key(&nets) != key(&last) {
+            last = nets.clone();
+            if tx.send(nets).is_err() {
+                return;
+            }
+        }
+    }
+}
+
 fn bind_udp() -> Result<UdpSocket> {
     let s = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, Some(socket2::Protocol::UDP))?;
     // Keyframes arrive as bursts of 100+ packets.
@@ -370,6 +409,18 @@ struct Driver<C> {
     opener: Opener,
     paths: Paths,
     nets: Vec<link::LocalNet>,
+    /// This side's networks when they change (`watch_nets`).
+    nets_rx: mpsc::UnboundedReceiver<Vec<link::LocalNet>>,
+    their_port: u16,
+    /// Every address the other side has said it has.
+    theirs: Vec<Ipv4Addr>,
+    /// The TLS connection still works.
+    control_open: bool,
+    /// When a path last worked, and when addresses were last sent.
+    last_path_us: u64,
+    last_addrs_us: u64,
+    /// Time to end the session (no path for `NO_PATH_US`).
+    ending: bool,
     senders: HashMap<u8, FrameSender>,
     receivers: HashMap<u8, FrameReceiver>,
     ns_per_byte: f64,
@@ -398,6 +449,9 @@ impl<C: Control> Driver<C> {
             let now = self.now();
             let wake = self.housekeeping(now).await;
             self.publish();
+            if self.ending {
+                break;
+            }
             let deadline = self.epoch + Duration::from_micros(wake);
             tokio::select! {
                 cmd = commands.recv() => match cmd {
@@ -409,8 +463,18 @@ impl<C: Control> Driver<C> {
                         self.receiver(stream).need_keyframe();
                     }
                     Some(Command::Close) | None => {
-                        self.send_to_current(&wire::bye()).await;
-                        let _ = self.control.shutdown().await;
+                        // On every path that works, a few times: the TLS
+                        // connection may be gone, and a lost bye leaves
+                        // the other side waiting for `NO_PATH_US`.
+                        let now = self.now();
+                        for _ in 0..3 {
+                            for to in self.paths.alive(now) {
+                                self.send_to(&wire::bye(), to).await;
+                            }
+                        }
+                        if self.control_open {
+                            let _ = self.control.shutdown().await;
+                        }
                         break;
                     }
                 },
@@ -423,11 +487,15 @@ impl<C: Control> Driver<C> {
                         }
                     }
                 }
-                r = self.control.read(&mut control_buf) => {
-                    if matches!(r, Ok(0) | Err(_)) {
-                        break; // the other side closed the connection
+                r = self.control.read(&mut control_buf), if self.control_open => match r {
+                    Ok(0) => break, // the other side closed it: the session is over
+                    Ok(_) => {}
+                    Err(_) => {
+                        // Its network went away; carry on over the others.
+                        self.control_open = false;
                     }
-                }
+                },
+                Some(nets) = self.nets_rx.recv() => self.on_nets(nets).await,
                 () = tokio::time::sleep_until(deadline) => {
                     let late = self.now().saturating_sub(wake);
                     self.timer_late_us = late.max(self.timer_late_us * 15 / 16);
@@ -505,9 +573,41 @@ impl<C: Control> Driver<C> {
                 let _ = self.events.send(Event::KeyframeRequested { stream });
             }
             Some(Message::Bye) => return false,
+            Some(Message::Addrs(ips)) => {
+                for ip in ips {
+                    if !self.theirs.contains(&ip) && self.theirs.len() < 32 {
+                        self.theirs.push(ip);
+                    }
+                    if let Some(kind) = link::kind_toward(&self.nets, IpAddr::V4(ip)) {
+                        self.paths.add(SocketAddr::new(IpAddr::V4(ip), self.their_port), kind);
+                    }
+                }
+            }
             None => {}
         }
         true
+    }
+
+    /// This side's networks changed: paths that are reachable now (or of
+    /// another kind), and the other side hears the new addresses at once.
+    async fn on_nets(&mut self, nets: Vec<link::LocalNet>) {
+        self.nets = nets;
+        for &ip in &self.theirs {
+            if let Some(kind) = link::kind_toward(&self.nets, IpAddr::V4(ip)) {
+                let to = SocketAddr::new(IpAddr::V4(ip), self.their_port);
+                self.paths.add(to, kind);
+                self.paths.set_kind(to, kind);
+            }
+        }
+        let msg = wire::addrs(&self.our_addrs());
+        for to in self.paths.remotes() {
+            self.send_to(&msg, to).await;
+        }
+        self.last_addrs_us = self.now();
+    }
+
+    fn our_addrs(&self) -> Vec<Ipv4Addr> {
+        self.nets.iter().map(|n| n.ip).take(wire::MAX_ADDRS).collect()
     }
 
     /// Pings, path choice, recovery and pacing. Returns when to wake next.
@@ -517,6 +617,19 @@ impl<C: Control> Driver<C> {
         }
         if let Some(change) = self.paths.choose(now) {
             let _ = self.events.send(Event::PathChanged(change));
+        }
+        if self.paths.current().is_some() {
+            self.last_path_us = now;
+        } else if now.saturating_sub(self.last_path_us) >= NO_PATH_US {
+            self.ending = true;
+            return now;
+        }
+        if now.saturating_sub(self.last_addrs_us) >= ADDRS_EVERY_US {
+            self.last_addrs_us = now;
+            let msg = wire::addrs(&self.our_addrs());
+            for to in self.paths.alive(now) {
+                self.send_to(&msg, to).await;
+            }
         }
         let rtt = self.paths.current().map_or(5_000, |p| p.rtt_us);
 
@@ -565,7 +678,7 @@ impl<C: Control> Driver<C> {
             queued |= s.has_queued();
         }
 
-        let mut wake = now + 50_000;
+        let mut wake = (now + 50_000).min(self.last_addrs_us + ADDRS_EVERY_US);
         if let Some(t) = self.paths.next_ping_at() {
             wake = wake.min(t);
         }

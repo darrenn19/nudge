@@ -13,7 +13,7 @@ class OfferActionReceiver : BroadcastReceiver() {
         val id = intent.getLongExtra(EXTRA_ID, -1)
         if (id < 0) return
         if (intent.getBooleanExtra(EXTRA_STOP_MIRROR, false)) {
-            Core.stopMirror(id)
+            MirrorService.stop(context)
             return
         }
         val accept = intent.getBooleanExtra(EXTRA_ACCEPT, false)

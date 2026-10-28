@@ -441,9 +441,12 @@ pub enum NodeEvent {
         route: LinkKind,
     },
     /// Start this phone's hotspot for a faster direct link, then answer
-    /// with `Node::hotspot_ready` (with `None` if it can't).
+    /// with `Node::hotspot_ready` (with `None` if it can't). With
+    /// `direct_only` (screen mirroring), only a Wi-Fi Direct group will do:
+    /// answer `None` rather than start a local-only hotspot.
     HotspotWanted {
         id: u64,
+        direct_only: bool,
     },
     /// The direct link isn't needed any more: stop the hotspot.
     HotspotDone,

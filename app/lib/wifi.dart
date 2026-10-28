@@ -98,12 +98,25 @@ Future<void> leaveHotspot() async {
   final previous = _previous;
   _previous = null;
   await forgetHotspot();
-  if (previous != null) {
-    try {
-      await Process.run('netsh', ['wlan', 'connect', 'name=$previous']);
-    } on ProcessException {
-      // Windows reconnects to its usual network by itself anyway.
+  if (previous == null) return;
+  // Right after leaving, the adapter hasn't seen the usual network again
+  // yet and netsh says it's "not available": ask Windows to look (listing
+  // networks rescans) and try again, for up to ~15 s. Windows only rejoins
+  // by itself when the profile is set to connect automatically.
+  try {
+    for (var i = 0; i < 15; i++) {
+      await Process.run('netsh', ['wlan', 'show', 'networks']);
+      final r = await Process.run('netsh', ['wlan', 'connect', 'name=$previous']);
+      if (r.exitCode == 0) {
+        for (var j = 0; j < 6; j++) {
+          await Future<void>.delayed(const Duration(milliseconds: 500));
+          if (await _currentSsid() == previous) return;
+        }
+      }
+      await Future<void>.delayed(const Duration(seconds: 1));
     }
+  } on ProcessException {
+    // No netsh: nothing more to do.
   }
 }
 

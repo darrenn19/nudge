@@ -43,6 +43,24 @@ object Core {
     /** End a screen-mirroring session. */
     @JvmStatic external fun stopMirror(id: Long)
 
+    /** Claim the session behind a "mirrorStarted" event. False if it's gone. */
+    @JvmStatic external fun mirrorTake(id: Long): Boolean
+
+    /** Show this phone's screen on [deviceId]. Blocks until it answers: the session ID, or -1. */
+    @JvmStatic external fun mirrorStart(deviceId: String): Long
+
+    /**
+     * Send one encoded frame, captured [ageUs] ago. Returns 0, 1 if the other
+     * side wants a keyframe, or -1 once the session has ended.
+     */
+    @JvmStatic external fun mirrorSend(id: Long, data: ByteArray, key: Boolean, intraRefresh: Boolean, ageUs: Long): Int
+
+    /** 0 running, 1 keyframe wanted, -1 ended. For a still screen (no frames to send). */
+    @JvmStatic external fun mirrorPoll(id: Long): Int
+
+    /** End a session. */
+    @JvmStatic external fun mirrorClose(id: Long)
+
     /** Locked or screen off: the screen is never shared meanwhile. */
     @JvmStatic external fun setScreenLocked(locked: Boolean)
 

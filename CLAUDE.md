@@ -112,10 +112,10 @@ Goal: AirDrop-like behaviour — send/receive with the app closed, receive while
 4. Multi-file packing and folder transfer (packs: `core/src/pack.rs`; folders from Windows and Android, empty ones included).
 5. Direct-link mode and start-then-upgrade switching. (done: `core/src/node/paths.rs`)
 6. Cable path, any data cable, via USB tethering. (done; a cable without tethering, over Android Open Accessory, would need a Windows USB driver)
-7. Screen mirroring (see below). ← current: laptop views the phone (mirroring step 4)
+7. Screen mirroring (see below). ← current: laptop controls the phone (mirroring step 5)
 8. macOS, then iOS. Deferred: no Apple device to build or test on yet.
 
-## Screen mirroring (in progress: laptop views the phone)
+## Screen mirroring (in progress: laptop views the phone works; control next)
 Goal: better than Microsoft Phone Link on speed, smoothness and integration. Paired devices only. Two modes:
 - **Regular:** see the other device's screen and control it (tap, swipe, type) with very low latency.
 - **Connected:** the same, plus the mirror window works as a doorway between the devices: copy/paste, drag files in and out, notifications. It should feel like the other device is part of this one.
@@ -157,17 +157,18 @@ Goal: better than Microsoft Phone Link on speed, smoothness and integration. Pai
    - [x] 1 ms Windows timers while a session runs (`app/rust/src/timer.rs`; `nudge mirror-bench` does the same). With 3% loss: p95 16.5 → 6.4 ms. Plus a tail-loss wait that adapts to the sender's pacing (4–30 ms instead of a fixed 30): p95 4.5, p99 10.6 ms.
    - [x] Recovery on *link time* (a silence counts as at most 20 ms), 5 NACK tries, 300 ms wall backstop, 1 s / 64 frames of history: a Wi-Fi pause no longer turns late frames into skipped ones (spike through the router: 27–149 skipped → 0).
    - [ ] Try it between the PC and a second machine or the phone (once the phone side exists).
-3. **Session and safety plumbing** (~3–4 days): start/stop, the consent flow on the phone, the "being shared" indicator, paired-only checks. Do it before the features so they never exist without it. Done except the item that needs step 4's capture code.
+3. **Session and safety plumbing** (~3–4 days): start/stop, the consent flow on the phone, the "being shared" indicator, paired-only checks. Do it before the features so they never exist without it. Done.
    - [x] In the core, enforced for every feature: paired only; the shared device's user is asked (`ShowMe`) or started it (`ShowYou`); a locked device never shares, and sharing ends when it locks (`Node::set_screen_locked`, from `LockState.kt` on Android); unclaimed sessions end after 15 s. Tests in `core/src/node.rs` (`mirroring_*`).
    - [x] Android: "wants to see your screen" notification (Allow / Don't allow, shown even with the window open), "Your screen is being shared" ongoing notification with Stop. Windows declines requests to share its own screen (not built yet).
-   - [ ] Allow opens Android's screen-capture prompt and answers only after it (with step 4). Test the notifications on the phone.
-4. **Laptop views the phone** (~2–3 weeks): the spike rebuilt on the real channel; native Windows renderer; rotation, resolution changes, reconnect when switching paths. Measure again. ← next
-   - [ ] Phone: a capture service (MediaProjection → encoder with the step 1 settings) feeding `Session::send` through JNI, started from the Allow on "wants to see your screen" (or from the phone's own "Mirror to PC").
-   - [ ] PC: a native mirror window (child window, D3D11, the spike's decode and draw) fed by `take_mirror`/`start_mirror`; "Mirror phone" in the device menu and tray.
-   - [ ] Bring up the direct link automatically for a Wi-Fi session, and come back to the usual network when it ends. Look at Windows' Wi-Fi Direct API so the PC stays on its home network too.
-   - [ ] Open the window and decoder before the first frame arrives (first frame now 220–260 ms).
-   - [ ] Rotation and resolution changes; reconnect when the path changes (cable plugged in or out).
-   - [ ] Measure: cable, router Wi-Fi, direct link (labels `app-cable`, `app-wifi`, `app-direct`); look at the occasional encoder hiccups (a few frames up to ~140 ms) and the draw wait for the next refresh (p95 ~12 ms).
+   - [x] Allow opens Android's screen-capture prompt (whole screen preselected, Android 14+) and answers only after it (`MirrorConsentActivity`). "Being shared" is `MirrorService`'s notification (own group, so Android doesn't fold it away), plus Android's own red chip.
+4. **Laptop views the phone** (~2–3 weeks): the spike rebuilt on the real channel; native Windows renderer; rotation, resolution changes, reconnect when switching paths. Measure again. Done 2026-10-28 (uncommitted); tested on the S24.
+   - [x] Phone: `MirrorService.kt` (MediaProjection → H.264 with the step 1 settings → `Core.mirrorSend` → `app/rust/src/android_mirror.rs` → the session). Started from Allow on "wants to see your screen", or "Show my screen on <PC>" in the phone's device menu.
+   - [x] PC: `app/rust/src/mirror/` (the spike's GPU decode and draw, its own window and thread), "Show its screen" in a paired phone's menu; opens by itself when the phone offers. The window and decoder open before the first frame. Logs capture-to-screen every 10 s (`%APPDATA%\Nudge\nudge.log`, "mirror:").
+   - [x] Rotation: the phone re-creates the encoder at the new shape, the PC window re-fits (~0.25 s).
+   - [x] Path changes: the session outlives its TLS connection breaking, each side sends its addresses every second (`ADDRS`), so a cable pulled out moves it to Wi-Fi and a new network becomes a path; it ends on a clean close, a bye, or 10 s with no path. Test: `core/tests/realtime.rs` (`a_broken_setup_connection_doesnt_end_the_session`).
+   - [x] Direct link for Wi-Fi: the PC moves onto the phone's Wi-Fi Direct network *before* asking (no mid-stream freeze), Wi-Fi Direct only (`Link::AskDirect`; the local-only hotspot fallback made p95 300-500 ms), retried up to 3 times; kept while mirroring, ended 30 s after; the PC rejoins its usual Wi-Fi (retrying while the adapter rescans). Respects the "Join the phone's hotspot" setting.
+   - [x] Measured (app, S24 → this PC): cable, 60 s steady: median 16-19 ms, p95 18-21, p99 20-31, max 34. Wi-Fi via the direct link: median 22-30, p95 29-42, p99 34-47. Before display time.
+   - [ ] Left: the wait for the PC display's next refresh (arrival-to-screen p50 drifts 1-8 ms as the phone's 60 fps beats against the monitor; tearing would avoid it), one-off spikes at session start, the PC being off its home Wi-Fi while mirroring over the direct link (Windows' Wi-Fi Direct API could keep both), Windows doesn't share its own screen yet (step 7).
 5. **Laptop controls the phone** (~2 weeks + tuning): Accessibility Service taps, swipes, scroll, Back/Home/Recents first; then typing via `ACTION_SET_TEXT` (a custom IME only if that's not good enough).
 6. **Connected mode** (~3–4 weeks), cheapest first: file drop and clipboard (both reuse what's built), notifications with reply, recent-media tray, crop drag-out, then phone audio (shares the MediaProjection session).
 7. **Phone views and controls the laptop** (~2–3 weeks): same channel, reversed (Windows Graphics Capture + Media Foundation encoder, `SendInput`).
@@ -209,6 +210,7 @@ POSSIBLE IDEAS
 - Extended display (like PCs)
 - Play sound to find device
 - Nudge MCP for developing on mobile
+- Shared notifications
 
 
 FUTURE NEEDS

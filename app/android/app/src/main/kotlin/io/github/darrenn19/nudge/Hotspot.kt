@@ -55,11 +55,17 @@ object Hotspot {
     /**
      * Start (or reuse) a direct link; [done] gets how to join it ("ssid",
      * "passphrase", "wpa3", and "mhz": its frequency, 0 if unknown), or null.
+     * With [directOnly] (screen mirroring) only a Wi-Fi Direct group will do:
+     * a local-only hotspot is often on 2.4 GHz or a second channel the radio
+     * hops to, which is worse than the router for live video.
      */
-    fun start(context: Context, done: (Map<String, Any>?) -> Unit) {
+    fun start(context: Context, directOnly: Boolean = false, done: (Map<String, Any>?) -> Unit) {
         details?.let {
-            done(it)
-            return
+            if (!directOnly || direct != null) {
+                done(it)
+                return
+            }
+            stop() // a local-only hotspot: no good for this
         }
         if (!allowed(context)) {
             done(null)
@@ -76,9 +82,17 @@ object Hotspot {
             }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startDirect(app) { group -> if (group != null) answer(group) else startHotspot(app, answer) }
-        } else {
+            startDirect(app, tries = 3) { group ->
+                when {
+                    group != null -> answer(group)
+                    directOnly -> answer(null)
+                    else -> startHotspot(app, answer)
+                }
+            }
+        } else if (!directOnly) {
             startHotspot(app, answer)
+        } else {
+            answer(null)
         }
     }
 
@@ -95,8 +109,23 @@ object Hotspot {
 
     // Wi-Fi Direct.
 
+    /**
+     * Starts a Wi-Fi Direct group, trying up to [tries] times: it sometimes
+     * fails for a moment (busy with a scan, a group left over), and the
+     * fallback is much worse.
+     */
+    private fun startDirect(context: Context, tries: Int, done: (Map<String, Any>?) -> Unit) {
+        startDirectOnce(context) { group ->
+            if (group != null || tries <= 1) {
+                done(group)
+            } else {
+                Handler(Looper.getMainLooper()).postDelayed({ startDirect(context, tries - 1, done) }, 700)
+            }
+        }
+    }
+
     @SuppressLint("MissingPermission") // checked in allowed()
-    private fun startDirect(context: Context, done: (Map<String, Any>?) -> Unit) {
+    private fun startDirectOnce(context: Context, done: (Map<String, Any>?) -> Unit) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return done(null)
         val p2p = context.getSystemService(WifiP2pManager::class.java) ?: return done(null)
         val channel = p2p.initialize(context, Looper.getMainLooper(), null) ?: return done(null)
@@ -120,6 +149,8 @@ object Hotspot {
         }
         val fail = { why: String ->
             Log.i(TAG, "direct link: Wi-Fi Direct didn't start ($why)")
+            // Clear whatever group is in the way, for the next try.
+            runCatching { p2p.removeGroup(channel, null) }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) channel.close()
             done(null)
         }

@@ -132,7 +132,18 @@ object Notifications {
         pairing: Boolean = false,
         mirror: Boolean = false,
     ) {
-        fun answer(accept: Boolean) = PendingIntent.getBroadcast(
+        fun answer(accept: Boolean) = if (mirror && accept) {
+            // Allow goes on to Android's own screen-capture prompt, which
+            // only an activity can show.
+            PendingIntent.getActivity(
+                context,
+                (id * 2 + 1).toInt(),
+                Intent(context, MirrorConsentActivity::class.java)
+                    .putExtra(MirrorConsentActivity.EXTRA_ASK, id)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+        } else PendingIntent.getBroadcast(
             context,
             (id * 2 + if (accept) 1 else 0).toInt(),
             Intent(context, OfferActionReceiver::class.java)
@@ -164,38 +175,39 @@ object Notifications {
     }
 
     /**
-     * "Your screen is being shared with Darren's PC", for as long as it is,
-     * with Stop. Can't be swiped away.
+     * "Your screen is being shared with Darren's PC" ([with] null: while it
+     * connects), with Stop: [MirrorService]'s notification, for as long as
+     * it runs. Can't be swiped away.
      */
-    fun sharing(context: Context, id: Long, with: String) {
+    fun sharing(context: Context, with: String?): Notification {
         val stop = PendingIntent.getBroadcast(
             context,
-            SHARING_REQUEST + (id % 1000).toInt(),
+            SHARING_REQUEST,
             Intent(context, OfferActionReceiver::class.java)
-                .putExtra(OfferActionReceiver.EXTRA_ID, id)
+                .putExtra(OfferActionReceiver.EXTRA_ID, 0L)
                 .putExtra(OfferActionReceiver.EXTRA_STOP_MIRROR, true),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        val notification = NotificationCompat.Builder(context, OFFERS)
+        return NotificationCompat.Builder(context, OFFERS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle("Your screen is being shared")
-            .setContentText("With $with")
+            .setContentText(if (with == null) "Connecting…" else "With $with")
             .setOngoing(true)
             .setSilent(true)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            // A group of its own: Android folds an app's ungrouped
+            // notifications together, which hid this one behind "Nudge".
+            .setGroup(MIRROR_GROUP)
             .setContentIntent(openApp(context))
             .addAction(0, "Stop", stop)
             .build()
-        notify(context, sharingId(id), notification)
     }
 
-    fun sharingEnded(context: Context, id: Long) = cancel(context, sharingId(id))
+    private const val MIRROR_GROUP = "io.github.darrenn19.nudge.MIRROR"
 
     private const val SHARING_REQUEST = 3000
-
-    private fun sharingId(id: Long) = 4000 + (id % 100_000).toInt()
 
     fun cancelOffer(context: Context, id: Long) = cancel(context, offerId(id))
 

@@ -31,6 +31,8 @@
     <!-- Running in the background to receive files, and starting at boot. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Screen mirroring: sharing this phone's screen (MirrorService). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Keeping the CPU and Wi-Fi awake while files move with the screen off. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -166,6 +168,18 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+        <!-- Screen mirroring: Android's screen-capture prompt (invisible
+             window), then the service that captures and sends the screen. -->
+        <activity
+            android:name=".MirrorConsentActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+        <service
+            android:name=".MirrorService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
         <!-- Lets the "received" notification open the file in other apps. -->
         <provider
             android:name="androidx.core.content.FileProvider"
