@@ -270,6 +270,35 @@ impl Session {
     pub fn close(&self) {
         let _ = self.commands.send(Command::Close);
     }
+
+    /// A handle that can end this session from elsewhere, and tell when it
+    /// has ended.
+    pub fn handle(&self) -> Handle {
+        Handle {
+            commands: self.commands.clone(),
+        }
+    }
+}
+
+/// Ends a session or waits for its end, without owning it.
+#[derive(Clone)]
+pub struct Handle {
+    commands: mpsc::UnboundedSender<Command>,
+}
+
+impl Handle {
+    pub fn close(&self) {
+        let _ = self.commands.send(Command::Close);
+    }
+
+    /// Returns once the session has ended, for whatever reason.
+    pub async fn closed(&self) {
+        self.commands.closed().await;
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.commands.is_closed()
+    }
 }
 
 impl Drop for Session {
@@ -437,6 +466,10 @@ impl<C: Control> Driver<C> {
         }
         let plain = plain.to_vec();
         let now = self.now();
+        // Proof the link is delivering: recovery deadlines move on.
+        for r in self.receivers.values_mut() {
+            r.on_packet(now);
+        }
         match wire::parse(&plain) {
             Some(Message::Ping(t)) => self.send_to(&wire::pong(t, now), from).await,
             Some(Message::Pong { echo, theirs }) => {

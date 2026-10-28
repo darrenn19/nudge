@@ -137,6 +137,9 @@ object ClipWatch {
         quietUntil = SystemClock.uptimeMillis() + 1500
     }
 
+    /** Within a moment of Nudge putting another device's copy on the clipboard. */
+    fun isQuiet() = SystemClock.uptimeMillis() < quietUntil
+
     private var pending = false
 
     /** Something was copied (or cut, or cleared). Several log lines can come at once. */

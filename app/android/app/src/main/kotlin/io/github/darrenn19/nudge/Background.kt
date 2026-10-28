@@ -105,6 +105,18 @@ object Background : Core.Listener {
                     pairing = true,
                 )
             }
+            // Asked even with the window open: it's about the whole screen.
+            "mirrorAsked" -> Notifications.offer(
+                context,
+                id,
+                "${name(e.getString("device"))} wants to see your screen",
+                "Only allow devices you trust",
+                mirror = true,
+            )
+            "mirrorStarted" -> if (e.getBoolean("sharing")) {
+                Notifications.sharing(context, id, name(e.getString("device")))
+            }
+            "mirrorEnded" -> Notifications.sharingEnded(context, id)
             "offerClosed" -> Notifications.cancelOffer(context, id)
             "clipboard" -> ClipSync.set(context, e.getString("text"))
             "clipboardImage" -> ClipSync.setImage(context, java.io.File(e.getString("path")), e.getString("mime"))

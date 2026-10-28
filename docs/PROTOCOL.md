@@ -166,7 +166,7 @@ A chunk's hash is appended only after it passed its check **and** the data file 
 - **v2:** BLAKE3 hash after every 4 MiB chunk.
 - **v3:** `Offer` carries the file's modified time; receivers resume interrupted transfers.
 - **v4:** connections start with a header carrying a request kind; adds QR pairing (`PairRequest` / `PairReply`).
-- **v7:** cancelling: `Cancel` (kind 10) and the Cancelled response (tag 9).
+- **v7:** cancelling: `Cancel` (kind 10) and the Cancelled response (tag 9). Later, without a version bump: screen mirroring (`Mirror`, kind 11), which older v7 builds refuse.
 
 ## Receiver file handling
 - Writes to `<name>.nudgepart` (preallocated to `size`) plus `<name>.nudgemeta`; on completion the data file is renamed to `<name>` and the meta file deleted. A failed transfer leaves both for resume.
@@ -212,6 +212,8 @@ Code: `core/src/node/web.rs`, page: `core/src/node/web_page.html`. For people wi
 - Turned away at once, three times in a row (nothing listening, but the device is there): probably stopped; the page says so but keeps checking every 8 s. (A Windows firewall drops these silently, so there it looks like "out of reach" once the 15 minutes are up.)
 
 ## Real-time channel (screen mirroring)
+
+**Starting a session (kind 11, Mirror).** Paired devices only. One byte: 1 = ShowMe (the asker wants to see the other's screen), 2 = ShowYou (the asker's user is offering its own screen). The reply is one byte: 0 Declined, 1 Accepted, 2 NoAnswer, 3 Locked (the device that would share is locked), 4 Busy (a question from this device is already open). For ShowMe the shared device asks its user first (up to 60 s, covering Android's screen-capture prompt); ShowYou is accepted without a question. A locked device never shares: it answers Locked, refuses to offer, and ends sharing sessions when it locks. After Accepted, the hello below follows on the same connection, which stays open for the session. Added within v7: an older build closes the connection on kind 11, which the asker reports as "needs an update"; nothing else changes for it.
 
 Set up over a TLS connection the two devices already have. Each side sends a hello: `NURT`, version u8 (1), nonce [16] (chosen by the side that asks; echoed by the other), UDP port u16, count u8, then that many IPv4 addresses. Keys: TLS exporter, label `EXPORTER-nudge-realtime-1`, context = nonce, 68 bytes: key for asker→asked [32], key for asked→asker [32], session tag u32.
 

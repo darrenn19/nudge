@@ -82,6 +82,19 @@ pub enum Error {
 
     #[error("device discovery failed: {0}")]
     Discovery(String),
+
+    #[error("the other device is locked: unlock it to share its screen")]
+    PeerLocked,
+
+    /// This device is locked, so its screen isn't shared.
+    #[error("unlock this device to share its screen")]
+    ScreenLocked,
+
+    #[error("the other device is already being asked about screen sharing")]
+    MirrorBusy,
+
+    #[error("the other device needs an update for this")]
+    PeerOutdated,
 }
 
 impl From<std::io::Error> for Error {

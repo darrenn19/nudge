@@ -8,6 +8,7 @@
 //! Usage: mirror-latency [label] [--selftest] [--seconds=N] [--snap]   (S in the window saves a full-size PNG)
 
 mod selftest;
+mod wifi;
 mod video;
 
 use std::collections::{BTreeMap, HashSet};
@@ -41,11 +42,18 @@ const F_INTRA_REFRESH: u8 = 8;
 const FRAG_HEADER: usize = 26;
 
 /// How many times to ask for the same missing fragment.
-const NACK_TRIES: u32 = 3;
+const NACK_TRIES: u32 = 5;
 /// Shortest wait before asking again.
 const MIN_RETRY_US: u64 = 3_000;
-/// Give up on a frame (and ask for a keyframe) this long after noticing it's incomplete.
+/// Give up on a frame (and ask for a keyframe) this long after noticing it's
+/// incomplete, counted in link time (see `Receiver::link`).
 const GIVE_UP_US: u64 = 50_000;
+/// Link time only runs while packets arrive: a pause between two packets
+/// counts as at most this much (above the ~17 ms between frames at 60 fps). Wi-Fi sometimes holds everything for
+/// 50-300 ms and then delivers it all at once; that's not loss, and waiting
+/// it out costs nothing (later frames are stuck too), while giving up turns
+/// a late frame into a skipped one.
+const LINK_GAP_US: u64 = 20_000;
 /// A frame with no new fragment for this long has a gap at the end.
 const STALL_US: u64 = 30_000;
 /// Between keyframe requests while waiting for one.
@@ -125,8 +133,10 @@ struct Partial {
     encoded: u64,
     /// When its latest fragment arrived (or when it was found missing).
     last_seen: u64,
-    /// When we first noticed something missing.
+    /// When we first noticed something missing (link time).
     gap_since: Option<u64>,
+    /// The same in wall time, for the stats.
+    gap_wall: Option<u64>,
     /// Per fragment: times asked for, and when last.
     asks: Vec<(u32, u64)>,
     /// The same, for the whole frame while none of it has arrived.
@@ -145,6 +155,7 @@ impl Partial {
             encoded: 0,
             last_seen: now,
             gap_since: None,
+            gap_wall: None,
             asks: Vec::new(),
             whole_asks: (0, 0),
             resent: false,
@@ -182,6 +193,11 @@ struct Receiver {
     last_key_req: Option<u64>,
     /// When the picture froze (a frame was given up), until the next frame is shown.
     frozen_since: Option<u64>,
+    /// Link time, µs: wall time while packets keep arriving, paused while
+    /// the link is silent (each silence counts as at most `LINK_GAP_US`).
+    /// Recovery deadlines run on it.
+    link: u64,
+    last_arrival: u64,
 }
 
 impl Receiver {
@@ -200,6 +216,17 @@ impl Receiver {
         }
     }
 
+    /// Link time now (see `link`).
+    fn link_now(&self, now: u64) -> u64 {
+        self.link + now.saturating_sub(self.last_arrival).min(LINK_GAP_US)
+    }
+
+    /// A packet arrived: link time moves on.
+    fn arrived(&mut self, now: u64) {
+        self.link = self.link_now(now);
+        self.last_arrival = now;
+    }
+
     /// Wait this long for an answer before asking again.
     fn retry_us(&self) -> u64 {
         (self.srtt.unwrap_or(5_000).max(self.resend_rtt.unwrap_or(0)) * 3 / 2).max(MIN_RETRY_US)
@@ -214,6 +241,8 @@ impl Receiver {
     }
 
     fn on_fragment(&mut self, b: &[u8], now: u64, s: &mut Stats) {
+        self.arrived(now);
+        let lnow = self.link;
         let id = u32_at(b, 1);
         let (frag, count) = (u16_at(b, 5) as usize, u16_at(b, 7) as usize);
         let flags = b[9];
@@ -235,7 +264,7 @@ impl Receiver {
         let next = *self.next.get_or_insert(id);
         // Frames we haven't heard from at all, between the newest one and this one.
         for gap in self.highest.map_or(next, |h| h + 1)..id {
-            self.partials.entry(gap).or_insert_with(|| Partial::new(now));
+            self.partials.entry(gap).or_insert_with(|| Partial::new(lnow));
         }
         if self.highest.is_none_or(|h| id > h) {
             self.highest = Some(id);
@@ -245,7 +274,7 @@ impl Receiver {
             return;
         }
 
-        let p = self.partials.entry(id).or_insert_with(|| Partial::new(now));
+        let p = self.partials.entry(id).or_insert_with(|| Partial::new(lnow));
         if p.parts.is_empty() {
             p.parts = vec![None; count];
             p.asks = vec![(0, 0); count];
@@ -260,13 +289,13 @@ impl Receiver {
         p.parts[frag] = Some(b[FRAG_HEADER..].to_vec());
         p.have += 1;
         p.top = p.top.max(frag + 1);
-        p.last_seen = now;
+        p.last_seen = lnow;
         if resent {
             // Only after a single NACK is it clear which one this answers.
             let (asked, at) = p.asks[frag];
             if asked == 1 || asked == 0 && p.whole_asks.0 == 1 {
                 let at = if asked == 1 { at } else { p.whole_asks.1 };
-                let sample = now.saturating_sub(at);
+                let sample = lnow.saturating_sub(at);
                 self.resend_rtt = Some(self.resend_rtt.map_or(sample, |r| (r * 7 + sample) / 8));
             }
             p.resent = true;
@@ -279,7 +308,7 @@ impl Receiver {
         let p = self.partials.remove(&id).unwrap();
         if p.resent {
             s.frames_recovered += 1;
-            if let Some(g) = p.gap_since {
+            if let Some(g) = p.gap_wall {
                 s.recovery.push((now - g) as i64);
             }
         }
@@ -297,8 +326,10 @@ impl Receiver {
 
     /// Sends NACKs for gaps, gives up on frames that can't be recovered, and hands
     /// frames to the decoder in order. Returns false once the decoder has gone.
-    fn poll(&mut self, now: u64, shared: &Mutex<Shared>, tx: &Sender<Frame>) -> bool {
+    fn poll(&mut self, wall: u64, shared: &Mutex<Shared>, tx: &Sender<Frame>) -> bool {
         let retry = self.retry_us();
+        // Deadlines in link time; `wall` for the stats.
+        let now = self.link_now(wall);
         let mut sh = shared.lock().unwrap();
         if std::mem::take(&mut sh.want_key) {
             self.start_needing_key();
@@ -315,6 +346,7 @@ impl Receiver {
             m.extend_from_slice(&id.to_le_bytes());
             if p.parts.is_empty() {
                 p.gap_since.get_or_insert(now);
+                p.gap_wall.get_or_insert(wall);
                 if due(p.whole_asks) {
                     p.whole_asks = (p.whole_asks.0 + 1, now);
                     m.extend_from_slice(&0xFFFFu16.to_le_bytes());
@@ -330,6 +362,7 @@ impl Receiver {
                 continue;
             }
             p.gap_since.get_or_insert(now);
+            p.gap_wall.get_or_insert(wall);
             let ask: Vec<usize> = missing.into_iter().filter(|&i| due(p.asks[i])).take(600).collect();
             if ask.is_empty() {
                 continue;
@@ -357,7 +390,7 @@ impl Receiver {
                     self.need_key = false;
                 }
                 if let Some(t) = self.frozen_since.take() {
-                    sh.stats.freezes.push((now - t) as i64);
+                    sh.stats.freezes.push((wall - t) as i64);
                 }
                 sh.delivered += 1;
                 sh.stats.keyframes += f.key as u64;
@@ -377,13 +410,16 @@ impl Receiver {
             let Some(p) = self.partials.get(&n) else { break };
             // By time only: resends may be slow to come, and a keyframe costs
             // more than waiting.
-            if !p.gap_since.is_some_and(|g| now.saturating_sub(g) >= GIVE_UP_US) {
+            // Link time, or 300 ms of wall time (the phone may have gone quiet).
+            let hopeless = p.gap_since.is_some_and(|g| now.saturating_sub(g) >= GIVE_UP_US)
+                || p.gap_wall.is_some_and(|g| wall.saturating_sub(g) >= 300_000);
+            if !hopeless {
                 break;
             }
             self.partials.remove(&n);
             self.next = Some(n + 1);
             sh.stats.given_up += 1;
-            self.frozen_since.get_or_insert(now);
+            self.frozen_since.get_or_insert(wall);
             // With intra-refresh the decoder carries on and the picture heals by
             // itself; otherwise later frames reference the lost one.
             if !self.intra_refresh {
@@ -396,9 +432,9 @@ impl Receiver {
         if self.need_key
             && !key_coming
             && self.phone.is_some()
-            && self.last_key_req.is_none_or(|t| now.saturating_sub(t) >= KEY_REQUEST_EVERY_US)
+            && self.last_key_req.is_none_or(|t| wall.saturating_sub(t) >= KEY_REQUEST_EVERY_US)
         {
-            self.last_key_req = Some(now);
+            self.last_key_req = Some(wall);
             sh.stats.key_requests += 1;
             drop(sh);
             self.send(&[T_KEY]);
@@ -430,6 +466,8 @@ fn network(sock: UdpSocket, tx: Sender<Frame>, shared: Arc<Mutex<Shared>>, drop_
         resend_rtt: None,
         last_key_req: None,
         frozen_since: None,
+        link: 0,
+        last_arrival: 0,
     };
     let mut last_ping = 0u64;
     let mut rng = 0x9E37_79B9_7F4A_7C15u64;
@@ -611,6 +649,14 @@ fn main() {
     unsafe {
         windows::Win32::Media::timeBeginPeriod(1);
     }
+    // Wi-Fi tuned for streaming (--no-wifi-tune to compare): kept while the
+    // handle is open, i.e. for the whole run.
+    let _wifi = if args.iter().any(|a| a == "--no-wifi-tune") {
+        println!("Wi-Fi: left as it is");
+        None
+    } else {
+        wifi::tune()
+    };
 
     println!("Nudge mirror latency spike. Label: {label}");
     if selftest {

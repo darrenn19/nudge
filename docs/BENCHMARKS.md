@@ -134,6 +134,31 @@ No phone: `--selftest` (fake phone on the same PC, software H.264, 720×1280, un
 
 More fragments were recovered than dropped on purpose: probably the fake phone losing a few on its own (it ignores failed non-blocking sends). Before this change, each of those losses would have frozen the picture until a keyframe arrived. Recovery time here is mostly the fake phone answering only once per frame (every 16.7 ms); the real phone answers NACKs on its own thread, so it should come close to one round trip (2–7 ms).
 
+### Wi-Fi tuning on the phone (2026-10-28, evening)
+
+Galaxy S24 → this PC (MediaTek MT7925 Wi-Fi 7), `spikes/mirror-latency`, H.264 High 30 Mbit/s CBR, 1056×2304, 45 s per run unless noted, the spike's clock screen plus whatever was on the phone. Home Wi-Fi is a mesh: phone and PC on different access points (5 GHz ch 44 and ch 101). "Direct" = the phone hosts a Wi-Fi Direct group (Nudge's `Hotspot.kt`, 5 GHz ch 44) and the PC joins it. Medians / p95 / p99 / max, ms.
+
+| Run | Encode | Network | **Total** | Frames lost/skipped | Freezes |
+|---|---|---|---|---|---|
+| Cable, defaults | 20.3 / 24.5 / 27.4 / 48.6 | 2.4 / 3.5 / 4.5 / 20.3 | **23.7 / 28.4 / 35.2** / 234 (first frame; else 61, keyframes) | 0 | 0 |
+| Router Wi-Fi, defaults | 20.4 / 30.2 / 62.7 / 321 | 6.7 / 17.0 / 51.5 / 290 | **29.5 / 51.3 / 116** / 340 | 27 | 2, 393 ms |
+| Router, + intra-refresh | 20.5 / 40.6 / 78.2 / 158 | 6.7 / 18.3 / 48.3 / 145 | **28.8 / 60.1 / 108** / 257 | 149 | 6, 364 ms |
+| Router, + encoder speed-ups | **10.8 / 13.9 / 15.5 / 21.3** | 6.9 / 18.4 / 62.6 / 173 | **20.7 / 31.5 / 78.6** / 188 | 135 | 3, 1741 ms |
+| Router, + link-time recovery | 10.6 / 16.5 / 27.1 / 50.7 | 6.9 / 62.9 / 83.3 / 131 | 21.5 / 76.0 / 95.8 / 274 | 88 | 3, 139 ms |
+| Router, + 1 s resend history | 10.5 / 13.3 / 16.2 / 79.5 | 9.4 / 58.2 / 88.8 / 241 | 21.6 / 72.0 / 104 / 303 | **0** | **0** |
+| **Direct link**, all of the above | 10.8 / 16.1 / 23.8 / 97.6 | 5.5 / 10.1 / 18.9 / 53.7 | **17.4 / 28.7 / 37.4** / 260 (first frame) | 0 | 0 |
+| **Direct link**, 90 s | 10.7 / 19.7 / 33.9 / 139 | 5.1 / 8.8 / 14.4 / 45.7 | **18.7 / 32.0 / 48.1** / 224 (first frame) | 0 | 0 |
+
+Router runs vary a lot from one to the next (network p95 17–66 ms with the same settings), so compare columns within a run, not small differences between runs.
+
+What this says:
+- **Encoder speed-ups halve encoding:** Qualcomm's `vendor.qti-ext-enc-low-latency.enable` with `KEY_OPERATING_RATE` max and `KEY_LATENCY` 1 take encode from ~20.5 to ~10.7 ms median, and its worst case from 158 to 21 ms on the same link. On by default now.
+- **Through the router, Wi-Fi pauses for 50–300 ms**, then delivers everything at once. Plain ping shows it too (median 13 ms, p90 113, max 206). It's the router path: on the direct link the network max is 46–54 ms.
+- **Those pauses were turning late frames into skipped ones:** the PC gave up after 50 ms and used up its resend requests during the pause, and the phone had already dropped the packets it would have resent (10 frames of history). Fixed by timing recovery in *link time* (pauses count as at most 20 ms), 5 requests instead of 3, a 300 ms wall-clock backstop, and 1 s of history on the sender: **0 lost frames and 0 freezes even through the router.** Ported to the core (`core/src/realtime/frames.rs`).
+- **The direct link is the fix for Wi-Fi latency:** p99 37–48 ms vs ~100 through the router. Mirroring over Wi-Fi should bring it up the way big transfers do.
+- Tried and no effect: the PC sending a tiny packet every 5 ms (to stop its Wi-Fi from dozing). Wi-Fi "media streaming mode" (`WlanSetInterface`) is on in the spike but not shown to help here.
+- What's left: the first frame (window, decoder and encoder starting: 220–260 ms, once per session), occasional phone encoder hiccups (a few frames up to 70–140 ms), and the PC waiting for the display's next refresh (draw p95 ~12 ms).
+
 ## Real-time channel, one PC (mirroring step 2)
 
 2026-10-28, `nudge mirror-bench` (both ends in one process, real TLS + UDP over this PC's Wi-Fi address), 30 Mbit/s, 60 fps, 6 s, keyframe (~500 KB) every 120 frames, `--drop` throwing away fragments on arrival. Latency is send-to-arrival (pacing + network + recovery), no encoder or display.
@@ -147,3 +172,33 @@ More fragments were recovered than dropped on purpose: probably the fake phone l
 
 The ~16 ms tail is Windows' default timer tick (the sender's pacer and the receiver's checks wake on it); expect it to shrink with `timeBeginPeriod(1)` and on Android.
 Fixes found along the way: the receiver NACKed fragments still on their way during pauses between paced bursts (stall now measured from the latest fragment, 30 ms); NACK tries were per frame, so late gaps in a big keyframe were never asked for (now per fragment); resends waited behind the pacer (now sent at once).
+
+### 1 ms timers and faster tail-loss detection (2026-10-28, later)
+
+Same bench. The bench now asks Windows for 1 ms timers, as the Windows app does while a mirroring session runs (`NUDGE_COARSE_TIMER=1` for the old behaviour). The receiver also notices a frame whose *last* fragments were lost sooner: it waits twice the longest recent pause between one frame's fragments (+2 ms, between 4 and 30 ms) instead of a fixed 30 ms.
+
+| Fragments dropped | Before (coarse timers) p50 / p95 / p99 | 1 ms timers | + adaptive tail wait |
+|---|---|---|---|
+| 0% | 0.9 / 1.6 / 4.3 | 0.8 / 1.9 / 6.2 | 1.1 / 1.8 / 12.1 |
+| 1% | – | 0.8 / 1.3 / 19.0 | 1.0 / 1.8 / 10.1 |
+| 3% | 1.0 / 16.5 / 17.7 | 1.0 / 6.4 / 18.6 | 0.9 / **4.5 / 10.6** |
+| 5% | – | 1.0 / 9.2 / 19.5 | 0.9 / **7.6 / 15.0** |
+
+Every frame arrived in every run, none given up, no keyframe requests. The ~20 ms max that stays even at 0% is a 500 KB keyframe being paced out at 200 Mbit/s: intra-refresh (no big keyframes) is the fix for that, not the channel. Run-to-run noise at 0% is a few ms at p99.
+
+### Spike runs with NACK recovery and pacing (2026-10-28, not written up at the time)
+
+Re-read from the CSVs in `spikes/mirror-latency` (settings not recorded; "wifi-lock" runs presumably tested Wi-Fi low-latency locks). Medians / p95 / p99, ms:
+
+| Run | Frames | Encode | Network | Draw | **Total** | Frames > 80 ms |
+|---|---|---|---|---|---|---|
+| `run-1793197936` | 7577 | 25.0 / 36.2 / 49.6 | 3.1 / 8.9 / 15.1 | 0.7 / 10.9 / 15.2 | **31.3 / 46.3 / 61.7** | 0.2% (all encode) |
+| `wifi-lock-1793217502` | 7167 | 22.5 / 39.0 / 53.7 | 7.2 / 17.4 / 32.2 | 0.9 / 13.7 / 16.2 | **35.9 / 54.5 / 83.7** | 1.1% (49 encode, 29 network) |
+| `wifi-lock-1793197762` | 1908 | 25.7 / 37.5 / 47.3 | 18.7 / 111.7 / 188.8 | 0.9 / 13.9 / 16.5 | **52.1 / 145.9 / 220.7** | 20.4% (network) |
+| `run-1793202049` | 368 | 28.2 / 44.6 / 53.2 | 29.4 / 110.5 / 167.2 | 0.8 / 7.0 / 11.8 | **62.8 / 143.1 / 195.1** | 34.2% (network) |
+
+What this says:
+- Good runs are now ~31–36 ms median, ~46–55 ms p95: decode is ~1 ms, so **the phone encoder (~23–25 ms) is most of the latency**, and its stalls (max 200–300 ms) cause most remaining spikes on good links.
+- Some Wi-Fi runs are much worse (network p95 >100 ms): Wi-Fi power saving or a busy channel. Which settings were on for each run wasn't recorded; record them next time.
+- Draw p95 ~14 ms is waiting for the display's next refresh (one slot, newest frame wins). Only tearing (`DXGI_PRESENT_ALLOW_TEARING`) avoids it, and these numbers stop at `Present`, so they can't show whether that helps on screen.
+

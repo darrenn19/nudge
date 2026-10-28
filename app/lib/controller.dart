@@ -251,6 +251,8 @@ class NudgeController extends ChangeNotifier {
 
   void _setLocked(bool locked) {
     _locked = locked;
+    // Android's service tells the core itself (LockState).
+    if (!Platform.isAndroid) app.setScreenLocked(locked: locked);
     _applyReceiving();
   }
 
@@ -650,6 +652,13 @@ class NudgeController extends ChangeNotifier {
         return;
       case AppEvent_LeaveWanted():
         unawaited(leaveHotspot());
+        return;
+      // Screen mirroring: on Android the background service asks and shows
+      // "being shared" (a notification, even with the window open); the
+      // Windows core declines requests to share this computer's screen.
+      case AppEvent_MirrorAsked():
+      case AppEvent_MirrorStarted():
+      case AppEvent_MirrorEnded():
         return;
       case AppEvent_TransferAccepted(:final id):
         final t = _transfer(id);

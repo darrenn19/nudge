@@ -72,11 +72,11 @@ class MirrorSpikeActivity : Activity() {
         }
         intraRefresh = CheckBox(this).apply {
             text = "Intra-refresh (no big keyframes)"
-            isChecked = prefs.getBoolean("intraRefresh", false)
+            isChecked = prefs.getBoolean("intraRefresh", true)
         }
         speedups = CheckBox(this).apply {
             text = "Encoder speed-ups (Qualcomm low-latency, max clock)"
-            isChecked = prefs.getBoolean("speedups", false)
+            isChecked = prefs.getBoolean("speedups", true)
         }
 
         clock = TextView(this).apply {
@@ -89,6 +89,17 @@ class MirrorSpikeActivity : Activity() {
         track.addView(bar, LinearLayout.LayoutParams(pad * 3, pad * 3))
         status = TextView(this).apply { text = MirrorSpikeService.status }
 
+        // For unattended runs from the PC: settings as extras, then Start.
+        // adb shell am start -n <pkg>/.spike.MirrorSpikeActivity --es host 10.0.0.2 --ez auto true ...
+        intent?.let { i ->
+            i.getStringExtra("host")?.let { host.setText(it) }
+            i.getStringExtra("mbps")?.let { mbps.setText(it) }
+            i.getStringExtra("maxSide")?.let { maxSide.setText(it) }
+            i.getStringExtra("pace")?.let { pace.setText(it) }
+            if (i.hasExtra("hevc")) hevc.isChecked = i.getBooleanExtra("hevc", false)
+            if (i.hasExtra("intraRefresh")) intraRefresh.isChecked = i.getBooleanExtra("intraRefresh", false)
+            if (i.hasExtra("speedups")) speedups.isChecked = i.getBooleanExtra("speedups", false)
+        }
         val start = Button(this).apply {
             text = "Start"
             setOnClickListener {
@@ -134,6 +145,18 @@ class MirrorSpikeActivity : Activity() {
             addView(status)
         }
         setContentView(root)
+        // A direct link for testing without the router: the phone hosts a
+        // network (as for big transfers) and logs how to join it.
+        // adb logcat -s MirrorSpike   (look for "hotspot")
+        if (intent?.getBooleanExtra("hotspot", false) == true) {
+            io.github.darrenn19.nudge.Hotspot.start(this) { h ->
+                val text = h?.let { "hotspot ssid=${it["ssid"]} pass=${it["passphrase"]} mhz=${it["mhz"]}" } ?: "hotspot failed"
+                android.util.Log.i("MirrorSpike", text)
+                status.text = text
+            }
+        }
+        if (intent?.getBooleanExtra("hotspotStop", false) == true) io.github.darrenn19.nudge.Hotspot.stop()
+        if (intent?.getBooleanExtra("auto", false) == true) root.post { start.performClick() }
     }
 
     override fun onResume() {

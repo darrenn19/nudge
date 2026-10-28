@@ -15,6 +15,9 @@ part 'nudge.freezed.dart';
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>>
 abstract class NudgeApp implements RustOpaqueInterface {
+  /// Answer `AppEvent::MirrorAsked`.
+  void answerMirror({required PlatformInt64 id, required bool accept});
+
   /// Answer `AppEvent::OfferReceived`. With `always`, that device's files
   /// are accepted without asking from now on.
   void answerOffer({
@@ -119,6 +122,10 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// locks and unlocks.
   void setReceiving({required String mode});
 
+  /// Whether this device is locked: a locked device's screen is never
+  /// shared, and sharing ends when it locks.
+  void setScreenLocked({required bool locked});
+
   /// Start Nudge: load or create this device's identity in `data_dir`,
   /// listen for connections and start finding nearby devices. If it's
   /// already running in this process (Android's background service
@@ -144,6 +151,9 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// "browser" and can be sent to like any device. Already sharing: the
   /// same link. Stops by itself after ten minutes with nobody connected.
   Future<String> startWebShare();
+
+  /// End a screen-mirroring session.
+  void stopMirror({required PlatformInt64 id});
 
   void stopWebShare();
 
@@ -274,6 +284,23 @@ sealed class AppEvent with _$AppEvent {
     required String deviceName,
     required String code,
   }) = AppEvent_PairAsked;
+
+  /// A paired device wants to see this device's screen: ask, then
+  /// `answer_mirror` within a minute.
+  const factory AppEvent.mirrorAsked({
+    required PlatformInt64 id,
+    required String deviceId,
+  }) = AppEvent_MirrorAsked;
+
+  /// A screen-mirroring session started. While `sharing`, show that this
+  /// device's screen is being shared.
+  const factory AppEvent.mirrorStarted({
+    required PlatformInt64 id,
+    required String deviceId,
+    required bool sharing,
+  }) = AppEvent_MirrorStarted;
+  const factory AppEvent.mirrorEnded({required PlatformInt64 id}) =
+      AppEvent_MirrorEnded;
 }
 
 /// A device as the app shows it.

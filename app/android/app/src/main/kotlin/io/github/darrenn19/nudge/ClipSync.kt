@@ -37,27 +37,46 @@ object ClipSync {
         }
     }
 
-    /** The clipboard's text, if it changed since last asked and is recent. */
+    /**
+     * The clipboard's text, if it was copied since Nudge last sent or set the
+     * clipboard, and recently. "New" goes by when it was copied, not by the
+     * text: copying the same text again sends it again.
+     */
     fun ifNew(context: Context): String? {
         val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return null
+        // Null without focus: nothing is marked as seen, so a later try still works.
         val description = clipboard.primaryClipDescription ?: return null
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val stamp = description.timestamp
-            val prefs = context.getSharedPreferences("nudge", Context.MODE_PRIVATE)
-            if (stamp <= prefs.getLong(STAMP, 0)) return null
-            prefs.edit().putLong(STAMP, stamp).apply()
-            if (System.currentTimeMillis() - stamp > FRESH_MS) return null
+        if (!isNewCopy(context, description)) return null
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            System.currentTimeMillis() - description.timestamp > FRESH_MS
+        ) {
+            return null
         }
         if (!description.hasMimeType("text/*")) return null
         if (isSensitive(description)) return null
         val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
-        if (text.isNullOrEmpty() || text == lastText) return null
+        if (text.isNullOrEmpty()) return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O && text == lastText) return null
         lastText = text
+        remember(context, description)
         return text
+    }
+
+    /**
+     * Copied since Nudge last sent or set the clipboard. Android 8+ stamps
+     * each copy with its time; before that, only the text can tell.
+     */
+    private fun isNewCopy(context: Context, description: ClipDescription): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        val seen = context.getSharedPreferences("nudge", Context.MODE_PRIVATE).getLong(STAMP, 0)
+        return description.timestamp > seen
     }
 
     /** What's on the clipboard: text, or an image (read with [readImage]). */
     sealed class Item {
+        /** When it was copied (Android 8+), 0 if unknown. */
+        var stamp = 0L
+
         class Text(val text: String) : Item()
         class Image(val uri: Uri, val mime: String) : Item()
     }
@@ -70,32 +89,35 @@ object ClipSync {
 
     /**
      * What was just copied, for sending: text, or an image. Null if it's
-     * private (passwords), neither, or (unless [again]) what was last sent
-     * or received. Needs a Nudge window with focus. Marked as sent.
+     * private (passwords), neither, or (unless [again]) not copied since
+     * Nudge last sent or set the clipboard. Copying the same text again
+     * counts as new. Needs a Nudge window with focus. Marked as sent.
      */
     fun copiedItem(context: Context, again: Boolean = false): Item? {
         val clipboard = context.getSystemService(ClipboardManager::class.java) ?: return null
         val description = clipboard.primaryClipDescription ?: return null
         if (isSensitive(description)) return null
+        val stamped = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+        if (!again && stamped && !isNewCopy(context, description)) return null
         val item = clipboard.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0) ?: return null
         val uri = item.uri
         val imageType = (0 until description.mimeTypeCount)
             .map { description.getMimeType(it) }
             .firstOrNull { it.startsWith("image/") }
         if (uri != null && (imageType != null || context.contentResolver.getType(uri)?.startsWith("image/") == true)) {
-            if (uri == lastImage && !again) return null
+            if (uri == lastImage && !again && !stamped) return null
             val mime = context.contentResolver.getType(uri)?.takeIf { it.startsWith("image/") }
                 ?: imageType ?: "image/png"
             lastText = null
             remember(context, description)
-            return Item.Image(uri, mime)
+            return Item.Image(uri, mime).also { if (stamped) it.stamp = description.timestamp }
         }
         if (!description.hasMimeType("text/*") && item.text == null) return null
         val text = item.coerceToText(context)?.toString()
-        if (text.isNullOrEmpty() || (text == lastText && !again)) return null
+        if (text.isNullOrEmpty() || (text == lastText && !again && !stamped)) return null
         lastText = text
         remember(context, description)
-        return Item.Text(text)
+        return Item.Text(text).also { if (stamped) it.stamp = description.timestamp }
     }
 
     /** An image's bytes, or null if unreadable or too big. Off the main thread. */
@@ -143,9 +165,19 @@ object ClipSync {
                 val data = readImage(context, item) ?: return emptyList()
                 runCatching { Core.sendClipboardImage(null, item.mime, data) }.getOrNull()
             }
-        } ?: return emptyList()
-        val reached = runCatching { org.json.JSONArray(json) }.getOrNull() ?: return emptyList()
-        return (0 until reached.length()).map { reached.getString(it) }
+        }
+        val reached = json?.let { runCatching { org.json.JSONArray(it) }.getOrNull() }
+        val names = reached?.let { r -> (0 until r.length()).map { r.getString(it) } }.orEmpty()
+        if (names.isEmpty()) unsent(context, item)
+        return names
+    }
+
+    /** It reached no one: count it as not sent, so opening Nudge tries again. */
+    private fun unsent(context: Context, item: Item) {
+        if (item.stamp == 0L) return
+        val prefs = context.getSharedPreferences("nudge", Context.MODE_PRIVATE)
+        if (prefs.getLong(STAMP, 0) == item.stamp) prefs.edit().putLong(STAMP, item.stamp - 1).apply()
+        if (item is Item.Text && lastText == item.text) lastText = null
     }
 
     private fun remember(context: Context, description: ClipDescription?) {

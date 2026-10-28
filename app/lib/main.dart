@@ -98,7 +98,8 @@ Future<NudgeController> _start(List<String> files, String? text) async {
       if (text != null) await controller.shareClipboardAndSay(text);
     }
 
-    AppLifecycleListener(onResume: () => unawaited(sendCopied()));
+    // On focus, not on resume: Android refuses clipboard reads before then.
+    onWindowFocused(() => unawaited(sendCopied()));
     unawaited(sendCopied());
   }
   // A direct link left over from a run that stopped while joined.

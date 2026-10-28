@@ -41,7 +41,10 @@ object LockState {
 
     /** Tell the core what applies right now (also after the choice changes). */
     fun apply(context: Context) {
-        val mode = if (!isLocked(context)) {
+        val locked = isLocked(context)
+        // Whatever the files setting: a locked phone never shares its screen.
+        Core.setScreenLocked(locked)
+        val mode = if (!locked) {
             "usual"
         } else {
             val choice = runCatching {

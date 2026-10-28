@@ -112,10 +112,10 @@ Goal: AirDrop-like behaviour — send/receive with the app closed, receive while
 4. Multi-file packing and folder transfer (packs: `core/src/pack.rs`; folders from Windows and Android, empty ones included).
 5. Direct-link mode and start-then-upgrade switching. (done: `core/src/node/paths.rs`)
 6. Cable path, any data cable, via USB tethering. (done; a cable without tethering, over Android Open Accessory, would need a Windows USB driver)
-7. Screen mirroring (see below). ← current: tuning the latency spike
+7. Screen mirroring (see below). ← current: laptop views the phone (mirroring step 4)
 8. macOS, then iOS. Deferred: no Apple device to build or test on yet.
 
-## Screen mirroring (in progress: tuning the spike)
+## Screen mirroring (in progress: laptop views the phone)
 Goal: better than Microsoft Phone Link on speed, smoothness and integration. Paired devices only. Two modes:
 - **Regular:** see the other device's screen and control it (tap, swipe, type) with very low latency.
 - **Connected:** the same, plus the mirror window works as a doorway between the devices: copy/paste, drag files in and out, notifications. It should feel like the other device is part of this one.
@@ -146,21 +146,28 @@ Goal: better than Microsoft Phone Link on speed, smoothness and integration. Pai
 - Google Play restricts non-accessibility uses of Accessibility Services: expect review friction and needs a prominent disclosure. Sideloaded builds aren't affected.
 
 **Build order (rough effort, one person):**
-1. **Latency spike + tuning** (throwaway, `spikes/mirror-latency` on the PC, `app/android/app/src/debug/.../spike/` on the phone; how to run: the spike's README). ← current
-   - [x] Go/no-go: median 44 ms cable / 53 ms Wi-Fi before display time. Go.
-   - [x] Quality pass: H.264 High profile, CBR 30 Mbit/s, 1056×2304, BT.709 limited signalled; PC decodes on the GPU (Media Foundation), D3D11 video processor converts and scales, DPI-aware window. Result: median 35 ms cable, ~30–35 ms Wi-Fi when steady; picture "much better". PC decode + draw went from ~16 ms to ~2 ms.
-   - [ ] **Next — loss recovery and pacing.** Every lost packet now makes the PC request a keyframe; at 30 Mbit/s keyframes are big bursts (30–58 ms to encode, 10–40 ms to send) that cause more loss: 47 keyframes in 60 s on cable, 9% of frames lost or skipped, the 100–280 ms spikes. Fix: the phone keeps the packets of the last ~10 frames; the PC NACKs missing fragments as soon as it sees a gap (send once, re-ask after ~1 RTT, up to 2–3 tries); request a keyframe only if the fragments can't be recovered within ~2 RTTs or about 50 ms. Pace the phone's sending (spread each frame's packets over a few ms instead of one burst). Possibly intra-refresh (`KEY_INTRA_REFRESH_PERIOD`) instead of periodic keyframes, so no frame is a big burst.
-   - [ ] **Next — phone encoder latency** (~23 ms median, unchanged): try Qualcomm's vendor low-latency keys (e.g. `vendor.qti-ext-enc-low-latency.enable`) alongside `KEY_LOW_LATENCY`; check what the S24's `c2.qti.avc.encoder` actually accepts. Measure with and without.
-   - [ ] **Next — never block on present.** PC draw p95 is 16.6 ms: `Present` sometimes waits a full refresh. Use a frame-latency waitable swap chain and skip to the newest frame instead of waiting.
-   - [ ] Then measure: one cable run, one Wi-Fi run (labels `cable-tuned`, `wifi-tuned`), and add them to `docs/BENCHMARKS.md`. Optional: H.265 (the PC needs "HEVC Video Extensions" from the Store), the phone hotspot path, 120 fps.
-   - Then decide which settings carry over into step 2, and stop working on the spike.
-2. **Real-time channel in the core** (~1 week): encrypted UDP datagrams keyed by the pairing certificates, stale-frame dropping, a session handshake, and path selection (cable > hotspot > router). Testable between two desktop processes, no phone needed. ← in progress
-   - [x] Built (2026-10-28, uncommitted): `core/src/realtime/`. Handshake over an existing TLS connection; keys from TLS key export (bound to both certificates); AES-256-GCM per direction with replay window; fragments with NACK recovery (per-fragment tries, resends unpaced, give up after 50 ms), sender pacing that catches up for coarse timers, a complete keyframe supersedes earlier gaps; path selection by pinging every address (cable > wired > hotspot > Wi-Fi, switch only to a better kind or when the current one dies). Tests: `core/tests/realtime.rs`; two processes: `nudge mirror-bench --listen` / `--to <host>` (no flags: both in one process; `--drop P` simulates loss).
-   - [ ] Not wired into `Node` yet: the caller opens the TLS connection itself. Adding it as a request kind changes the wire protocol (version bump breaks file transfer with older phone builds), so do it with step 3.
-   - [ ] Windows timers are ~16 ms unless raised: the Windows app should call `timeBeginPeriod(1)` while mirroring (core can't: no unsafe). Pacing is rate-correct without it but bursty.
+1. **Latency spike + tuning** (throwaway, `spikes/mirror-latency` on the PC, `app/android/app/src/debug/.../spike/` on the phone; how to run, including unattended runs over adb: the spike's README). Done 2026-10-28; numbers in `docs/BENCHMARKS.md`.
+   - Result over Wi-Fi via the direct link, 90 s: median 18.7 ms, p95 32, p99 48, 0 lost frames, 0 freezes (before display time). Through the mesh router: no lost frames either, but p99 ~100 ms.
+   - **Settings that carry over:** H.264 High, CBR 30 Mbit/s, 1056×2304, BT.709 limited signalled; intra-refresh (30 frames), no periodic keyframes; encoder speed-ups (`vendor.qti-ext-enc-low-latency.enable`, `KEY_OPERATING_RATE` max, `KEY_LATENCY` 1, `KEY_LOW_LATENCY`): encode 20.5 → 10.7 ms; paced sending (200 Mbit/s cap); phone Wi-Fi low-latency + high-perf locks; 1 s of resend history; PC: GPU decode (Media Foundation), D3D11 video processor, waitable swap chain with newest frame winning, 1 ms timers.
+   - **Decision: mirroring over Wi-Fi uses the direct link** (the phone's Wi-Fi Direct group, as for big transfers). Through the router Wi-Fi pauses 50–300 ms; direct, the network max is ~50 ms. Catch: while joined, the PC is off its usual Wi-Fi.
+   - Tried, no effect: the PC sending a tiny packet every 5 ms to stop its Wi-Fi dozing.
+2. **Real-time channel in the core** (~1 week): encrypted UDP datagrams keyed by the pairing certificates, stale-frame dropping, a session handshake, and path selection (cable > hotspot > router). Testable between two desktop processes, no phone needed.
+   - [x] Built (2026-10-28): `core/src/realtime/`. Handshake over an existing TLS connection; keys from TLS key export (bound to both certificates); AES-256-GCM per direction with replay window; fragments with NACK recovery (per-fragment tries, resends unpaced, give up after 50 ms), sender pacing that catches up for coarse timers, a complete keyframe supersedes earlier gaps; path selection by pinging every address (cable > wired > hotspot > Wi-Fi, switch only to a better kind or when the current one dies). Tests: `core/tests/realtime.rs`; two processes: `nudge mirror-bench --listen` / `--to <host>` (no flags: both in one process; `--drop P` simulates loss).
+   - [x] Wired into `Node` as request kind 11 (`Mirror`), no version bump: older builds just refuse it ("needs an update"), file transfer unaffected. `Node::start_mirror` / `answer_mirror` / `take_mirror` / `stop_mirror` / `mirrors`, events `MirrorAsked` / `MirrorStarted` / `MirrorEnded` (`core/src/node/mirror.rs`).
+   - [x] 1 ms Windows timers while a session runs (`app/rust/src/timer.rs`; `nudge mirror-bench` does the same). With 3% loss: p95 16.5 → 6.4 ms. Plus a tail-loss wait that adapts to the sender's pacing (4–30 ms instead of a fixed 30): p95 4.5, p99 10.6 ms.
+   - [x] Recovery on *link time* (a silence counts as at most 20 ms), 5 NACK tries, 300 ms wall backstop, 1 s / 64 frames of history: a Wi-Fi pause no longer turns late frames into skipped ones (spike through the router: 27–149 skipped → 0).
    - [ ] Try it between the PC and a second machine or the phone (once the phone side exists).
-3. **Session and safety plumbing** (~3–4 days): start/stop, the consent flow on the phone, the "being shared" indicator, paired-only checks. Do it before the features so they never exist without it.
-4. **Laptop views the phone** (~2–3 weeks): the spike rebuilt on the real channel; native Windows renderer; rotation, resolution changes, reconnect when switching paths. Measure again.
+3. **Session and safety plumbing** (~3–4 days): start/stop, the consent flow on the phone, the "being shared" indicator, paired-only checks. Do it before the features so they never exist without it. Done except the item that needs step 4's capture code.
+   - [x] In the core, enforced for every feature: paired only; the shared device's user is asked (`ShowMe`) or started it (`ShowYou`); a locked device never shares, and sharing ends when it locks (`Node::set_screen_locked`, from `LockState.kt` on Android); unclaimed sessions end after 15 s. Tests in `core/src/node.rs` (`mirroring_*`).
+   - [x] Android: "wants to see your screen" notification (Allow / Don't allow, shown even with the window open), "Your screen is being shared" ongoing notification with Stop. Windows declines requests to share its own screen (not built yet).
+   - [ ] Allow opens Android's screen-capture prompt and answers only after it (with step 4). Test the notifications on the phone.
+4. **Laptop views the phone** (~2–3 weeks): the spike rebuilt on the real channel; native Windows renderer; rotation, resolution changes, reconnect when switching paths. Measure again. ← next
+   - [ ] Phone: a capture service (MediaProjection → encoder with the step 1 settings) feeding `Session::send` through JNI, started from the Allow on "wants to see your screen" (or from the phone's own "Mirror to PC").
+   - [ ] PC: a native mirror window (child window, D3D11, the spike's decode and draw) fed by `take_mirror`/`start_mirror`; "Mirror phone" in the device menu and tray.
+   - [ ] Bring up the direct link automatically for a Wi-Fi session, and come back to the usual network when it ends. Look at Windows' Wi-Fi Direct API so the PC stays on its home network too.
+   - [ ] Open the window and decoder before the first frame arrives (first frame now 220–260 ms).
+   - [ ] Rotation and resolution changes; reconnect when the path changes (cable plugged in or out).
+   - [ ] Measure: cable, router Wi-Fi, direct link (labels `app-cable`, `app-wifi`, `app-direct`); look at the occasional encoder hiccups (a few frames up to ~140 ms) and the draw wait for the next refresh (p95 ~12 ms).
 5. **Laptop controls the phone** (~2 weeks + tuning): Accessibility Service taps, swipes, scroll, Back/Home/Recents first; then typing via `ACTION_SET_TEXT` (a custom IME only if that's not good enough).
 6. **Connected mode** (~3–4 weeks), cheapest first: file drop and clipboard (both reuse what's built), notifications with reply, recent-media tray, crop drag-out, then phone audio (shares the MediaProjection session).
 7. **Phone views and controls the laptop** (~2–3 weeks): same channel, reversed (Windows Graphics Capture + Media Foundation encoder, `SendInput`).
@@ -191,8 +198,20 @@ Everything else is asked the first time a feature needs it, never up front.
 - Keep the core UI-agnostic; platform code only calls the core's public API.
 
 
+TODO LIST
+- Local device controls in screen mirroring
+- Speaker choice selection
+- Open file from notification (no need to open app)
+- Full screen mode in portrait/landscape mode during screen mirroring
+
+POSSIBLE IDEAS
+
+- Extended display (like PCs)
+- Play sound to find device
+- Nudge MCP for developing on mobile
 
 
-Key fixes (rn)
-
-- Copy as text phone to laptop not working (maybe becuase not explicitly copied, however still in clipboard)
+FUTURE NEEDS
+- Logo
+- Better Readme + license
+- Youtube Vids

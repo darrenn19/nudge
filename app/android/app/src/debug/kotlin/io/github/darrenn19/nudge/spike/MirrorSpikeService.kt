@@ -72,8 +72,12 @@ class MirrorSpikeService : Service() {
         private const val F_RESENT = 4
         private const val F_INTRA_REFRESH = 8
 
-        /** Frames kept for resends: ~160 ms at 60 fps. */
-        private const val HISTORY = 10
+        /**
+         * Frames kept for resends: 1 s at 60 fps. Wi-Fi can hold everything for
+         * a few hundred ms; the PC's requests arrive after that, and must still
+         * find the packets here.
+         */
+        private const val HISTORY = 60
 
         /** Intra-refresh: frames for one full sweep of the picture (0.5 s at 60 fps). */
         private const val REFRESH_FRAMES = 30

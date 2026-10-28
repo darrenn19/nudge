@@ -145,6 +145,15 @@ fn event_json(event: &AppEvent) -> Option<Value> {
         } => json!({"type": "clipboardImage", "device": device_id, "path": path, "mime": mime}),
         AppEvent::HotspotWanted { id } => json!({"type": "hotspotWanted", "id": id}),
         AppEvent::HotspotDone => json!({"type": "hotspotDone"}),
+        AppEvent::MirrorAsked { id, device_id } => {
+            json!({"type": "mirrorAsked", "id": id, "device": device_id})
+        }
+        AppEvent::MirrorStarted {
+            id,
+            device_id,
+            sharing,
+        } => json!({"type": "mirrorStarted", "id": id, "device": device_id, "sharing": sharing}),
+        AppEvent::MirrorEnded { id } => json!({"type": "mirrorEnded", "id": id}),
         _ => return None,
     })
 }
@@ -211,6 +220,43 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_answerPair<'l>(
     if let Some(c) = core() {
         let _guard = runtime().enter();
         c.node.answer_pair(id as u64, accept != 0);
+    }
+}
+
+/// Answer a "mirrorAsked" event.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_answerMirror<'l>(
+    _: JNIEnv<'l>,
+    _: JClass<'l>,
+    id: jlong,
+    accept: jboolean,
+) {
+    if let Some(c) = core() {
+        c.node.answer_mirror(id as u64, accept != 0);
+    }
+}
+
+/// End a mirroring session (the Stop on "being shared").
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_stopMirror<'l>(
+    _: JNIEnv<'l>,
+    _: JClass<'l>,
+    id: jlong,
+) {
+    if let Some(c) = core() {
+        c.node.stop_mirror(id as u64);
+    }
+}
+
+/// Locked or screen off: the screen is never shared meanwhile.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_setScreenLocked<'l>(
+    _: JNIEnv<'l>,
+    _: JClass<'l>,
+    locked: jboolean,
+) {
+    if let Some(c) = core() {
+        c.node.set_screen_locked(locked != 0);
     }
 }
 

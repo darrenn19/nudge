@@ -25,6 +25,7 @@ pub async fn bench(
     send: MirrorSend,
     config: Config,
 ) -> Result<()> {
+    let _timer = FineTimer::new();
     if listen {
         let tls = super::load_tls(identity_dir)?;
         let listener = TcpListener::bind(("0.0.0.0", port))
@@ -236,4 +237,52 @@ fn pct(v: &mut [u64], p: f64) -> f64 {
     }
     v.sort_unstable();
     v[((v.len() - 1) as f64 * p).round() as usize] as f64 / 1000.0
+}
+
+/// 1 ms timers while benchmarking, as the Windows app does while mirroring
+/// (Windows otherwise wakes sleeping threads every ~16 ms). `NUDGE_COARSE_TIMER=1`
+/// leaves the default, to compare.
+struct FineTimer(bool);
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod winmm {
+    #[link(name = "winmm")]
+    unsafe extern "system" {
+        fn timeBeginPeriod(period: u32) -> u32;
+        fn timeEndPeriod(period: u32) -> u32;
+    }
+    pub fn set(fine: bool) {
+        // SAFETY: no pointers; each end matches a begin.
+        unsafe {
+            if fine {
+                timeBeginPeriod(1);
+            } else {
+                timeEndPeriod(1);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+mod winmm {
+    pub fn set(_fine: bool) {}
+}
+
+impl FineTimer {
+    fn new() -> Self {
+        let on = std::env::var_os("NUDGE_COARSE_TIMER").is_none();
+        if on {
+            winmm::set(true);
+        }
+        Self(on)
+    }
+}
+
+impl Drop for FineTimer {
+    fn drop(&mut self) {
+        if self.0 {
+            winmm::set(false);
+        }
+    }
 }

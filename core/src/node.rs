@@ -28,8 +28,8 @@ use crate::link::{self, LinkKind, LocalNet, Speeds};
 use crate::pack::{self, PACK_FILE_MAX, PACK_MAX_BYTES, PACK_MAX_FILES, PACK_MIN_FILES, Pack};
 use crate::pairing::{self, CODE_LIFETIME, PairingCode};
 use crate::protocol::{
-    AwaitAnswer, Batch, Cancel as CancelSend, Clip, ClipImage, Offer, PairAsk, PairReply,
-    PairRequest, Request, Response, Status,
+    AwaitAnswer, Batch, Cancel as CancelSend, Clip, ClipImage, MirrorReply, Offer, PairAsk,
+    PairReply, PairRequest, Request, Response, Status,
 };
 use crate::transfer::{
     Cancel, CancelledBy, Landed, Progress, Stop, TransferStats, land, send_file_tracked,
@@ -37,8 +37,10 @@ use crate::transfer::{
 };
 use crate::{DEFAULT_PORT, Error, Result, Tls};
 
+mod mirror;
 mod paths;
 mod web;
+pub use mirror::{MirrorInfo, MirrorRole};
 pub use paths::HotspotInfo;
 pub use web::WEB_PORT;
 
@@ -478,6 +480,26 @@ pub enum NodeEvent {
         device_name: String,
         code: String,
     },
+    /// A paired device wants to see this device's screen: ask, then answer
+    /// with `Node::answer_mirror` within a minute (closed with
+    /// `OfferClosed` either way).
+    MirrorAsked {
+        id: u64,
+        peer: Fingerprint,
+    },
+    /// A mirroring session started. For one the core started (this device
+    /// was asked, or shown a screen), take it with `Node::take_mirror`.
+    /// While `role` is `Sharing`, show that the screen is being shared.
+    MirrorStarted {
+        id: u64,
+        peer: Fingerprint,
+        role: MirrorRole,
+    },
+    /// That session ended (either side stopped it, the connection broke, or
+    /// this device locked).
+    MirrorEnded {
+        id: u64,
+    },
 }
 
 /// A running Nudge device. Dropping it stops everything.
@@ -526,6 +548,10 @@ struct Shared {
     cable_unused: std::sync::atomic::AtomicBool,
     /// Asks nearby devices to say they're here; set once discovery runs.
     refresher: std::sync::OnceLock<Refresher>,
+    /// Screen mirroring: questions and sessions running.
+    mirrors: Mutex<mirror::Mirrors>,
+    /// The app says this device is locked: its screen is never shared.
+    screen_locked: std::sync::atomic::AtomicBool,
 }
 
 /// How incoming files are treated right now. The app sets it from things
@@ -939,6 +965,8 @@ impl Node {
             direct_link: std::sync::atomic::AtomicBool::new(direct_link),
             cable_unused: std::sync::atomic::AtomicBool::new(false),
             refresher: std::sync::OnceLock::new(),
+            mirrors: Mutex::default(),
+            screen_locked: std::sync::atomic::AtomicBool::new(false),
         });
 
         let mut tasks = vec![
@@ -2039,7 +2067,7 @@ impl Shared {
         from: IpAddr,
     ) -> Result<()>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: crate::realtime::Control,
     {
         let trusted = self.tls.is_trusted(&peer);
         if trusted {
@@ -2123,6 +2151,13 @@ impl Shared {
                 self.sender_cancelled(peer, cancel);
                 let _ = stream.shutdown().await;
                 Ok(())
+            }
+            Request::Mirror(request) if trusted => {
+                self.answer_mirror_request(stream, peer, request).await
+            }
+            Request::Mirror(_) => {
+                let _ = MirrorReply::Declined.write_to(&mut stream).await;
+                Err(Error::UntrustedPeer(peer))
             }
             Request::AwaitAnswer(_)
             | Request::Clip(_)
@@ -3973,5 +4008,142 @@ mod tests {
             "{:?}",
             names_in(&downloads)
         );
+    }
+
+    /// The laptop asks to see the phone's screen: the phone's user is asked,
+    /// frames flow once they agree, and both sides hear when it ends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mirroring_asks_the_shared_device_first() {
+        use crate::realtime::{Config, Event, OutFrame};
+        let ((laptop, mut laptop_events, _l), (phone, mut phone_events, _p)) = paired_pair().await;
+        let phone_fp = phone.fingerprint();
+        let laptop = Arc::new(laptop);
+        let asking = {
+            let laptop = laptop.clone();
+            tokio::spawn(async move {
+                laptop
+                    .start_mirror(phone_fp, MirrorRole::Viewing, Config::default())
+                    .await
+            })
+        };
+        let NodeEvent::MirrorAsked { id: question, peer } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::MirrorAsked { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(peer, laptop.fingerprint());
+        // Not started before the answer.
+        assert!(phone.mirrors().is_empty());
+        phone.answer_mirror(question, true);
+
+        let (laptop_id, mut viewer) = asking.await.unwrap().unwrap();
+        let NodeEvent::MirrorStarted { id, role, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::MirrorStarted { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        assert_eq!(role, MirrorRole::Sharing);
+        assert!(matches!(
+            next(&mut laptop_events, |e| matches!(e, NodeEvent::MirrorStarted { .. })).await,
+            NodeEvent::MirrorStarted { id, role: MirrorRole::Viewing, .. } if id == laptop_id
+        ));
+        let sharer = phone.take_mirror(id).expect("the phone's session");
+        assert!(phone.take_mirror(id).is_none(), "taken once");
+        sharer
+            .send(OutFrame {
+                stream: 0,
+                data: vec![7; 5_000],
+                key: true,
+                intra_refresh: false,
+                capture_us: sharer.now_us(),
+            })
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match viewer.next_event().await {
+                    Some(Event::Frame(f)) => return f,
+                    Some(_) => {}
+                    None => panic!("session ended"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(got.data, vec![7; 5_000]);
+
+        // The viewer stops: the phone hears it ended.
+        laptop.stop_mirror(laptop_id);
+        assert!(matches!(
+            next(&mut phone_events, |e| matches!(e, NodeEvent::MirrorEnded { .. })).await,
+            NodeEvent::MirrorEnded { id: ended } if ended == id
+        ));
+        until(|| phone.mirrors().is_empty() && laptop.mirrors().is_empty()).await;
+        drop(sharer);
+    }
+
+    /// No means no; a locked phone is never asked; locking ends sharing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mirroring_respects_no_and_locks() {
+        use crate::realtime::Config;
+        let ((laptop, _laptop_events, _l), (phone, mut phone_events, _p)) = paired_pair().await;
+        let (phone_fp, laptop_fp) = (phone.fingerprint(), laptop.fingerprint());
+        let laptop = Arc::new(laptop);
+        let ask = |laptop: Arc<Node>| {
+            tokio::spawn(async move {
+                laptop
+                    .start_mirror(phone_fp, MirrorRole::Viewing, Config::default())
+                    .await
+            })
+        };
+
+        let asking = ask(laptop.clone());
+        let NodeEvent::MirrorAsked { id, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::MirrorAsked { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        phone.answer_mirror(id, false);
+        assert!(matches!(asking.await.unwrap(), Err(Error::Declined)));
+
+        // Locked: refused without a question.
+        phone.set_screen_locked(true);
+        assert!(matches!(ask(laptop.clone()).await.unwrap(), Err(Error::PeerLocked)));
+        assert!(matches!(
+            phone.start_mirror(laptop_fp, MirrorRole::Sharing, Config::default()).await,
+            Err(Error::ScreenLocked)
+        ));
+
+        // Unlocked, the phone offers its screen; locking ends it.
+        phone.set_screen_locked(false);
+        let (id, _sharer) = phone
+            .start_mirror(laptop_fp, MirrorRole::Sharing, Config::default())
+            .await
+            .unwrap();
+        assert_eq!(phone.mirrors().len(), 1);
+        phone.set_screen_locked(true);
+        assert!(matches!(
+            next(&mut phone_events, |e| matches!(e, NodeEvent::MirrorEnded { .. })).await,
+            NodeEvent::MirrorEnded { id: ended } if ended == id
+        ));
+        until(|| laptop.mirrors().is_empty()).await;
+    }
+
+    /// A device that isn't paired can't start mirroring.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn mirroring_needs_pairing() {
+        use crate::realtime::Config;
+        let (udp_a, udp_b) = (free_udp_port(), free_udp_port());
+        let (laptop, _le, _l) = start("Laptop", udp_a, udp_b).await;
+        let (phone, _pe, _p) = start("Phone", udp_b, udp_a).await;
+        let r = laptop
+            .start_mirror(phone.fingerprint(), MirrorRole::Viewing, Config::default())
+            .await;
+        assert!(matches!(r, Err(Error::UntrustedPeer(_))));
     }
 }

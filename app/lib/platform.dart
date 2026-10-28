@@ -419,8 +419,15 @@ Future<void> setClipboardText(String text) async {
   }
 }
 
+/// Android: calls [handle] each time the window gets focus, the first moment
+/// Android lets it read the clipboard (on resume is too early).
+void onWindowFocused(void Function() handle) {
+  if (Platform.isAndroid) _onAndroid('windowFocused', (_) => handle());
+}
+
 /// Android: the clipboard's text if it changed since last asked (and wasn't
-/// put there by Nudge). Android only lets an app read it while on screen.
+/// put there by Nudge). Android only lets an app read it while its window
+/// has focus.
 Future<String?> newClipboardText() async {
   if (!Platform.isAndroid) return null;
   try {

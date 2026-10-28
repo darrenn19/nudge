@@ -28,6 +28,14 @@
 //! `Reject` if that device doesn't sync its clipboard with this one). A
 //! copied image the same way, with `ClipImage`.
 //!
+//! Screen mirroring between paired devices: `Mirror(ShowMe)` from the
+//! device that wants to see the other's screen, or `Mirror(ShowYou)` from
+//! the one offering its own → `MirrorReply`. The shared device's user is
+//! always asked (`ShowMe`) or started it themselves (`ShowYou`); a locked
+//! device never shares. After `Accepted`, the same connection carries the
+//! real-time handshake (`realtime::Session`) and stays open for the session.
+//! Builds from before mirroring close the connection on `Mirror`.
+//!
 //! Flow for pairing:
 //! 1. Scanner → `PairRequest` (header, proof of the QR secret, device name)
 //! 2. Code owner → `PairReply` (accept with its device name, or reject)
@@ -71,6 +79,8 @@ const KIND_LINK: u8 = 7;
 const KIND_PACK: u8 = 8;
 const KIND_CLIP_IMAGE: u8 = 9;
 const KIND_CANCEL: u8 = 10;
+/// New in a compatible way: older builds of the same version refuse it.
+const KIND_MIRROR: u8 = 11;
 
 /// Header that opens every connection.
 fn put_header(buf: &mut Vec<u8>, kind: u8) {
@@ -147,6 +157,8 @@ pub enum Request {
     Link(Link),
     /// The sender's user stopped a send. No reply.
     Cancel(Cancel),
+    /// Mirror a screen: answered with a `MirrorReply`.
+    Mirror(Mirror),
 }
 
 impl Request {
@@ -167,6 +179,11 @@ impl Request {
                 1 => Ok(Self::Link(Link::Ask)),
                 2 => Ok(Self::Link(Link::Offer)),
                 _ => Err(Error::Protocol("unknown link request")),
+            },
+            KIND_MIRROR => match r.read_u8().await? {
+                1 => Ok(Self::Mirror(Mirror::ShowMe)),
+                2 => Ok(Self::Mirror(Mirror::ShowYou)),
+                _ => Err(Error::Protocol("unknown mirror request")),
             },
             _ => Err(Error::Protocol("unknown request kind")),
         }
@@ -320,6 +337,70 @@ impl Link {
         w.write_all(&buf).await?;
         w.flush().await?;
         Ok(())
+    }
+}
+
+/// A screen-mirroring request; see the module docs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mirror {
+    /// "Show me your screen." Your user is asked.
+    ShowMe,
+    /// "My user wants to show you my screen."
+    ShowYou,
+}
+
+impl Mirror {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        let mut buf = Vec::with_capacity(8);
+        put_header(&mut buf, KIND_MIRROR);
+        buf.push(match self {
+            Self::ShowMe => 1,
+            Self::ShowYou => 2,
+        });
+        w.write_all(&buf).await?;
+        w.flush().await?;
+        Ok(())
+    }
+}
+
+/// Answers to a `Mirror` request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MirrorReply {
+    /// The real-time handshake follows on this connection.
+    Accepted,
+    /// The user said no.
+    Declined,
+    /// Nobody answered in time.
+    NoAnswer,
+    /// The device that would share its screen is locked.
+    Locked,
+    /// A question about mirroring from this device is already open.
+    Busy,
+}
+
+impl MirrorReply {
+    pub async fn write_to<W: AsyncWrite + Unpin>(&self, w: &mut W) -> Result<()> {
+        w.write_u8(match self {
+            Self::Declined => 0,
+            Self::Accepted => 1,
+            Self::NoAnswer => 2,
+            Self::Locked => 3,
+            Self::Busy => 4,
+        })
+        .await?;
+        w.flush().await?;
+        Ok(())
+    }
+
+    pub async fn read_from<R: AsyncRead + Unpin>(r: &mut R) -> Result<Self> {
+        match r.read_u8().await? {
+            0 => Ok(Self::Declined),
+            1 => Ok(Self::Accepted),
+            2 => Ok(Self::NoAnswer),
+            3 => Ok(Self::Locked),
+            4 => Ok(Self::Busy),
+            _ => Err(Error::Protocol("unknown mirror reply")),
+        }
     }
 }
 
@@ -868,6 +949,32 @@ mod tests {
             reply.write_to(&mut buf).await.unwrap();
             assert_eq!(
                 LinkReply::read_from(&mut buf.as_slice()).await.unwrap(),
+                reply
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mirror_messages_round_trip() {
+        for m in [Mirror::ShowMe, Mirror::ShowYou] {
+            let mut buf = Vec::new();
+            m.write_to(&mut buf).await.unwrap();
+            assert_eq!(
+                Request::read_from(&mut buf.as_slice()).await.unwrap(),
+                Request::Mirror(m)
+            );
+        }
+        for reply in [
+            MirrorReply::Accepted,
+            MirrorReply::Declined,
+            MirrorReply::NoAnswer,
+            MirrorReply::Locked,
+            MirrorReply::Busy,
+        ] {
+            let mut buf = Vec::new();
+            reply.write_to(&mut buf).await.unwrap();
+            assert_eq!(
+                MirrorReply::read_from(&mut buf.as_slice()).await.unwrap(),
                 reply
             );
         }

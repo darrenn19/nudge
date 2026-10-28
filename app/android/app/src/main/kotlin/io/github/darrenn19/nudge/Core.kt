@@ -37,6 +37,15 @@ object Core {
 
     @JvmStatic external fun answerPair(id: Long, accept: Boolean)
 
+    /** Answer a "mirrorAsked" event: may that device see this screen? */
+    @JvmStatic external fun answerMirror(id: Long, accept: Boolean)
+
+    /** End a screen-mirroring session. */
+    @JvmStatic external fun stopMirror(id: Long)
+
+    /** Locked or screen off: the screen is never shared meanwhile. */
+    @JvmStatic external fun setScreenLocked(locked: Boolean)
+
     /** "usual", "ask" or "refuse". */
     @JvmStatic external fun setReceiving(mode: String)
 

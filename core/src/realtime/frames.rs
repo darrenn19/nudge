@@ -22,23 +22,39 @@ use super::wire::{self, F_INTRA_REFRESH, F_KEY, F_RESENT, Fragment};
 /// every network's MTU, tunnels included.
 pub const MAX_FRAGMENT: usize = 1150;
 
-/// Frames kept for resends, and for how long.
-const HISTORY_FRAMES: usize = 16;
-const HISTORY_US: u64 = 500_000;
+/// Frames kept for resends, and for how long: Wi-Fi can hold everything for
+/// a few hundred ms, and requests arriving after that must still find them.
+const HISTORY_FRAMES: usize = 64;
+const HISTORY_US: u64 = 1_000_000;
 /// A frame not sent within this long is dropped instead (pacing or the
 /// network can't keep up): sending it late only adds delay.
 pub(super) const MAX_QUEUE_US: u64 = 100_000;
 
 /// How many times to ask for the same missing fragments.
-const NACK_TRIES: u32 = 3;
+const NACK_TRIES: u32 = 5;
 /// Shortest wait before asking again.
 const MIN_RETRY_US: u64 = 3_000;
 /// Give up on a frame this long after noticing it's incomplete.
 const GIVE_UP_US: u64 = 50_000;
-/// A frame with no new fragment for this long has a gap at the end. Well
-/// above a sender's pause between bursts (~16 ms where timers are coarse);
-/// a gap before a later frame is noticed sooner, when that frame arrives.
-const STALL_US: u64 = 30_000;
+/// Recovery deadlines (asking again, giving up) run on link time: wall time
+/// while packets keep arriving, with each silence counting as at most this
+/// much (above the ~17 ms between frames at 60 fps, so a normal stream runs
+/// at full speed). Wi-Fi sometimes holds everything for 50-300 ms and then delivers it
+/// at once; that isn't loss, waiting it out costs nothing (later frames are
+/// held up too), and giving up meanwhile would turn late frames into
+/// skipped ones and waste the NACK tries.
+const LINK_GAP_US: u64 = 20_000;
+/// Give up this long after noticing a gap, in wall time, whatever link time
+/// says: the sender may simply have gone quiet (a still screen), leaving a
+/// frame that was really lost waiting.
+const GIVE_UP_WALL_US: u64 = 300_000;
+/// A frame with no new fragment for this long has a gap at the end (its
+/// last fragments were lost). Adapts to the longest pause seen between one
+/// frame's fragments (the sender's pacing: ~1 ms with fine timers, ~16 ms
+/// where they're coarse), within these bounds. A gap before a later frame
+/// is noticed sooner, when that frame arrives.
+const STALL_MIN_US: u64 = 4_000;
+const STALL_MAX_US: u64 = 30_000;
 /// Between keyframe requests while waiting for one.
 const KEY_REQUEST_EVERY_US: u64 = 150_000;
 /// A frame this far ahead of the one expected means a restart: start over.
@@ -266,9 +282,11 @@ struct Partial {
     capture_us: u64,
     /// When its latest fragment arrived (or when it was found missing).
     last_seen: u64,
-    /// When something was first noticed missing.
+    /// When something was first noticed missing (link time).
     gap_since: Option<u64>,
-    /// Per fragment: times asked for, and when last.
+    /// The same in wall time.
+    gap_wall: Option<u64>,
+    /// Per fragment: times asked for, and when last (link time).
     asks: Vec<(u32, u64)>,
     /// The same, for the whole frame while none of it has arrived.
     whole_asks: (u32, u64),
@@ -285,6 +303,7 @@ impl Partial {
             capture_us: 0,
             last_seen: now,
             gap_since: None,
+            gap_wall: None,
             asks: Vec::new(),
             whole_asks: (0, 0),
             resent: false,
@@ -315,6 +334,12 @@ pub(super) struct FrameReceiver {
     /// Smoothed time from a NACK to its resend arriving: the round trip
     /// plus however long the sender takes to answer.
     resend_rtt: Option<u64>,
+    /// Longest recent pause between two fragments of one frame (decays).
+    /// Until one is seen, the cautious maximum applies.
+    pause_peak: Option<u64>,
+    /// Link time (see `LINK_GAP_US`), and when the last packet arrived.
+    link: u64,
+    last_arrival: Option<u64>,
     pub(super) stats: ReceiveStats,
 }
 
@@ -330,6 +355,9 @@ impl FrameReceiver {
             intra_refresh: false,
             last_key_request: None,
             resend_rtt: None,
+            pause_peak: None,
+            link: 0,
+            last_arrival: None,
             stats: ReceiveStats::default(),
         }
     }
@@ -356,7 +384,20 @@ impl FrameReceiver {
         !self.partials.is_empty() || !self.ready.is_empty() || self.need_key && self.next.is_some()
     }
 
+    /// Link time at `now` (see `LINK_GAP_US`).
+    fn link_at(&self, now: u64) -> u64 {
+        self.link + self.last_arrival.map_or(0, |t| now.saturating_sub(t).min(LINK_GAP_US))
+    }
+
+    /// Any packet from the other side arrived (fragments, pings): the link
+    /// is delivering, so link time moves on.
+    pub(super) fn on_packet(&mut self, now: u64) {
+        self.link = self.link_at(now);
+        self.last_arrival = Some(now);
+    }
+
     pub(super) fn on_fragment(&mut self, f: &Fragment<'_>, now: u64) {
+        self.on_packet(now);
         let (id, index, count) = (f.frame, f.index as usize, f.count as usize);
         let resent = f.flags & F_RESENT != 0;
         if self.next.is_some_and(|n| id < n) {
@@ -399,6 +440,10 @@ impl FrameReceiver {
             self.stats.resends_unused += resent as u64;
             return;
         }
+        if p.have > 0 && !resent {
+            let pause = now.saturating_sub(p.last_seen);
+            self.pause_peak = Some(self.pause_peak.map_or(pause, |peak| pause.max(peak)));
+        }
         p.parts[index] = Some(f.data.to_vec());
         p.have += 1;
         p.last_seen = now;
@@ -408,7 +453,7 @@ impl FrameReceiver {
             let (asked, at) = p.asks[index];
             if asked == 1 || asked == 0 && p.whole_asks.0 == 1 {
                 let at = if asked == 1 { at } else { p.whole_asks.1 };
-                let sample = now.saturating_sub(at);
+                let sample = self.link.saturating_sub(at);
                 self.resend_rtt = Some(self.resend_rtt.map_or(sample, |r| (r * 7 + sample) / 8));
             }
             p.resent = true;
@@ -422,6 +467,9 @@ impl FrameReceiver {
         if p.resent {
             self.stats.frames_recovered += 1;
         }
+        // Forget old pauses slowly (about a second at 60 fps), so a sender
+        // that once paused long doesn't slow detection for good.
+        self.pause_peak = self.pause_peak.map(|peak| peak * 63 / 64);
         self.intra_refresh = p.flags & F_INTRA_REFRESH != 0;
         let frame = Frame {
             stream: self.stream,
@@ -435,21 +483,34 @@ impl FrameReceiver {
         self.ready.insert(id, frame);
     }
 
+    /// How long a frame may go without a new fragment before its end counts
+    /// as lost: twice the longest recent pause between fragments, plus room
+    /// for jitter.
+    fn stall_us(&self) -> u64 {
+        self.pause_peak
+            .map_or(STALL_MAX_US, |peak| (peak * 2 + 2_000).clamp(STALL_MIN_US, STALL_MAX_US))
+    }
+
     /// Asks for what's missing, skips what can't be recovered, and hands out
     /// frames in order. `rtt_us`: the current round-trip estimate.
     pub(super) fn poll(&mut self, now: u64, rtt_us: u64) -> Polled {
         let retry = (rtt_us.max(self.resend_rtt.unwrap_or(0)) * 3 / 2).max(MIN_RETRY_US);
+        let stall = self.stall_us();
+        // Wall time spots a lost frame end; link time paces recovery.
+        let wall = now;
+        let now = self.link_at(wall);
         let mut out = Polled::default();
 
         for (&id, p) in self.partials.iter_mut() {
             // Missing: a later frame has started, a later fragment of this
             // one has arrived, or nothing more has come for a while.
-            let behind = self.highest.is_some_and(|h| id < h) || now.saturating_sub(p.last_seen) > STALL_US;
+            let behind = self.highest.is_some_and(|h| id < h) || wall.saturating_sub(p.last_seen) > stall;
             // Ask for a fragment again only after `retry`, at most NACK_TRIES times.
             let due = |(tries, last): (u32, u64)| tries < NACK_TRIES && (tries == 0 || now.saturating_sub(last) >= retry);
             if p.parts.is_empty() {
                 // None of it yet: ask for the whole frame.
                 p.gap_since.get_or_insert(now);
+                p.gap_wall.get_or_insert(wall);
                 if due(p.whole_asks) {
                     p.whole_asks = (p.whole_asks.0 + 1, now);
                     self.stats.nacks_sent += 1;
@@ -464,6 +525,7 @@ impl FrameReceiver {
                 continue;
             }
             p.gap_since.get_or_insert(now);
+            p.gap_wall.get_or_insert(wall);
             let ask: Vec<u16> = missing.into_iter().filter(|&i| due(p.asks[i])).map(|i| i as u16).collect();
             if !ask.is_empty() {
                 for &i in &ask {
@@ -501,9 +563,11 @@ impl FrameReceiver {
                 continue;
             }
             let Some(p) = self.partials.get(&n) else { break };
-            // By time only: resends may be slow to come (a busy sender,
-            // coarse timers), and a keyframe costs more than waiting.
-            let hopeless = p.gap_since.is_some_and(|g| now.saturating_sub(g) >= GIVE_UP_US);
+            // By link time only: resends may be slow to come (a busy sender,
+            // coarse timers, a Wi-Fi pause), and a keyframe costs more than
+            // waiting.
+            let hopeless = p.gap_since.is_some_and(|g| now.saturating_sub(g) >= GIVE_UP_US)
+                || p.gap_wall.is_some_and(|g| wall.saturating_sub(g) >= GIVE_UP_WALL_US);
             if !hopeless {
                 break;
             }
@@ -521,9 +585,9 @@ impl FrameReceiver {
         if self.need_key
             && !key_coming
             && self.next.is_some()
-            && self.last_key_request.is_none_or(|t| now.saturating_sub(t) >= KEY_REQUEST_EVERY_US)
+            && self.last_key_request.is_none_or(|t| wall.saturating_sub(t) >= KEY_REQUEST_EVERY_US)
         {
-            self.last_key_request = Some(now);
+            self.last_key_request = Some(wall);
             self.stats.key_requests += 1;
             out.key_request = true;
         }
@@ -679,6 +743,77 @@ mod tests {
         assert!(sim.got[1].recovered);
     }
 
+    /// The last fragment of a frame is lost and no frame follows (a still
+    /// screen): noticed after a few ms, not only when the next frame comes.
+    #[test]
+    fn recovers_a_lost_last_fragment_quickly() {
+        let mut sim = Sim::new(1_000);
+        sim.tx.push(&frame(3_000, true, 0), sim.now);
+        sim.run(16, &mut |_, _| false);
+        // Frame 1 is packets 4-6; the last one is lost once.
+        sim.tx.push(&frame(3_000, false, 1), sim.now);
+        let start = sim.now;
+        let mut lost = false;
+        let mut lose = |n: u64, _| n == 6 && !std::mem::replace(&mut lost, true);
+        while sim.got.len() < 2 && sim.now - start < 40_000 {
+            sim.step(&mut lose);
+        }
+        assert_eq!(sim.got.len(), 2);
+        assert!(sim.got[1].recovered);
+        let took = sim.got[1].received_us - start;
+        assert!(took <= 10_000, "took {took} µs");
+    }
+
+    /// Wi-Fi holds everything for 200 ms in the middle of a frame, then
+    /// delivers it with one fragment lost: the frame is recovered, not given
+    /// up, and the pause doesn't use up the NACK tries.
+    #[test]
+    fn a_link_pause_doesnt_cost_frames() {
+        let fragment = |id: u32, index: u16, key: bool| {
+            let data = [index as u8; 100];
+            wire::fragment(&Fragment {
+                stream: 0,
+                frame: id,
+                index,
+                count: 3,
+                flags: if key { F_KEY } else { 0 },
+                capture_us: 0,
+                data: &data,
+            })
+        };
+        let mut rx = FrameReceiver::new(0);
+        let mut got = Vec::new();
+        let mut nacks = 0;
+        let feed = |rx: &mut FrameReceiver, m: Vec<u8>, now: u64| {
+            if let Some(Message::Fragment(f)) = parse(&m) {
+                rx.on_fragment(&f, now);
+            }
+        };
+        for i in 0..3 {
+            feed(&mut rx, fragment(0, i, true), 1_000);
+        }
+        feed(&mut rx, fragment(1, 0, false), 17_000);
+        // Nothing for 200 ms.
+        for t in (18_000..218_000).step_by(1_000) {
+            let p = rx.poll(t, 5_000);
+            nacks += p.nacks.len();
+            got.extend(p.frames);
+        }
+        // The pause counts as at most LINK_GAP_US: a few asks, never all of them.
+        assert!(nacks < NACK_TRIES as usize, "{nacks} asks during the pause");
+        // The rest arrives, minus fragment 1, which then comes as a resend.
+        feed(&mut rx, fragment(1, 2, false), 218_000);
+        for t in (218_000..230_000).step_by(1_000) {
+            got.extend(rx.poll(t, 5_000).frames);
+        }
+        let mut resend = fragment(1, 1, false);
+        resend[FLAGS_AT] |= F_RESENT;
+        feed(&mut rx, resend, 230_000);
+        got.extend(rx.poll(231_000, 5_000).frames);
+        assert_eq!(got.iter().map(|f| f.id).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(rx.stats.given_up, 0);
+    }
+
     #[test]
     fn gives_up_and_asks_for_a_keyframe() {
         let mut sim = Sim::new(2_000);
@@ -689,15 +824,18 @@ mod tests {
         let mut lose_1 = |_, frame| frame == 1;
         sim.tx.push(&frame(3_000, false, 1), sim.now);
         sim.run(16, &mut lose_1);
-        sim.tx.push(&frame(3_000, false, 2), sim.now);
-        sim.run(100, &mut lose_1);
+        // The phone carries on at 60 fps meanwhile.
+        for i in 2..9 {
+            sim.tx.push(&frame(3_000, false, i), sim.now);
+            sim.run(16, &mut lose_1);
+        }
         assert_eq!(sim.rx.stats.given_up, 1);
-        assert_eq!(sim.got.len(), 1, "frame 2 references the lost one");
+        assert_eq!(sim.got.len(), 1, "later frames reference the lost one");
         assert!(sim.key_requests > requests);
         // A keyframe gets things going again.
-        sim.tx.push(&frame(3_000, true, 3), sim.now);
+        sim.tx.push(&frame(3_000, true, 9), sim.now);
         sim.run(20, &mut |_, _| false);
-        assert_eq!(sim.got.last().unwrap().id, 3);
+        assert_eq!(sim.got.last().unwrap().id, 9);
     }
 
     #[test]
@@ -713,10 +851,13 @@ mod tests {
         let mut lose_1 = |_, frame| frame == 1;
         sim.tx.push(&f, sim.now);
         sim.run(16, &mut lose_1);
-        f.data[0] ^= 1;
-        sim.tx.push(&f, sim.now);
-        sim.run(100, &mut lose_1);
-        assert_eq!(sim.got.iter().map(|f| f.id).collect::<Vec<_>>(), [0, 2]);
+        for _ in 2..9 {
+            f.data[0] ^= 1;
+            sim.tx.push(&f, sim.now);
+            sim.run(16, &mut lose_1);
+        }
+        sim.run(20, &mut lose_1);
+        assert_eq!(sim.got.iter().map(|f| f.id).collect::<Vec<_>>(), [0, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(sim.key_requests, requests, "no keyframe asked for");
     }
 

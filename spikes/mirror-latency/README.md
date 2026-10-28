@@ -59,6 +59,22 @@ whether the encoder accepted each setting and which vendor keys it offers.
 The summary adds a loss-recovery line (NACKs, frames recovered, how long recovery took,
 frames given up) and the keyframe count.
 
+## Unattended runs (from the PC, over adb)
+
+The phone screen takes settings as extras and starts by itself; the PC taps through Android's
+capture prompt. Positions below are for the S24 (1080×2340).
+
+```sh
+./target/release/mirror-latency.exe wifi --seconds=45 &
+adb shell am start -f 0x10008000 -n io.github.darrenn19.nudge/.spike.MirrorSpikeActivity   --es host <PC address> --ez intraRefresh true --ez speedups true --ez auto true
+adb shell input tap 540 1025; adb shell input tap 398 1243; adb shell input tap 886 1632  # entire screen, share
+```
+
+Stop with the screen's Stop button (`am stopservice` isn't allowed; a second Start is ignored
+while one runs). `--ez hotspot true` makes the phone host a direct network (Wi-Fi Direct, as for
+big transfers) and log how to join it: `adb logcat -s MirrorSpike`. The PC tool also puts the
+Wi-Fi adapter in media streaming mode with background scans off (`--no-wifi-tune` to skip).
+
 ## Go / no-go
 
 Targets from CLAUDE.md: about 40–80 ms over Wi-Fi and 30–50 ms over cable, at 30–60 fps.

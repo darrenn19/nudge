@@ -31,4 +31,4 @@ mod wire;
 pub use crypto::OVERHEAD;
 pub use frames::{Frame, MAX_FRAGMENT, OutFrame, ReceiveStats, SendStats};
 pub use paths::PathInfo;
-pub use session::{Config, Control, Event, Session, Stats};
+pub use session::{Config, Control, Event, Handle, Session, Stats};

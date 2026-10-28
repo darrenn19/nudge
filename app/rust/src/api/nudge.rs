@@ -13,6 +13,7 @@ use nudge_core::{
     Cable, Direction, Fingerprint, HotspotInfo, LinkKind, Node, NodeConfig, NodeEvent, Outgoing,
     Peer, Receiving,
 };
+use nudge_core::node::MirrorRole;
 use tokio::runtime::Runtime;
 
 use crate::frb_generated::StreamSink;
@@ -199,6 +200,22 @@ pub enum AppEvent {
         device_name: String,
         code: String,
     },
+    /// A paired device wants to see this device's screen: ask, then
+    /// `answer_mirror` within a minute.
+    MirrorAsked {
+        id: i64,
+        device_id: String,
+    },
+    /// A screen-mirroring session started. While `sharing`, show that this
+    /// device's screen is being shared.
+    MirrorStarted {
+        id: i64,
+        device_id: String,
+        sharing: bool,
+    },
+    MirrorEnded {
+        id: i64,
+    },
 }
 
 impl From<NodeEvent> for AppEvent {
@@ -302,6 +319,16 @@ impl From<NodeEvent> for AppEvent {
                 device_name,
                 code,
             },
+            NodeEvent::MirrorAsked { id, peer } => Self::MirrorAsked {
+                id: id as i64,
+                device_id: peer.to_string(),
+            },
+            NodeEvent::MirrorStarted { id, peer, role } => Self::MirrorStarted {
+                id: id as i64,
+                device_id: peer.to_string(),
+                sharing: role == MirrorRole::Sharing,
+            },
+            NodeEvent::MirrorEnded { id } => Self::MirrorEnded { id: id as i64 },
         }
     }
 }
@@ -355,7 +382,21 @@ pub(crate) async fn start_core(config: NodeConfig) -> Result<Arc<Core>> {
             });
             let delivering = core.clone();
             runtime().spawn(async move {
+                let mut timer = crate::timer::Fine::default();
                 while let Some(event) = rx.recv().await {
+                    match &event {
+                        // Pacing the real-time channel needs ~1 ms timers;
+                        // Windows gives ~16 ms unless asked.
+                        NodeEvent::MirrorStarted { id, .. } => timer.hold(*id),
+                        NodeEvent::MirrorEnded { id } => timer.release(*id),
+                        // Sharing this computer's screen isn't built yet:
+                        // say no at once rather than leave it waiting.
+                        #[cfg(not(target_os = "android"))]
+                        NodeEvent::MirrorAsked { id, .. } => {
+                            delivering.node.answer_mirror(*id, false)
+                        }
+                        _ => {}
+                    }
                     delivering.deliver(event.into());
                 }
             });
@@ -631,6 +672,25 @@ impl NudgeApp {
             "refuse" => Receiving::Refuse,
             _ => Receiving::Usual,
         });
+    }
+
+    /// Answer `AppEvent::MirrorAsked`.
+    #[frb(sync)]
+    pub fn answer_mirror(&self, id: i64, accept: bool) {
+        self.node.answer_mirror(id as u64, accept);
+    }
+
+    /// End a screen-mirroring session.
+    #[frb(sync)]
+    pub fn stop_mirror(&self, id: i64) {
+        self.node.stop_mirror(id as u64);
+    }
+
+    /// Whether this device is locked: a locked device's screen is never
+    /// shared, and sharing ends when it locks.
+    #[frb(sync)]
+    pub fn set_screen_locked(&self, locked: bool) {
+        self.node.set_screen_locked(locked);
     }
 
     /// On a phone: plugged into a computer by a cable that carries data,

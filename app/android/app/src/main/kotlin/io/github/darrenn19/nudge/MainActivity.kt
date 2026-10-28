@@ -47,9 +47,29 @@ class MainActivity : FlutterActivity() {
         handle(intent)
     }
 
+    /**
+     * Copies made while Nudge is on screen ("Copy as text", a text field):
+     * the app in front is told about clipboard changes and may read them, so
+     * they go to the other devices at once.
+     */
+    private val copiedHere = android.content.ClipboardManager.OnPrimaryClipChangedListener {
+        if (ClipWatch.isQuiet()) return@OnPrimaryClipChangedListener // from another device
+        val item = ClipSync.copiedItem(this) ?: return@OnPrimaryClipChangedListener
+        val app = applicationContext
+        Thread {
+            val names = ClipSync.send(app, item)
+            if (names.isNotEmpty()) {
+                main.post {
+                    android.widget.Toast.makeText(app, "Copied to ${names.joinToString(", ")}", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+    }
+
     override fun onResume() {
         super.onResume()
         Background.inFront = true
+        getSystemService(android.content.ClipboardManager::class.java)?.addPrimaryClipChangedListener(copiedHere)
         // Android asks before letting an app read the log, and only while
         // it's on screen: so (re)start the clipboard watcher from here too.
         window.decorView.postDelayed({ ClipWatch.start(this) }, 500)
@@ -57,7 +77,18 @@ class MainActivity : FlutterActivity() {
 
     override fun onPause() {
         Background.inFront = false
+        getSystemService(android.content.ClipboardManager::class.java)?.removePrimaryClipChangedListener(copiedHere)
         super.onPause()
+    }
+
+    /**
+     * Android 10+ lets an app read the clipboard only once its window has
+     * focus, which comes a moment after onResume: reading on resume gets
+     * nothing. So the window sends what was copied from here.
+     */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) platform?.invokeMethod("windowFocused", null)
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {

@@ -121,16 +121,25 @@ object Notifications {
 
     /**
      * "Darren's PC wants to send you 3 files", with Accept and Decline; with
-     * [pairing], "Darren's PC wants to pair" instead.
+     * [pairing], "Darren's PC wants to pair" instead; with [mirror], "wants to
+     * see your screen", with Allow and Don't allow.
      */
-    fun offer(context: Context, id: Long, title: String, text: String, pairing: Boolean = false) {
+    fun offer(
+        context: Context,
+        id: Long,
+        title: String,
+        text: String,
+        pairing: Boolean = false,
+        mirror: Boolean = false,
+    ) {
         fun answer(accept: Boolean) = PendingIntent.getBroadcast(
             context,
             (id * 2 + if (accept) 1 else 0).toInt(),
             Intent(context, OfferActionReceiver::class.java)
                 .putExtra(OfferActionReceiver.EXTRA_ID, id)
                 .putExtra(OfferActionReceiver.EXTRA_ACCEPT, accept)
-                .putExtra(OfferActionReceiver.EXTRA_PAIRING, pairing),
+                .putExtra(OfferActionReceiver.EXTRA_PAIRING, pairing)
+                .putExtra(OfferActionReceiver.EXTRA_MIRROR, mirror),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
         val notification = NotificationCompat.Builder(context, OFFERS)
@@ -141,16 +150,52 @@ object Notifications {
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             // On the lock screen: no names, and answering needs an unlock.
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setPublicVersion(lockScreen(context, OFFERS, "A device wants to send you files"))
+            .setPublicVersion(
+                lockScreen(context, OFFERS, if (mirror) "A device wants to see your screen" else "A device wants to send you files"),
+            )
             .setAutoCancel(true)
             // The question lapses after a minute anyway.
             .setTimeoutAfter(60_000)
             .setContentIntent(openApp(context))
-            .addAction(0, "Decline", answer(false))
-            .addAction(0, if (pairing) "Pair" else "Accept", answer(true))
+            .addAction(0, if (mirror) "Don't allow" else "Decline", answer(false))
+            .addAction(0, if (pairing) "Pair" else if (mirror) "Allow" else "Accept", answer(true))
             .build()
         notify(context, offerId(id), notification)
     }
+
+    /**
+     * "Your screen is being shared with Darren's PC", for as long as it is,
+     * with Stop. Can't be swiped away.
+     */
+    fun sharing(context: Context, id: Long, with: String) {
+        val stop = PendingIntent.getBroadcast(
+            context,
+            SHARING_REQUEST + (id % 1000).toInt(),
+            Intent(context, OfferActionReceiver::class.java)
+                .putExtra(OfferActionReceiver.EXTRA_ID, id)
+                .putExtra(OfferActionReceiver.EXTRA_STOP_MIRROR, true),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = NotificationCompat.Builder(context, OFFERS)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Your screen is being shared")
+            .setContentText("With $with")
+            .setOngoing(true)
+            .setSilent(true)
+            .setOnlyAlertOnce(true)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(openApp(context))
+            .addAction(0, "Stop", stop)
+            .build()
+        notify(context, sharingId(id), notification)
+    }
+
+    fun sharingEnded(context: Context, id: Long) = cancel(context, sharingId(id))
+
+    private const val SHARING_REQUEST = 3000
+
+    private fun sharingId(id: Long) = 4000 + (id % 100_000).toInt()
 
     fun cancelOffer(context: Context, id: Long) = cancel(context, offerId(id))
 
