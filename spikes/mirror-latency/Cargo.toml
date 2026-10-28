@@ -1,0 +1,38 @@
+[package]
+name = "mirror-latency"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Throwaway spike: measures phone-to-laptop screen mirroring latency."
+
+# Not part of the main workspace: a throwaway tool with its own dependencies.
+[workspace]
+
+[dependencies]
+socket2 = "0.5"
+if-addrs = "0.13"
+png = "0.17"
+# Only for --selftest (a fake phone on this PC).
+openh264 = "0.6"
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Media",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[profile.release]
+debug = false

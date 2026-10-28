@@ -112,8 +112,87 @@ Goal: AirDrop-like behaviour — send/receive with the app closed, receive while
 4. Multi-file packing and folder transfer (packs: `core/src/pack.rs`; folders from Windows and Android, empty ones included).
 5. Direct-link mode and start-then-upgrade switching. (done: `core/src/node/paths.rs`)
 6. Cable path, any data cable, via USB tethering. (done; a cable without tethering, over Android Open Accessory, would need a Windows USB driver)
-7. macOS, then iOS. ← next
+7. Screen mirroring (see below). ← current: tuning the latency spike
+8. macOS, then iOS. Deferred: no Apple device to build or test on yet.
+
+## Screen mirroring (in progress: tuning the spike)
+Goal: better than Microsoft Phone Link on speed, smoothness and integration. Paired devices only. Two modes:
+- **Regular:** see the other device's screen and control it (tap, swipe, type) with very low latency.
+- **Connected:** the same, plus the mirror window works as a doorway between the devices: copy/paste, drag files in and out, notifications. It should feel like the other device is part of this one.
+
+**What's realistic:**
+- **Phone → laptop video:** MediaProjection + hardware MediaCodec (low-latency mode). Measured on the S24 (`docs/BENCHMARKS.md`): ~35 ms median over cable, ~30–35 ms over Wi-Fi when steady, before ~10–25 ms of display time. No software method gets near zero: every product (scrcpy, Phone Link, game streaming) uses this pipeline; we win by tuning each stage.
+- **Laptop → phone control:** only through an Accessibility Service (`dispatchGesture`, global actions). Taps, swipes, scrolling and Back/Home are fine. Continuous drags lag the video a little. Typing needs a custom IME or `ACTION_SET_TEXT`; neither is seamless. adb-level injection (scrcpy) and Samsung's private APIs (Phone Link) aren't available to us.
+- **Laptop → phone video and control:** easy (Windows Graphics Capture + `SendInput`). Can't reach elevated windows, UAC or the lock screen.
+- **iOS (later):** can be viewed (ReplayKit), never controlled.
+- **Android limits:** a consent prompt for every session (Android 14+ allows no reuse); the phone must be unlocked; `FLAG_SECURE` content (banking, DRM, passwords) shows black; Android 15 hides sensitive notifications while sharing.
+- **Connected mode, doable:**
+  - dropping files on the window (a normal Nudge transfer: lands in Downloads, can't target a specific app);
+  - clipboard (already built; phone → laptop copy has the Android 10+ background limit);
+  - a recent photos/files tray to drag from;
+  - dragging out a full-resolution crop of the screen;
+  - notifications with reply;
+  - phone audio (AudioPlaybackCapture, Android 10+).
+- **Connected mode, not doable:** dragging the file under the finger out of an arbitrary phone app, or per-app windows. Both need system or adb access.
+
+**Architecture:**
+- Reuse pairing certificates, discovery and paths: the cable and hotspot upgrades matter even more for latency.
+- Video needs its own real-time channel: UDP-based (QUIC datagrams or similar) that drops stale frames, encrypted with the pairing certificates. Not the file stream: TCP head-of-line blocking stalls on lossy Wi-Fi.
+- Render video natively on Windows (a native child window), not through a Flutter texture: that adds a frame of latency.
+- Keep the core UI-agnostic as usual.
+
+**Safety:**
+- Always confirmed on the shared device, with a visible "being shared" indicator. Never started from a locked phone.
+- Google Play restricts non-accessibility uses of Accessibility Services: expect review friction and needs a prominent disclosure. Sideloaded builds aren't affected.
+
+**Build order (rough effort, one person):**
+1. **Latency spike + tuning** (throwaway, `spikes/mirror-latency` on the PC, `app/android/app/src/debug/.../spike/` on the phone; how to run: the spike's README). ← current
+   - [x] Go/no-go: median 44 ms cable / 53 ms Wi-Fi before display time. Go.
+   - [x] Quality pass: H.264 High profile, CBR 30 Mbit/s, 1056×2304, BT.709 limited signalled; PC decodes on the GPU (Media Foundation), D3D11 video processor converts and scales, DPI-aware window. Result: median 35 ms cable, ~30–35 ms Wi-Fi when steady; picture "much better". PC decode + draw went from ~16 ms to ~2 ms.
+   - [ ] **Next — loss recovery and pacing.** Every lost packet now makes the PC request a keyframe; at 30 Mbit/s keyframes are big bursts (30–58 ms to encode, 10–40 ms to send) that cause more loss: 47 keyframes in 60 s on cable, 9% of frames lost or skipped, the 100–280 ms spikes. Fix: the phone keeps the packets of the last ~10 frames; the PC NACKs missing fragments as soon as it sees a gap (send once, re-ask after ~1 RTT, up to 2–3 tries); request a keyframe only if the fragments can't be recovered within ~2 RTTs or about 50 ms. Pace the phone's sending (spread each frame's packets over a few ms instead of one burst). Possibly intra-refresh (`KEY_INTRA_REFRESH_PERIOD`) instead of periodic keyframes, so no frame is a big burst.
+   - [ ] **Next — phone encoder latency** (~23 ms median, unchanged): try Qualcomm's vendor low-latency keys (e.g. `vendor.qti-ext-enc-low-latency.enable`) alongside `KEY_LOW_LATENCY`; check what the S24's `c2.qti.avc.encoder` actually accepts. Measure with and without.
+   - [ ] **Next — never block on present.** PC draw p95 is 16.6 ms: `Present` sometimes waits a full refresh. Use a frame-latency waitable swap chain and skip to the newest frame instead of waiting.
+   - [ ] Then measure: one cable run, one Wi-Fi run (labels `cable-tuned`, `wifi-tuned`), and add them to `docs/BENCHMARKS.md`. Optional: H.265 (the PC needs "HEVC Video Extensions" from the Store), the phone hotspot path, 120 fps.
+   - Then decide which settings carry over into step 2, and stop working on the spike.
+2. **Real-time channel in the core** (~1 week): encrypted UDP datagrams keyed by the pairing certificates, stale-frame dropping, a session handshake, and path selection (cable > hotspot > router). Testable between two desktop processes, no phone needed. ← in progress
+   - [x] Built (2026-10-28, uncommitted): `core/src/realtime/`. Handshake over an existing TLS connection; keys from TLS key export (bound to both certificates); AES-256-GCM per direction with replay window; fragments with NACK recovery (per-fragment tries, resends unpaced, give up after 50 ms), sender pacing that catches up for coarse timers, a complete keyframe supersedes earlier gaps; path selection by pinging every address (cable > wired > hotspot > Wi-Fi, switch only to a better kind or when the current one dies). Tests: `core/tests/realtime.rs`; two processes: `nudge mirror-bench --listen` / `--to <host>` (no flags: both in one process; `--drop P` simulates loss).
+   - [ ] Not wired into `Node` yet: the caller opens the TLS connection itself. Adding it as a request kind changes the wire protocol (version bump breaks file transfer with older phone builds), so do it with step 3.
+   - [ ] Windows timers are ~16 ms unless raised: the Windows app should call `timeBeginPeriod(1)` while mirroring (core can't: no unsafe). Pacing is rate-correct without it but bursty.
+   - [ ] Try it between the PC and a second machine or the phone (once the phone side exists).
+3. **Session and safety plumbing** (~3–4 days): start/stop, the consent flow on the phone, the "being shared" indicator, paired-only checks. Do it before the features so they never exist without it.
+4. **Laptop views the phone** (~2–3 weeks): the spike rebuilt on the real channel; native Windows renderer; rotation, resolution changes, reconnect when switching paths. Measure again.
+5. **Laptop controls the phone** (~2 weeks + tuning): Accessibility Service taps, swipes, scroll, Back/Home/Recents first; then typing via `ACTION_SET_TEXT` (a custom IME only if that's not good enough).
+6. **Connected mode** (~3–4 weeks), cheapest first: file drop and clipboard (both reuse what's built), notifications with reply, recent-media tray, crop drag-out, then phone audio (shares the MediaProjection session).
+7. **Phone views and controls the laptop** (~2–3 weeks): same channel, reversed (Windows Graphics Capture + Media Foundation encoder, `SendInput`).
+iOS viewing (ReplayKit) moves to the iOS phase.
+
+## Distribution & first run
+Goal: anyone can install from a store and be sending files within a minute. No dev tools, no adb, no Developer options for core features.
+
+**Where it ships:** Google Play, F-Droid, GitHub Releases (APK + Windows installer), Microsoft Store (MSIX). Store builds must need nothing else installed (H.264 by default; H.265 only if the PC has it).
+
+**First run (phone):** one guided welcome flow, asking only when needed, each with a one-line reason:
+1. Notifications → 2. Camera (QR pairing, only when pairing) → 3. Nearby Wi-Fi devices → 4. Battery exemption → 5. Samsung only: steer to "Never sleeping apps".
+Everything else is asked the first time a feature needs it, never up front.
+
+**Core vs. power-user features:**
+- Core (no special setup): send/receive, pairing, share sheet, Quick Settings tile, clipboard with a tap, mirroring over Wi-Fi.
+- Optional extras (clearly labelled, never in onboarding): cable auto-tethering (Developer options), tap-free clipboard (adb `READ_LOGS`), H.265 (HEVC Video Extensions).
+- Permissions a store may reject (`READ_LOGS`, possibly `SYSTEM_ALERT_WINDOW`) go only in a separate build (e.g. GitHub/F-Droid), not the Play build.
+
+**Unavoidable prompts (Android rules):** screen-capture consent every mirroring session; Accessibility switch for controlling the phone (asked when control is first used).
+
+**Windows:** installer/MSIX handles auto-start and firewall rules; no prompts after install. Outside the Store, sign the installer (e.g. Azure Trusted Signing) or users see "unknown publisher" warnings.
+
+**Rule for new features:** if a feature needs a manual setting, a scary warning screen or a dev tool, it's opt-in and asked at first use, not part of setup.
 
 ## Working conventions
 - Measure before optimizing: every performance change should come with benchmark numbers.
 - Keep the core UI-agnostic; platform code only calls the core's public API.
+
+
+
+
+Key fixes (rn)
+
+- Copy as text phone to laptop not working (maybe becuase not explicitly copied, however still in clipboard)

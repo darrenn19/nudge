@@ -15,6 +15,10 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedReceiver;
 
+mod mirror;
+use mirror::MirrorSend;
+use nudge_core::realtime;
+
 #[derive(Parser)]
 #[command(name = "nudge", version, about = "Fast, private file transfer")]
 struct Cli {
@@ -120,7 +124,44 @@ enum Command {
         #[arg(long)]
         to: Option<String>,
     },
+    /// Test the screen-mirroring channel with generated frames instead of video.
+    ///
+    /// One side waits (`--listen`) and receives; the other connects (`--to`) and
+    /// sends. Without either, both run on this machine. The receiver reports
+    /// latency (send to arrival), loss recovery and the path used.
+    MirrorBench {
+        /// Wait for a sender.
+        #[arg(long, conflicts_with = "to")]
+        listen: bool,
+        /// Send to this receiver (host or host:port).
+        #[arg(long)]
+        to: Option<String>,
+        /// TCP port for the setup connection.
+        #[arg(long, default_value_t = MIRROR_PORT)]
+        port: u16,
+        /// Sending: average bitrate, Mbit/s.
+        #[arg(long, default_value_t = 30)]
+        mbps: u32,
+        /// Sending: frames per second.
+        #[arg(long, default_value_t = 60)]
+        fps: u32,
+        /// Sending: how long, in seconds.
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
+        /// Sending: a keyframe (8× the size of others) every N frames, plus
+        /// whenever the receiver asks for one.
+        #[arg(long, default_value_t = 600)]
+        keyframe_every: u32,
+        /// Sending: pacing cap, Mbit/s (0 = off).
+        #[arg(long, default_value_t = 200)]
+        pace: u32,
+        /// Receiving: throw away this % of fragments, to test loss recovery.
+        #[arg(long, default_value_t = 0.0)]
+        drop: f64,
+    },
 }
+
+const MIRROR_PORT: u16 = 47_802;
 
 /// What a `send` puts on the wire.
 enum Payload {
@@ -167,6 +208,29 @@ async fn main() -> Result<()> {
             Some(to) => send(tls()?, Payload::Generated(size), to).await,
             None => bench_local(size, disk).await,
         },
+        Command::MirrorBench {
+            listen,
+            to,
+            port,
+            mbps,
+            fps,
+            seconds,
+            keyframe_every,
+            pace,
+            drop,
+        } => {
+            let send = MirrorSend {
+                mbps,
+                fps,
+                seconds,
+                keyframe_every,
+            };
+            let config = realtime::Config {
+                pace_mbps: pace,
+                drop_percent: drop,
+            };
+            mirror::bench(&identity_dir, listen, to, port, send, config).await
+        }
     }
 }
 

@@ -4,4 +4,25 @@
          to allow setting breakpoints, to provide hot reload, etc.
     -->
     <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- Screen-mirroring latency spike (debug builds only; see spikes/mirror-latency). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+
+    <application>
+        <activity
+            android:name=".spike.MirrorSpikeActivity"
+            android:label="Mirror spike"
+            android:exported="true"
+            android:taskAffinity=".spike"
+            android:theme="@android:style/Theme.Material.Light">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
+        <service
+            android:name=".spike.MirrorSpikeService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection"/>
+    </application>
 </manifest>

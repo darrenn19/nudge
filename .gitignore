@@ -24,3 +24,8 @@ Thumbs.db
 
 # Benchmark scratch output
 /bench-out/
+
+# Throwaway spikes
+spikes/*/target/
+spikes/*/*.csv
+spikes/*/snap-*.png

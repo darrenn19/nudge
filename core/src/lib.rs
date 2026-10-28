@@ -14,6 +14,7 @@ pub mod node;
 pub mod pack;
 pub mod pairing;
 pub mod protocol;
+pub mod realtime;
 pub mod resume;
 pub mod tls;
 pub mod transfer;

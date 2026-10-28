@@ -615,6 +615,7 @@ dependencies = [
 name = "nudge-core"
 version = "0.1.0"
 dependencies = [
+ "aws-lc-rs",
  "blake3",
  "cpu-time",
  "crc32fast",

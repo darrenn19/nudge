@@ -87,3 +87,63 @@ To measure next: the run-5 setup again (2 GB, phone on 6 GHz, then on 5 GHz), re
 | Packs, unpacked files not synced one by one (kept) | 0.71 / 0.74 s | 0.7 ms |
 
 Over Wi-Fi the gap widens: each file sent on its own also waits several network round trips.
+
+## Screen mirroring latency spike (mirroring step 1)
+
+2026-10-27, uncommitted, Galaxy S24 (SM-S921W, Snapdragon) → this Windows PC, `spikes/mirror-latency`.
+Phone: MediaProjection → hardware H.264 (Baseline, low-latency mode, 10 Mbit/s target, 880×1904, 60 fps max) → plain UDP.
+PC: software decode (openh264), on the same thread that draws the window. Content: the spike's clock screen, then Instagram video and scrolling.
+Clocks synced by ping, so these are per-frame measurements. Not included: about one frame for each display (+10–25 ms).
+
+Medians, with the worst 5% (p95) after the slash, in ms:
+
+| Path | Phone encode | Network | PC queue + decode | PC draw | **Total** | fps shown | Frames lost/skipped |
+|---|---|---|---|---|---|---|---|
+| USB cable (tethering) | 22.9 / 35.6 | 2.7 / 8.0 | 12.4 / 40.0 | 3.7 / 7.2 | **44.4 / 77.1** | 37 | 2.8% |
+| Wi-Fi, run 1 | 25.6 / 38.5 | 6.8 / 11.6 | 14.9 / 46.4 | 3.8 / 6.9 | **53.2 / 88.8** | 36 | 2.4% |
+| Wi-Fi, run 2 (20 Mbit/s requested; averaged 9.6) | 24.8 / 36.6 | 7.4 / 14.8 | 15.6 / 59.8 | 3.8 / 7.2 | **53.7 / 103.2** | 32 | 4.3% |
+
+What this says:
+- **Go.** Wi-Fi lands at ~53 ms median, ~65–75 ms counting the displays: inside the 40–80 ms target. Cable is ~10 ms faster, mostly network.
+- **The phone encoder is the biggest cost (23–26 ms).** Android's standard low-latency flag may not be enough on Snapdragon; try Qualcomm's own low-latency setting next.
+- **The bad tails come from the PC side** (decode p95 40–60 ms, p99 up to 127 ms): software decoding on the UI thread. The real app decodes in hardware, off the UI thread.
+- **2–4% of frames are lost or skipped**, even over the cable. Each loss freezes the picture until the next keyframe. The real channel needs packet pacing plus loss recovery (intra-refresh or FEC) instead of waiting for a keyframe.
+- The picture looked blotchy at 10 Mbit/s. Doubling the requested bitrate didn't raise the actual bitrate, so the encoder (or its low-latency mode) is capping it. Look into this during step 4.
+- Not yet measured: phone hotspot.
+
+### After the quality pass (same day)
+
+Phone: H.264 High profile, constant bitrate 30 Mbit/s requested (17.6 averaged), 1056×2304. PC: hardware decode (Media Foundation) and D3D11 video processor into a flip-model swap chain, window DPI-aware.
+
+| Path | Phone encode | Network | PC queue + decode | PC draw | **Total** | fps shown | Frames lost/skipped |
+|---|---|---|---|---|---|---|---|
+| USB cable | 22.9 / 53.3 | 3.7 / 9.6 | **1.0** / 10.7 | **0.9** / 16.6 | **34.7 / 68.3** | 43 | 9.2% |
+
+- PC decode + draw went from ~16 ms to ~2 ms (median). Total median down 10 ms, to 35 ms.
+- New problem: **47 keyframes in 60 s**. Each lost packet triggers a keyframe request; at 30 Mbit/s a keyframe is a big burst (30–58 ms to encode, 10–40 ms to send) that causes more loss. That's the p95 and the stutter. Fix: resend just the missing packets (a 2 ms round trip on this link) and pace sending, instead of asking for keyframes.
+- PC draw p95 of 16.6 ms: presenting sometimes waits a whole display refresh. Fix: never block on present.
+
+### Loss recovery, self-test (2026-10-28)
+
+No phone: `--selftest` (fake phone on the same PC, software H.264, 720×1280, under 1 Mbit/s) with `--drop` throwing away packets on arrival. Shows the mechanism works, not phone numbers.
+
+| Drop rate (packets) | Fragments recovered | Recovered by resend | Given up | Keyframes requested | Recovery time p50 / p95 |
+|---|---|---|---|---|---|
+| 1% (14) | 23 | 23 frames | 0 | 0 | 8.3 / 10.2 ms |
+| 5% (72) | 80 | 79 frames | 0 | 0 | 9.4 / 16.1 ms |
+
+More fragments were recovered than dropped on purpose: probably the fake phone losing a few on its own (it ignores failed non-blocking sends). Before this change, each of those losses would have frozen the picture until a keyframe arrived. Recovery time here is mostly the fake phone answering only once per frame (every 16.7 ms); the real phone answers NACKs on its own thread, so it should come close to one round trip (2–7 ms).
+
+## Real-time channel, one PC (mirroring step 2)
+
+2026-10-28, `nudge mirror-bench` (both ends in one process, real TLS + UDP over this PC's Wi-Fi address), 30 Mbit/s, 60 fps, 6 s, keyframe (~500 KB) every 120 frames, `--drop` throwing away fragments on arrival. Latency is send-to-arrival (pacing + network + recovery), no encoder or display.
+
+| Fragments dropped | Frames received | Recovered by resend | Given up | Keyframe requests | Latency p50 / p95 / p99 |
+|---|---|---|---|---|---|
+| 0% | 360 / 360 | 0 | 0 | 0 | 1.3 / 3.0 / 16.6 ms |
+| 1% | 360 / 360 | 147 | 0 | 0 | 1.1 / 3.1 / 16.4 ms |
+| 3% | 357 / 360 | 271 | 1 | 2 | 1.6 / 16.0 / 18.2 ms |
+| 5% | 360 / 360 | 334 | 0 | 0 | 1.5 / 17.5 / 21.5 ms |
+
+The ~16 ms tail is Windows' default timer tick (the sender's pacer and the receiver's checks wake on it); expect it to shrink with `timeBeginPeriod(1)` and on Android.
+Fixes found along the way: the receiver NACKed fragments still on their way during pauses between paced bursts (stall now measured from the latest fragment, 30 ms); NACK tries were per frame, so late gaps in a big keyframe were never asked for (now per fragment); resends waited behind the pacer (now sent at once).

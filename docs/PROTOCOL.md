@@ -210,3 +210,9 @@ Code: `core/src/node/web.rs`, page: `core/src/node/web_page.html`. For people wi
 - `410` or `404`: sharing stopped (or moved to a new link): the page says so and stops trying.
 - No answer: out of reach (out of range, asleep, another network); it keeps trying, and says so after the second miss. If the browser reports no network at all, it says the phone is offline.
 - Turned away at once, three times in a row (nothing listening, but the device is there): probably stopped; the page says so but keeps checking every 8 s. (A Windows firewall drops these silently, so there it looks like "out of reach" once the 15 minutes are up.)
+
+## Real-time channel (screen mirroring)
+
+Set up over a TLS connection the two devices already have. Each side sends a hello: `NURT`, version u8 (1), nonce [16] (chosen by the side that asks; echoed by the other), UDP port u16, count u8, then that many IPv4 addresses. Keys: TLS exporter, label `EXPORTER-nudge-realtime-1`, context = nonce, 68 bytes: key for asker→asked [32], key for asked→asker [32], session tag u32.
+
+UDP packets: `0xA7`, session tag u32, sequence u64 (the AES-256-GCM nonce; the 13 bytes are authenticated), encrypted message, 16-byte tag. Messages (big-endian): see `core/src/realtime/wire.rs` (ping, pong, fragment, NACK, keyframe request, bye). Closing the TLS connection ends the session.
