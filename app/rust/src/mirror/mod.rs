@@ -8,7 +8,10 @@
 //! their own). Closing the window ends the session; the session ending
 //! closes the window.
 
+mod audio;
+mod chrome;
 mod control;
+mod settings;
 mod touchpad;
 mod video;
 
@@ -91,18 +94,47 @@ pub(crate) fn show(mut session: Session, title: String) {
     let epoch = session.instant_of(0);
 
     runtime().spawn(async move {
+        // The phone's sound, once it sends some (`audio`).
+        let mut speaker: Option<audio::Speaker> = None;
+        // When a notice went up (session clock): only a picture captured
+        // after it takes it down, not one already on its way.
+        let mut notice_since: Option<u64> = None;
         loop {
             tokio::select! {
                 e = session.next_event() => match e {
-                    // Other streams aren't video: the phone says whether it can be controlled.
-                    Some(Event::Frame(f)) if f.stream != 0 => {
-                        if let (input::STREAM, Some(Input::Status(st))) = (f.stream, Input::parse(&f.data)) {
+                    Some(Event::Frame(f)) if f.stream == input::AUDIO_STREAM => {
+                        speaker.get_or_insert_with(audio::Speaker::new).push(f.data);
+                    }
+                    // The phone's messages: whether it can be controlled, whether it's locked.
+                    Some(Event::Frame(f)) if f.stream != 0 => match (f.stream, Input::parse(&f.data)) {
+                        (input::STREAM, Some(Input::Status(st))) => {
                             log::info!("mirror: phone control {st:?}");
                             control::set_status(st);
                         }
-                    }
+                        // Unlocked: the notice stays until the picture moves again.
+                        (input::STREAM, Some(Input::Locked(locked))) => {
+                            log::info!("mirror: phone {}", if locked { "locked: paused" } else { "unlocked" });
+                            if locked {
+                                chrome::set_notice(chrome::Notice::Locked);
+                                notice_since = Some(session.now_us());
+                            }
+                            woken.signal();
+                        }
+                        (input::STREAM, Some(Input::Resuming)) => {
+                            log::info!("mirror: phone unlocked; waiting for it to allow sharing again");
+                            chrome::set_notice(chrome::Notice::AllowAgain);
+                            notice_since.get_or_insert(session.now_us());
+                            woken.signal();
+                        }
+                        _ => {}
+                    },
                     Some(Event::Frame(f)) => {
                         let captured = session.to_local_us(f.capture_us);
+                        // The picture is live again (only sent while unlocked and allowed).
+                        if notice_since.is_some_and(|t| captured.is_some_and(|c| c > t)) {
+                            notice_since = None;
+                            chrome::set_notice(chrome::Notice::None);
+                        }
                         if frames.send(Shown { data: f.data, captured, arrived: f.received_us }).is_err() {
                             break; // the window closed
                         }
@@ -139,6 +171,14 @@ pub(crate) fn show(mut session: Session, title: String) {
         .name("nudge-mirror".into())
         .spawn(move || {
             control::set_sender(input_tx);
+            chrome::set_notice(chrome::Notice::None);
+            // The settings it had last time (full screen and on top: `video`).
+            if audio::wanted() {
+                control::send_input(Input::Audio(true));
+            }
+            if settings::get().game {
+                control::toggle_game();
+            }
             if let Err(e) = window_loop(&title, frames_rx, &back, epoch, &wake) {
                 log::warn!("mirror window: {e}");
             }
@@ -230,6 +270,9 @@ impl Player {
             }
         }
         let busy = !batch.is_empty();
+        // Only the bar changed (hover, the phone locked): drawn with the next picture, or now.
+        let redraw = chrome::take_redraw();
+        let mut drawn = false;
         // Every frame is decoded (later ones refer to it); only the newest
         // picture is shown.
         for f in batch {
@@ -254,6 +297,7 @@ impl Player {
             let (picture, captured, decoded, arrived) = self.pending.take().unwrap();
             match self.video.present(&picture) {
                 Ok(true) => {
+                    drawn = true;
                     let shown = self.now_us();
                     self.stats.shown(shown);
                     if let Some(c) = captured {
@@ -263,6 +307,11 @@ impl Player {
                 // Minimized, or the display still busy: kept for later (a newer one replaces it).
                 Ok(false) => self.pending = Some((picture, captured, decoded, arrived)),
                 Err(e) => log::warn!("mirror display: {e}"),
+            }
+        }
+        if redraw && !drawn {
+            if self.pending.is_some() || !matches!(self.video.redraw(), Ok(true)) {
+                chrome::invalidate(); // with the picture waiting, or next time
             }
         }
         self.stats.report_every(Duration::from_secs(10), true);

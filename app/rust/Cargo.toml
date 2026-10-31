@@ -22,6 +22,12 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync"] }
 version = "0.58"
 features = [
     "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_System_Registry",
+    "Foundation_Numerics",
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Direct3D11",
@@ -29,6 +35,7 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Media",
+    "Win32_Media_Audio",
     "Win32_Media_MediaFoundation",
     "Win32_NetworkManagement_WiFi",
     "Win32_Security",

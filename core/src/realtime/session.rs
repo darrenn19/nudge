@@ -129,6 +129,9 @@ pub struct Stats {
 enum Command {
     /// A frame, with extra fragment flags.
     Send(OutFrame, u8),
+    /// Pause (`Some`: ending the session if still paused after that long)
+    /// or resume (`None`). See `Handle::pause`.
+    Pause(Option<Duration>),
     Subscribe(u8, mpsc::UnboundedSender<Frame>),
     NeedKeyframe(u8),
     Close,
@@ -235,6 +238,7 @@ impl Session {
             rng: 0x9E37_79B9_7F4A_7C15,
             local: Stats::default(),
             timer_late_us: 0,
+            paused_until: None,
         };
         tokio::spawn(driver.run(command_rx));
         Ok(Self {
@@ -324,17 +328,42 @@ impl Session {
     pub fn handle(&self) -> Handle {
         Handle {
             commands: self.commands.clone(),
+            epoch: self.epoch,
         }
     }
 }
 
-/// Ends a session or waits for its end, without owning it.
+/// Ends, pauses or waits for a session, without owning it.
 #[derive(Clone)]
 pub struct Handle {
     commands: mpsc::UnboundedSender<Command>,
+    epoch: Instant,
 }
 
 impl Handle {
+    /// Like `Session::send_message`.
+    pub fn send_message(&self, stream: u8, data: Vec<u8>) -> Result<()> {
+        let frame = OutFrame {
+            stream,
+            data,
+            key: false,
+            intra_refresh: true,
+            capture_us: self.epoch.elapsed().as_micros() as u64,
+        };
+        self.commands
+            .send(Command::Send(frame, wire::F_STANDALONE))
+            .map_err(|_| Error::Protocol("real-time session closed"))
+    }
+
+    /// Pauses the session (`Some(limit)`) or resumes it (`None`). While
+    /// paused, frames given to it are dropped instead of sent (messages
+    /// still go), and nothing that arrives is handed on: the session stays
+    /// up, but nothing passes. Still paused after `limit`, it ends. Resuming
+    /// asks this side for a keyframe on stream 0 (`Event::KeyframeRequested`).
+    pub fn pause(&self, limit: Option<Duration>) {
+        let _ = self.commands.send(Command::Pause(limit));
+    }
+
     pub fn close(&self) {
         let _ = self.commands.send(Command::Close);
     }
@@ -468,6 +497,8 @@ struct Driver<C> {
     local: Stats,
     /// How late timers have been firing lately (decays).
     timer_late_us: u64,
+    /// Paused (`Handle::pause`): until when, before the session ends.
+    paused_until: Option<u64>,
 }
 
 impl<C: Control> Driver<C> {
@@ -480,6 +511,11 @@ impl<C: Control> Driver<C> {
         let mut control_buf = [0u8; 64];
         loop {
             let now = self.now();
+            // Paused for too long: over.
+            if self.paused_until.is_some_and(|t| now >= t) {
+                self.say_bye().await;
+                break;
+            }
             let wake = self.housekeeping(now).await;
             self.publish();
             if self.ending {
@@ -488,9 +524,23 @@ impl<C: Control> Driver<C> {
             let deadline = self.epoch + Duration::from_micros(wake);
             tokio::select! {
                 cmd = commands.recv() => match cmd {
+                    // Paused: frames are dropped before they get a number, so the
+                    // other side sees no gap; messages still go.
+                    Some(Command::Send(f, flags)) if self.paused_until.is_some() && flags & wire::F_STANDALONE == 0 => {
+                        drop(f);
+                    }
                     Some(Command::Send(f, flags)) => {
                         let now = self.now();
                         self.senders.entry(f.stream).or_insert_with(|| FrameSender::new(f.stream)).push_with(&f, flags, now);
+                    }
+                    Some(Command::Pause(limit)) => {
+                        let now = self.now();
+                        let was = self.paused_until.is_some();
+                        self.paused_until = limit.map(|l| now + l.as_micros() as u64);
+                        if was && limit.is_none() {
+                            // The picture since is new: start it afresh.
+                            let _ = self.events.send(Event::KeyframeRequested { stream: 0 });
+                        }
                     }
                     Some(Command::Subscribe(stream, to)) => {
                         self.routes.insert(stream, to);
@@ -499,18 +549,7 @@ impl<C: Control> Driver<C> {
                         self.receiver(stream).need_keyframe();
                     }
                     Some(Command::Close) | None => {
-                        // On every path that works, a few times: the TLS
-                        // connection may be gone, and a lost bye leaves
-                        // the other side waiting for `NO_PATH_US`.
-                        let now = self.now();
-                        for _ in 0..3 {
-                            for to in self.paths.alive(now) {
-                                self.send_to(&wire::bye(), to).await;
-                            }
-                        }
-                        if self.control_open {
-                            let _ = self.control.shutdown().await;
-                        }
+                        self.say_bye().await;
                         break;
                     }
                 },
@@ -540,6 +579,21 @@ impl<C: Control> Driver<C> {
         }
         self.publish();
         let _ = self.events.send(Event::Closed);
+    }
+
+    /// Tells the other side the session is over: on every path that works,
+    /// a few times (the TLS connection may be gone, and a lost bye leaves
+    /// the other side waiting for `NO_PATH_US`).
+    async fn say_bye(&mut self) {
+        let now = self.now();
+        for _ in 0..3 {
+            for to in self.paths.alive(now) {
+                self.send_to(&wire::bye(), to).await;
+            }
+        }
+        if self.control_open {
+            let _ = self.control.shutdown().await;
+        }
     }
 
     fn receiver(&mut self, stream: u8) -> &mut FrameReceiver {
@@ -674,9 +728,13 @@ impl<C: Control> Driver<C> {
 
         let mut outgoing = Vec::new();
         let mut busy = false;
+        let paused = self.paused_until.is_some();
         for r in self.receivers.values_mut() {
             let polled = r.poll(now, rtt);
             for f in polled.frames {
+                if paused {
+                    continue; // nothing passes while paused
+                }
                 let f = match self.routes.get(&f.stream) {
                     Some(to) => match to.send(f) {
                         Ok(()) => continue,
@@ -733,6 +791,9 @@ impl<C: Control> Driver<C> {
         }
         if busy {
             wake = wake.min(now + POLL_US);
+        }
+        if let Some(t) = self.paused_until {
+            wake = wake.min(t);
         }
         if queued {
             // With no path yet, check again shortly; frames age out meanwhile.

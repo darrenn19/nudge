@@ -8,8 +8,9 @@
 //!   or they started it themselves;
 //! - a locked device never shares its screen: it's still asked (the
 //!   question waits on the lock screen; answering needs an unlock), but a
-//!   yes while it's locked is refused, and a sharing session ends when it
-//!   locks;
+//!   yes while it's locked is refused, and a sharing session pauses when it
+//!   locks: nothing passes (no picture, no input) until it's unlocked, and
+//!   after `LOCKED_LIMIT` locked the session ends;
 //! - the app hears when a session starts and ends (`MirrorStarted`,
 //!   `MirrorEnded`), so it can show a "being shared" indicator for as long
 //!   as one runs.
@@ -36,6 +37,9 @@ const ASK_TIMEOUT: Duration = Duration::from_secs(60);
 /// A session the core started for the app (an answered request) is ended if
 /// the app hasn't taken it by then: nothing is showing it.
 const UNCLAIMED_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A sharing session paused by the lock ends after this long locked.
+const LOCKED_LIMIT: Duration = if cfg!(test) { Duration::from_secs(2) } else { Duration::from_secs(180) };
 
 /// This device's part in a session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,15 +207,24 @@ impl Node {
 
     /// Whether this device is locked (or its screen is off). While it is,
     /// its screen is never shared: requests are refused, and sharing
-    /// sessions end. Not saved: the app sets it as things change.
+    /// sessions pause (the other side is told, `Input::Locked`) until it's
+    /// unlocked, ending after `LOCKED_LIMIT`. Not saved: the app sets it as
+    /// things change.
     pub fn set_screen_locked(&self, locked: bool) {
-        self.shared.screen_locked.store(locked, Ordering::Relaxed);
-        if !locked {
+        let was = self.shared.screen_locked.swap(locked, Ordering::Relaxed);
+        if was == locked {
             return;
         }
         let mirrors = self.shared.mirrors();
         for r in mirrors.running.values().filter(|r| r.role == MirrorRole::Sharing) {
-            r.handle.close();
+            if locked {
+                // Paused first: nothing more gets out from here on.
+                r.handle.pause(Some(LOCKED_LIMIT));
+            }
+            let _ = r.handle.send_message(crate::input::STREAM, crate::input::Input::Locked(locked).encode());
+            if !locked {
+                r.handle.pause(None);
+            }
         }
         // Open questions stay: answering one needs an unlock first, and a
         // yes that comes while still locked is refused (`ask_to_share`).

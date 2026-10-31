@@ -306,3 +306,32 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_mirrorControlStatus<'
         let _ = s.send_message(input::STREAM, Input::Status(status).encode());
     }
 }
+
+/// Tell the PC this phone is unlocked but its user must allow sharing
+/// again (Android stopped the capture at the lock).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_mirrorResuming<'l>(_: JNIEnv<'l>, _: JClass<'l>, id: jlong) {
+    let all = sessions().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(s) = all.get(&(id as u64)) {
+        let _ = s.send_message(input::STREAM, Input::Resuming.encode());
+    }
+}
+
+/// Send 10 ms of this phone's sound (raw PCM, `input::AUDIO_STREAM`), for
+/// a PC that asked for it (`Input::Audio`). 0, or -1 once the session has
+/// ended. While the phone is locked the session drops it (paused).
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_darrenn19_nudge_Core_mirrorSendAudio<'l>(
+    env: JNIEnv<'l>,
+    _: JClass<'l>,
+    id: jlong,
+    data: JByteArray<'l>,
+    length: jint,
+) -> jint {
+    let Ok(mut bytes) = env.convert_byte_array(&data) else { return -1 };
+    bytes.truncate(length.max(0) as usize);
+    let all = sessions().lock().unwrap_or_else(|e| e.into_inner());
+    let Some(s) = all.get(&(id as u64)) else { return -1 };
+    let frame = OutFrame { stream: input::AUDIO_STREAM, data: bytes, key: true, intra_refresh: false, capture_us: s.now_us() };
+    if s.send(frame).is_err() { -1 } else { 0 }
+}

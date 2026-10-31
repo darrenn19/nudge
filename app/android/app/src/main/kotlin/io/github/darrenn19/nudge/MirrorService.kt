@@ -110,13 +110,29 @@ class MirrorService : Service() {
         fun onEnded(id: Long) {
             running?.let { if (it.session == id) it.finish() }
         }
+
+        /** Asks to share again after Android stopped the capture at the lock ([MirrorConsentActivity]). */
+        fun resumeIntent(context: Context): Intent =
+            Intent(context, MirrorConsentActivity::class.java)
+                .putExtra(MirrorConsentActivity.EXTRA_RESUME, true)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+        /** What Android's capture prompt answered, after the lock. */
+        fun resume(resultCode: Int, data: Intent?) {
+            running?.let { s -> s.main.post { s.resumeCapture(resultCode, data) } }
+        }
+
+        /** RECORD_AUDIO was just granted ([AudioPermissionActivity]). */
+        fun audioAllowed() {
+            running?.let { s -> s.main.post { if (s.audioWanted) s.startAudio() } }
+        }
     }
 
     private var projection: MediaProjection? = null
     private var display: VirtualDisplay? = null
     private var codec: MediaCodec? = null
     private val wifiLocks = mutableListOf<WifiManager.WifiLock>()
-    private val main = Handler(Looper.getMainLooper())
+    internal val main = Handler(Looper.getMainLooper())
 
     @Volatile
     private var stopping = false
@@ -127,6 +143,13 @@ class MirrorService : Service() {
 
     /** The PC's input for this session. */
     private var control: RemoteControl? = null
+
+    /** The PC wants this phone's sound ([AudioCapture]); main thread. */
+    private var audioWanted = false
+    private var audio: AudioCapture? = null
+
+    /** The media volume before the sound moved to the PC, to put back. */
+    private var volumeBefore: Int? = null
 
     /** The PC is in game mode: a smaller picture ([GAME_MAX_SIDE]). */
     @Volatile
@@ -156,9 +179,7 @@ class MirrorService : Service() {
             return START_NOT_STICKY
         }
         projection = mp
-        mp.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() = finish() // Android ended it (or the user, from the system)
-        }, main)
+        watch(mp)
 
         try {
             startCapture(mp)
@@ -198,12 +219,128 @@ class MirrorService : Service() {
         if (Core.mirrorTake(id)) started(id, device) else finish()
     }
 
+    /** Ends with the capture, unless the lock ended it ([onCaptureEnded]). */
+    private fun watch(mp: MediaProjection) {
+        mp.registerCallback(object : MediaProjection.Callback() {
+            override fun onStop() {
+                if (mp === projection) onCaptureEnded()
+            }
+        }, main)
+    }
+
+    /**
+     * Android stopped the capture: the user, from the system, or (Android
+     * 16+) the phone locking. Locked, the session stays (the core pauses it,
+     * and ends it after 3 minutes); on unlock the user is asked to share
+     * again, as Android requires for every capture.
+     */
+    @Volatile
+    private var waiting = false
+    private var unlockWatch: android.content.BroadcastReceiver? = null
+
+    /** Counts the times asked again, so an old minute's timer doesn't end a later wait. */
+    private var asked = 0
+
+    private fun onCaptureEnded() {
+        if (stopping) return
+        if (session < 0 || !LockState.isLocked(this)) {
+            Log.i(TAG, "mirroring: Android ended the capture")
+            finish()
+            return
+        }
+        Log.i(TAG, "mirroring: Android ended the capture as the phone locked; asking again on unlock")
+        waiting = true
+        audio?.stop()
+        audio = null // still wanted: back with the capture
+        runCatching { getSystemService(DisplayManager::class.java).unregisterDisplayListener(turned) }
+        val old = codec
+        encoder = null
+        codec = null
+        display?.release()
+        display = null
+        runCatching { old?.stop() }
+        old?.release()
+        projection = null
+        val receiver = object : android.content.BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                // "User present", or a screen on with no lock screen to pass.
+                if (intent.action == Intent.ACTION_SCREEN_ON) {
+                    main.postDelayed({ if (waiting && !LockState.isLocked(this@MirrorService)) askAgain() }, 1_000)
+                } else {
+                    askAgain()
+                }
+            }
+        }
+        unlockWatch = receiver
+        androidx.core.content.ContextCompat.registerReceiver(
+            this, receiver,
+            android.content.IntentFilter().apply {
+                addAction(Intent.ACTION_USER_PRESENT)
+                addAction(Intent.ACTION_SCREEN_ON)
+            },
+            androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+    }
+
+    /** Unlocked after the capture ended: ask to share again, for up to a minute. */
+    private fun askAgain() {
+        if (!waiting || stopping || unlockWatch == null) return
+        unlockWatch?.let { runCatching { unregisterReceiver(it) } }
+        unlockWatch = null
+        Log.i(TAG, "mirroring: unlocked; asking to share again")
+        Core.mirrorResuming(session)
+        Notifications.notify(this, Notifications.RESUME_ID, Notifications.resumeSharing(this, deviceName))
+        // Straight to Android's prompt where Nudge may open a screen from the background.
+        if (android.provider.Settings.canDrawOverlays(this)) {
+            runCatching { startActivity(resumeIntent(this)) }
+        }
+        val ask = ++asked
+        main.postDelayed({
+            if (waiting && !stopping && ask == asked) {
+                Log.i(TAG, "mirroring: not allowed again within a minute; ending")
+                finish()
+            }
+        }, 60_000)
+    }
+
+    /** Android's prompt answered after the lock: capture again in the same session, or end it. */
+    private fun resumeCapture(resultCode: Int, data: Intent?) {
+        if (!waiting || stopping) return
+        Notifications.cancel(this, Notifications.RESUME_ID)
+        if (resultCode != android.app.Activity.RESULT_OK || data == null) {
+            Log.i(TAG, "mirroring: not allowed again; ending")
+            finish()
+            return
+        }
+        try {
+            // The service must hold the media-projection type before the projection is made.
+            val type = if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
+            ServiceCompat.startForeground(this, NOTIFICATION_ID, Notifications.sharing(this, deviceName), type)
+            val mp = getSystemService(MediaProjectionManager::class.java).getMediaProjection(resultCode, data)
+                ?: throw IllegalStateException("no projection")
+            projection = mp
+            watch(mp)
+            waiting = false
+            startCapture(mp)
+            requestKeyframe()
+            Log.i(TAG, "mirroring: sharing again")
+            if (audioWanted) startAudio()
+        } catch (e: Exception) {
+            Log.w(TAG, "mirroring: couldn't share again", e)
+            finish()
+        }
+    }
+
+    /** The PC's name, once the session started. */
+    private var deviceName: String? = null
+
     private fun started(id: Long, device: String) {
         session = id
         Log.i(TAG, "mirroring: session $id with $device")
         // A fresh keyframe, for the decoder on the other side.
         requestKeyframe()
         val name = deviceName(device)
+        deviceName = name
         main.post {
             if (stopping) return@post
             Notifications.notify(this, NOTIFICATION_ID, Notifications.sharing(this, name))
@@ -211,7 +348,7 @@ class MirrorService : Service() {
                 main.post {
                     if (!stopping) Notifications.notify(this, NOTIFICATION_ID, Notifications.sharing(this, name, controlled))
                 }
-            }, onGame = ::setGame).also { it.start() }
+            }, onGame = ::setGame, onAudio = ::setAudio, onView = ::setView).also { it.start() }
         }
     }
 
@@ -229,7 +366,10 @@ class MirrorService : Service() {
         if (d.rotation == Surface.ROTATION_90 || d.rotation == Surface.ROTATION_270) {
             sw = sh.also { sh = sw }
         }
-        val scale = minOf(1.0, (if (game) GAME_MAX_SIDE else MAX_SIDE).toDouble() / maxOf(sw, sh))
+        // No more than the PC shows (rounded up a little, at least a sharp 720).
+        var most = if (game) GAME_MAX_SIDE else MAX_SIDE
+        if (viewLong > 0) most = minOf(most, maxOf(720, (viewLong + 63) / 64 * 64))
+        val scale = minOf(1.0, most.toDouble() / maxOf(sw, sh))
         return (sw * scale).toInt() / 8 * 8 to (sh * scale).toInt() / 8 * 8
     }
 
@@ -336,7 +476,8 @@ class MirrorService : Service() {
             } catch (e: Exception) {
                 if (!stopping) Log.w(TAG, "mirroring stopped", e)
             }
-            main.post { finish() }
+            // The lock ended the capture: the session waits (see onCaptureEnded).
+            main.post { if (!waiting) finish() }
         }
     }
 
@@ -351,6 +492,76 @@ class MirrorService : Service() {
         override fun onDisplayRemoved(displayId: Int) {}
         override fun onDisplayChanged(displayId: Int) {
             if (displayId == Display.DEFAULT_DISPLAY) refit("turned")
+        }
+    }
+
+    /** The PC wants this phone's sound (true), or for it to stay on the phone. */
+    private fun setAudio(on: Boolean) {
+        main.post {
+            if (stopping) return@post
+            audioWanted = on
+            if (on) startAudio() else stopAudio()
+        }
+    }
+
+    /**
+     * Sends the sound to the PC, and turns the phone's own media volume
+     * down meanwhile, so it plays there instead of here (capture is meant
+     * to be unaffected by the volume: "mirror audio: ... peak" in the log
+     * shows what's captured). The first time, Android's permission is
+     * asked for from a notification.
+     */
+    private fun startAudio() {
+        val mp = projection ?: return
+        if (audio != null || session < 0) return
+        if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            Log.i(TAG, "mirror audio: the PC wants it; asking for permission")
+            Notifications.notify(this, Notifications.AUDIO_SETUP_ID, Notifications.audioSetup(this, deviceName))
+            return
+        }
+        // Capturing sound from the background needs the microphone type too (Android 14+).
+        if (Build.VERSION.SDK_INT >= 30) {
+            try {
+                ServiceCompat.startForeground(
+                    this, NOTIFICATION_ID, Notifications.sharing(this, deviceName),
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE,
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "mirror audio: couldn't add the microphone type", e)
+            }
+        }
+        val capture = AudioCapture(mp, session)
+        if (!capture.start()) return
+        audio = capture
+        val am = getSystemService(android.media.AudioManager::class.java)
+        if (volumeBefore == null) {
+            volumeBefore = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+            runCatching { am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, 0, 0) }
+        }
+    }
+
+    private fun stopAudio() {
+        audio?.stop()
+        audio = null
+        val before = volumeBefore ?: return
+        volumeBefore = null
+        val am = getSystemService(android.media.AudioManager::class.java)
+        runCatching { am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, before, 0) }
+    }
+
+    /**
+     * The picture's longer side as the PC shows it (0: not said). Nothing
+     * bigger is captured: the PC would only scale it down, and every extra
+     * pixel costs time to encode and to send.
+     */
+    @Volatile
+    private var viewLong = 0
+
+    private fun setView(long: Int) {
+        main.post {
+            if (stopping || long <= 0 || long == viewLong) return@post
+            viewLong = long
+            refit("the PC shows it $long px long")
         }
     }
 
@@ -527,6 +738,10 @@ class MirrorService : Service() {
         stopping = true
         running = null
         control?.stop()
+        stopAudio()
+        unlockWatch?.let { runCatching { unregisterReceiver(it) } }
+        unlockWatch = null
+        Notifications.cancel(this, Notifications.RESUME_ID)
         if (session >= 0) Core.mirrorClose(session)
         wifiLocks.forEach { if (it.isHeld) it.release() }
         wifiLocks.clear()

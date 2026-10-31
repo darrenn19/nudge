@@ -1,5 +1,7 @@
 package io.github.darrenn19.nudge
 
+import android.util.Log
+
 import android.content.Context
 import android.media.MediaScannerConnection
 import android.os.Handler
@@ -105,14 +107,23 @@ object Background : Core.Listener {
                     pairing = true,
                 )
             }
-            // Asked even with the window open: it's about the whole screen.
-            "mirrorAsked" -> Notifications.offer(
-                context,
-                id,
-                "${name(e.getString("device"))} wants to see your screen",
-                "Only allow devices you trust",
-                mirror = true,
-            )
+            // A paired device wants to see the screen: it just starts (the
+            // Pair screen warns to pair only your own devices; "Your screen
+            // is being shared" shows meanwhile). Android's own capture prompt
+            // still comes unless Nudge was given PROJECT_MEDIA over adb. A
+            // locked phone is asked instead: answering needs an unlock, and
+            // nothing is shared while locked.
+            "mirrorAsked" -> if (!LockState.isLocked(context) && MirrorConsentActivity.answerYes(context, id)) {
+                Log.i("Nudge", "mirroring: ${name(e.getString("device"))} asked to see the screen; sharing")
+            } else {
+                Notifications.offer(
+                    context,
+                    id,
+                    "${name(e.getString("device"))} wants to see your screen",
+                    "Only allow devices you trust",
+                    mirror = true,
+                )
+            }
             // MirrorService captures the screen and shows "being shared".
             "mirrorStarted" -> if (e.getBoolean("sharing")) MirrorService.onStarted(id, e.getString("device"))
             "mirrorEnded" -> MirrorService.onEnded(id)

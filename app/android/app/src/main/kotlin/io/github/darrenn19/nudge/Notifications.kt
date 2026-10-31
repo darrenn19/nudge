@@ -27,6 +27,8 @@ object Notifications {
     private const val CLIP_PAUSED_ID = 2
     /** "Let <PC> control this phone?" (see [controlSetup]). */
     const val CONTROL_SETUP_ID = 7
+    const val AUDIO_SETUP_ID = 9
+    const val RESUME_ID = 10
     private val nextId = AtomicInteger(1000)
 
     fun createChannels(context: Context) {
@@ -252,6 +254,56 @@ object Notifications {
             .setGroup(MIRROR_GROUP)
             .setContentIntent(open)
             .addAction(0, "Open settings", open)
+            .build()
+    }
+
+    /**
+     * The PC wants to play this phone's sound, and Android needs the
+     * record-audio permission for that: asked once, from here.
+     */
+    fun audioSetup(context: Context, with: String?): Notification {
+        val open = PendingIntent.getActivity(
+            context,
+            AUDIO_SETUP_ID,
+            AudioPermissionActivity.intent(context),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val who = with ?: "your computer"
+        return NotificationCompat.Builder(context, OFFERS)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Play this phone's sound on $who?")
+            .setContentText("Android asks once for permission to capture it")
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setGroup(MIRROR_GROUP)
+            .setContentIntent(open)
+            .addAction(0, "Allow", open)
+            .build()
+    }
+
+    /**
+     * Android stopped the screen capture when the phone locked: tap to
+     * allow sharing again (its prompt), and the PC's window carries on.
+     */
+    fun resumeSharing(context: Context, with: String?): Notification {
+        val open = PendingIntent.getActivity(
+            context,
+            RESUME_ID,
+            MirrorService.resumeIntent(context),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val who = with ?: "your computer"
+        return NotificationCompat.Builder(context, OFFERS)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Keep sharing your screen with $who?")
+            .setContentText("Android stopped it when the phone locked")
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setGroup(MIRROR_GROUP)
+            .setContentIntent(open)
+            .addAction(0, "Keep sharing", open)
             .build()
     }
 

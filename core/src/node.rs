@@ -4264,13 +4264,64 @@ mod tests {
             Err(Error::ScreenLocked)
         ));
 
-        // Unlocked, the phone offers its screen; locking ends it.
+        // Unlocked, the phone offers its screen. Locking pauses it: the
+        // laptop is told, and nothing gets through until it's unlocked.
         phone.set_screen_locked(false);
-        let (id, _sharer) = phone
+        let (id, mut sharer) = phone
             .start_mirror(laptop_fp, MirrorRole::Sharing, Config::default())
             .await
             .unwrap();
         assert_eq!(phone.mirrors().len(), 1);
+        let viewing = laptop.mirrors()[0].id;
+        let mut viewer = laptop.take_mirror(viewing).expect("the laptop's session");
+        let frame = |sharer: &crate::realtime::Session, n: u8| crate::realtime::OutFrame {
+            stream: 0,
+            data: vec![n; 3000],
+            key: true,
+            intra_refresh: false,
+            capture_us: sharer.now_us(),
+        };
+        let mut status = viewer.subscribe(crate::input::STREAM);
+        let video = |viewer: &mut crate::realtime::Session| {
+            let mut got = Vec::new();
+            while let Some(e) = viewer.try_event() {
+                if let crate::realtime::Event::Frame(f) = e {
+                    got.push(f.data[0]);
+                }
+            }
+            got
+        };
+        sharer.send(frame(&sharer, 1)).unwrap();
+        until(|| video(&mut viewer).contains(&1)).await;
+
+        phone.set_screen_locked(true);
+        let said = tokio::time::timeout(Duration::from_secs(5), status.recv()).await.unwrap().unwrap();
+        assert_eq!(crate::input::Input::parse(&said.data), Some(crate::input::Input::Locked(true)));
+        sharer.send(frame(&sharer, 2)).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!video(&mut viewer).contains(&2), "nothing is shared while locked");
+        assert_eq!(phone.mirrors().len(), 1, "paused, not ended");
+
+        // Unlocked: told, a fresh keyframe is asked for, and it flows again.
+        phone.set_screen_locked(false);
+        let said = tokio::time::timeout(Duration::from_secs(5), status.recv()).await.unwrap().unwrap();
+        assert_eq!(crate::input::Input::parse(&said.data), Some(crate::input::Input::Locked(false)));
+        let asked = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match sharer.next_event().await {
+                    Some(crate::realtime::Event::KeyframeRequested { stream: 0 }) => return true,
+                    Some(_) => {}
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(asked);
+        sharer.send(frame(&sharer, 3)).unwrap();
+        until(|| video(&mut viewer).contains(&3)).await;
+
+        // Locked for longer than the limit (2 s in tests): it ends.
         phone.set_screen_locked(true);
         assert!(matches!(
             next(&mut phone_events, |e| matches!(e, NodeEvent::MirrorEnded { .. })).await,

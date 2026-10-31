@@ -25,6 +25,10 @@ class RemoteControl(
     private val onControl: (Boolean) -> Unit,
     /** The PC turned game mode on (true) or off. */
     private val onGame: (Boolean) -> Unit = {},
+    /** The PC wants this phone's sound (true), or for it to stay here. */
+    private val onAudio: (Boolean) -> Unit = {},
+    /** The picture's longer side as the PC shows it, px. */
+    private val onView: (Int) -> Unit = {},
 ) {
     companion object {
         private const val TAG = "Nudge"
@@ -39,6 +43,12 @@ class RemoteControl(
         /** The `Mode` message and its game-mode flag. */
         private const val MODE = 8
         private const val GAME = 1
+
+        /** The `Audio` message: play this phone's sound on the PC. */
+        private const val AUDIO = 11
+
+        /** The `View` message: how big the PC shows the picture. */
+        private const val VIEW = 13
     }
 
     @Volatile
@@ -79,6 +89,14 @@ class RemoteControl(
             // The PC's mode is about the picture: it counts with control off too.
             if (m[0].toInt() == MODE) {
                 if (m.size >= 2) onGame(m[1].toInt() and GAME != 0)
+                continue
+            }
+            if (m[0].toInt() == AUDIO) {
+                if (m.size >= 2) onAudio(m[1].toInt() != 0)
+                continue
+            }
+            if (m[0].toInt() == VIEW) {
+                if (m.size >= 3) onView(((m[1].toInt() and 0xFF) shl 8) or (m[2].toInt() and 0xFF))
                 continue
             }
             if (service == null) {

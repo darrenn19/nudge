@@ -96,6 +96,13 @@ const PAD_SILENT: Duration = Duration::from_millis(60);
 /// two fingers were on it: the measured swipe has it covered.
 const PAD_WHEEL_QUIET: Duration = Duration::from_millis(500);
 
+/// The picture's size goes to the phone once it has stayed put this long
+/// (not on every step of a resize: each change restarts its encoder).
+const VIEW_SETTLE: Duration = Duration::from_millis(400);
+
+/// ...and only when it changed by more than this share.
+const VIEW_CHANGE: f64 = 0.12;
+
 /// A right-drag shorter than this (client pixels) only moves the centre.
 const MIN_RADIUS_DRAG: i32 = 8;
 
@@ -170,6 +177,10 @@ struct State {
     swipe_pending: Option<(u16, u16, f64, f64)>,
     /// When two or more fingers were last on the touchpad.
     two_fingers_at: Option<Instant>,
+    /// The picture's longer side last told to the phone, and the one seen
+    /// now with when it was first seen (`View`).
+    view_sent: Option<u16>,
+    view_seen: Option<(u16, Instant)>,
 }
 
 /// A two-finger swipe on the touchpad, sent to the phone 1:1 in mm.
@@ -242,6 +253,16 @@ pub(super) fn set_window(hwnd: HWND, title: &str) {
     });
 }
 
+/// Game mode is on.
+pub(super) fn game() -> bool {
+    STATE.with_borrow(|s| s.game)
+}
+
+/// Sends a message to the phone (from the window's menu).
+pub(super) fn send_input(input: Input) {
+    STATE.with_borrow_mut(|s| send(s, input));
+}
+
 /// Turns game mode on or off (F2, or the title bar menu).
 pub(super) fn toggle_game() {
     STATE.with_borrow_mut(|s| {
@@ -254,6 +275,8 @@ pub(super) fn toggle_game() {
         let mode = if s.game { input::GAME } else { 0 };
         send(s, Input::Mode(mode));
         log::info!("mirror: game mode {}", if s.game { "on" } else { "off" });
+        let on = s.game;
+        super::settings::change(|x| x.game = on);
     });
 }
 
@@ -724,6 +747,22 @@ pub(super) fn tick() {
         if (s.move_pending.is_some() || s.pan_pending.is_some() || s.swipe_pending.is_some()) && move_due(s) {
             flush_moves(s);
         }
+        // The picture's size settled at a new one: the phone encodes just that much.
+        if let Some(r) = s.picture {
+            let long = (r.right - r.left).max(r.bottom - r.top).clamp(1, u16::MAX as i32) as u16;
+            match s.view_seen {
+                Some((seen, _)) if seen == long => {}
+                _ => s.view_seen = Some((long, Instant::now())),
+            }
+            if let Some((seen, since)) = s.view_seen
+                && since.elapsed() >= VIEW_SETTLE
+                && s.view_sent.is_none_or(|sent| (f64::from(seen) / f64::from(sent) - 1.0).abs() > VIEW_CHANGE)
+            {
+                s.view_sent = Some(seen);
+                log::info!("mirror: picture shown {seen} px long: the phone sends no more than that");
+                send(s, Input::View(seen));
+            }
+        }
         // Reports stopped without saying the fingers lifted: they did.
         if s.swipe.is_some() && s.touchpad_report.is_none_or(|t| t.elapsed() >= PAD_SILENT) {
             on_pad(s, s.hwnd.unwrap_or_default(), Vec::new());
@@ -770,8 +809,8 @@ pub(super) fn tick() {
             x if x == ControlStatus::Unavailable as u8 => " (can't be controlled)",
             _ => "",
         };
-        let game = if s.game { " - Game mode: WASD/arrows move, right-drag places the joystick, F2 to leave" } else { "" };
-        Some((s.hwnd?, format!("{}{hint}{game}", s.title)))
+        // Game mode shows only as the tick in the "..." menu.
+        Some((s.hwnd?, format!("{}{hint}", s.title)))
     });
     if let Some((hwnd, title)) = retitle {
         let title: Vec<u16> = title.encode_utf16().chain([0]).collect();

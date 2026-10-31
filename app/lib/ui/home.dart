@@ -578,9 +578,9 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  /// Windows: ask to see [d]'s screen; it opens in a window of its own.
+  /// Windows: see [d]'s screen; it opens in a window of its own. Paired
+  /// phones share without a question, so nothing to say unless it fails.
   Future<void> _mirror(DeviceInfo d) async {
-    showToast(context, 'Asking ${d.name}: tap Allow on the phone', icon: CupertinoIcons.device_phone_portrait);
     final problem = await controller.mirror(d);
     if (problem != null && mounted) {
       showToast(context, "Couldn't show ${d.name}'s screen: $problem", icon: CupertinoIcons.xmark_circle);

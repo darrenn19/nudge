@@ -58,6 +58,12 @@ object Core {
     /** 0 running, 1 keyframe wanted, -1 ended. For a still screen (no frames to send). */
     @JvmStatic external fun mirrorPoll(id: Long): Int
 
+    /** Tell the PC this phone is unlocked and its user is being asked to allow sharing again. */
+    @JvmStatic external fun mirrorResuming(id: Long)
+
+    /** 10 ms of this phone's sound for the PC (raw PCM, the first [length] bytes). 0, or -1 once ended. */
+    @JvmStatic external fun mirrorSendAudio(id: Long, data: ByteArray, length: Int): Int
+
     /** End a session. */
     @JvmStatic external fun mirrorClose(id: Long)
 

@@ -24,6 +24,10 @@
 //! | 6 Pan | x u16, y u16, dx i16, dy i16: content dragged by this share of the picture (32767 = all of it); touchpad scrolling |
 //! | 7 PanEnd | (none): the fingers left the touchpad: let go now, at the speed they were moving |
 //! | 9 Swipe | x u16, y u16, dx i16, dy i16: the touchpad fingers moved this far, in 1/100 mm; the shared device's finger moves the same distance on its screen (1:1, as if on the phone) |
+//! | 10 Locked | u8 (1 locked, 0 unlocked): from the shared device. While it's locked nothing is shared (no picture, input ignored); it resumes on unlock, or the session ends after a while |
+//! | 12 Resuming | (none): from the shared device: it's unlocked, but its system stopped the screen capture at the lock (Android 16+), so its user is asked to allow sharing again; the picture carries on once they do |
+//! | 13 View | long side u16: from the viewer: the picture's longer side as shown now, in its pixels. The shared device needn't send more: fewer pixels encode and travel faster |
+//! | 11 Audio | u8 (1 on, 0 off): from the viewer: play the shared device's sound here. The shared device sends it on [`AUDIO_STREAM`] as raw PCM (48 kHz, stereo, 16-bit little-endian, 10 ms per frame, each a keyframe) |
 //! | 8 Mode | flags u8 (1 = game mode): the viewer's mode; the shared device trades picture size for latency in game mode |
 //!
 //! Keys with mods: Ctrl+Backspace / Ctrl+Delete delete a word, Ctrl+Left /
@@ -39,6 +43,12 @@
 
 /// The session stream input travels on (video is 0).
 pub const STREAM: u8 = 1;
+
+/// The stream the shared device's sound travels on, once the viewer asks
+/// for it (`Input::Audio`): raw PCM, 48 kHz, stereo, 16-bit little-endian.
+pub const AUDIO_STREAM: u8 = 2;
+pub const AUDIO_RATE: u32 = 48_000;
+pub const AUDIO_CHANNELS: u16 = 2;
 
 /// Longest text in one message, bytes.
 pub const MAX_TEXT: usize = 1000;
@@ -58,6 +68,10 @@ const PAN: u8 = 6;
 const PAN_END: u8 = 7;
 const MODE: u8 = 8;
 const SWIPE: u8 = 9;
+const LOCKED: u8 = 10;
+const AUDIO: u8 = 11;
+const RESUMING: u8 = 12;
+const VIEW: u8 = 13;
 
 /// `Mode` flag: game mode is on.
 pub const GAME: u8 = 1;
@@ -159,6 +173,18 @@ pub enum Input {
     /// finger moves as far on its own screen, so a swipe feels as on the
     /// phone. Ends with `PanEnd`.
     Swipe { x: u16, y: u16, dx: i16, dy: i16 },
+    /// From the shared device: it locked (true) or unlocked. While locked
+    /// the session is paused (`realtime::Handle::pause`).
+    Locked(bool),
+    /// From the shared device: unlocked, waiting for its user to allow
+    /// sharing again (the system stopped the capture at the lock).
+    Resuming,
+    /// From the viewer: the picture's longer side as shown there, in its
+    /// pixels (sent when the window settles at a new size).
+    View(u16),
+    /// From the viewer: play the shared device's sound on the viewer
+    /// (true), or leave it on the shared device.
+    Audio(bool),
     /// The viewer's mode (`GAME`): sent when it changes. Older shared
     /// devices ignore it.
     Mode(u8),
@@ -201,6 +227,14 @@ impl Input {
             }
             Input::PanEnd => vec![PAN_END],
             Input::Mode(flags) => vec![MODE, *flags],
+            Input::Locked(l) => vec![LOCKED, u8::from(*l)],
+            Input::Audio(on) => vec![AUDIO, u8::from(*on)],
+            Input::Resuming => vec![RESUMING],
+            Input::View(long) => {
+                let mut m = vec![VIEW];
+                m.extend_from_slice(&long.to_be_bytes());
+                m
+            }
             Input::Swipe { x, y, dx, dy } => {
                 let mut m = vec![SWIPE];
                 for v in [*x, *y, *dx as u16, *dy as u16] {
@@ -250,6 +284,10 @@ impl Input {
             },
             PAN_END => Input::PanEnd,
             MODE if !b.is_empty() => Input::Mode(b[0]),
+            LOCKED if !b.is_empty() => Input::Locked(b[0] != 0),
+            AUDIO if !b.is_empty() => Input::Audio(b[0] != 0),
+            RESUMING => Input::Resuming,
+            VIEW if b.len() >= 2 => Input::View(u16_at(0)),
             SWIPE if b.len() >= 8 => Input::Swipe {
                 x: u16_at(0),
                 y: u16_at(2),
@@ -279,6 +317,11 @@ mod tests {
             Input::PanEnd,
             Input::Mode(GAME),
             Input::Mode(0),
+            Input::Locked(true),
+            Input::Locked(false),
+            Input::Audio(true),
+            Input::Resuming,
+            Input::View(1400),
             Input::Swipe { x: 3, y: 4, dx: -250, dy: 1234 },
             Input::Text("héllo 👋".into()),
             Input::Text(String::new()),

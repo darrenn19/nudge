@@ -33,6 +33,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <!-- Screen mirroring: sharing this phone's screen (MirrorService). -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Mirroring: the phone's sound on the PC (playback capture needs it;
+         asked the first time the PC asks for the sound). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Keeping the CPU and Wi-Fi awake while files move with the screen off. -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -179,7 +183,13 @@
         <service
             android:name=".MirrorService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
+            android:foregroundServiceType="mediaProjection|microphone" />
+        <activity
+            android:name=".AudioPermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <!-- Screen mirroring: the PC controlling this phone (taps, drags,
              scrolling, typing). Off until the user turns it on in
              Accessibility settings; only acts during a mirroring session. -->
