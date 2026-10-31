@@ -25,10 +25,12 @@
 mod crypto;
 mod frames;
 mod paths;
+mod rate;
 mod session;
 mod wire;
 
 pub use crypto::OVERHEAD;
 pub use frames::{Frame, MAX_FRAGMENT, OutFrame, ReceiveStats, SendStats};
 pub use paths::PathInfo;
+pub use rate::{RateChange, RateControl};
 pub use session::{Config, Control, Event, Handle, Session, Stats};

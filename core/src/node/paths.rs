@@ -509,52 +509,9 @@ impl Shared {
                 .is_some_and(|t| t.elapsed() < LINK_RETRY)
     }
 
-    /// A screen-mirroring session started with `peer`. Over Wi-Fi, bring up
-    /// the direct link: through the router Wi-Fi pauses for 50-300 ms now
-    /// and then, on the direct link the worst is ~50 ms (docs/BENCHMARKS.md).
-    /// Not over a cable or Ethernet, which are better still. Only the side
-    /// that joins (the PC) starts it, so the two don't both try. The session
-    /// moves onto the link by itself (`realtime`: new addresses become paths).
-    pub(super) fn link_for_mirror(self: &Arc<Self>, peer: Fingerprint) {
-        if !can_join(&self.platform) || !self.may_link(&peer) {
-            return;
-        }
-        let nets = link::local_nets();
-        let wired = self.addrs_of(&peer).iter().any(|a| {
-            matches!(link::kind_toward(&nets, a.ip()), Some(LinkKind::Usb | LinkKind::Wired))
-        });
-        if !wired {
-            info!("link: for mirroring");
-            self.start_link(peer, true);
-        }
-    }
-
-    /// Before asking `peer` to show its screen over Wi-Fi: move onto the
-    /// direct link first, so the picture doesn't freeze for the seconds the
-    /// PC takes to change networks once it's running. Returns once joined,
-    /// or straight away if there's nothing to do (a cable, not allowed,
-    /// tried lately), or when it didn't work (mirroring then goes through
-    /// the router).
-    pub(super) async fn link_up_for_mirror(self: &Arc<Self>, peer: Fingerprint) {
-        if !can_join(&self.platform) || !self.may_link(&peer) {
-            return;
-        }
-        let nets = link::local_nets();
-        let wired = self.addrs_of(&peer).iter().any(|a| {
-            matches!(link::kind_toward(&nets, a.ip()), Some(LinkKind::Usb | LinkKind::Wired))
-        });
-        if wired {
-            return;
-        }
-        info!("link: for mirroring, before it starts");
-        self.state().link_tried.insert(peer, Instant::now());
-        if let Err(e) = self.ask_link(peer, true).await {
-            warn!("link: setup failed ({e})");
-        }
-    }
-
     /// Set up the hotspot with `peer`, in the background. `direct_only`:
-    /// for mirroring (see `Link::AskDirect`).
+    /// a Wi-Fi Direct group only (`Link::AskDirect`; nothing asks for one
+    /// now that mirroring stays on the PC's own network).
     fn start_link(self: &Arc<Self>, peer: Fingerprint, direct_only: bool) {
         self.state().link_tried.insert(peer, Instant::now());
         let shared = self.clone();

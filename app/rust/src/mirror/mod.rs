@@ -8,11 +8,20 @@
 //! their own). Closing the window ends the session; the session ending
 //! closes the window.
 
+mod control;
+mod touchpad;
 mod video;
 
-use std::sync::mpsc::{self, RecvTimeoutError};
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
+use windows::Win32::System::Threading::{CreateEventW, SetEvent};
+use windows::Win32::UI::WindowsAndMessaging::{MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx, QS_ALLINPUT};
+
+use nudge_core::input::{self, Input};
 use nudge_core::realtime::{Event, Session};
 use tokio::sync::mpsc as tokio_mpsc;
 
@@ -26,23 +35,78 @@ struct Shown {
     arrived: u64,
 }
 
+/// Wakes the window's thread when a frame arrives, so it can wait for
+/// frames and window messages (mouse, keys) at once: input goes out the
+/// moment it happens, not at the next check.
+struct Wake(HANDLE);
+
+// SAFETY: an event handle can be signalled and waited on from any thread.
+unsafe impl Send for Wake {}
+unsafe impl Sync for Wake {}
+
+impl Wake {
+    fn new() -> windows::core::Result<Self> {
+        // Auto-reset: one wake per signal.
+        Ok(Self(unsafe { CreateEventW(None, false, false, None)? }))
+    }
+
+    fn signal(&self) {
+        unsafe {
+            let _ = SetEvent(self.0);
+        }
+    }
+
+    /// Waits up to `ms` for a frame (a signal) or a window message.
+    fn wait(&self, ms: u32) {
+        unsafe {
+            MsgWaitForMultipleObjectsEx(Some(&[self.0]), ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        }
+    }
+}
+
+impl Drop for Wake {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
 /// Opens a window showing `session` (the other device's screen).
 pub(crate) fn show(mut session: Session, title: String) {
+    let wake = match Wake::new() {
+        Ok(w) => Arc::new(w),
+        Err(e) => {
+            log::warn!("mirror window: {e}");
+            return;
+        }
+    };
+    let woken = wake.clone();
     let (frames, frames_rx) = mpsc::channel::<Shown>();
     // From the window: the decoder needs a keyframe (true), or the window
     // closed (false).
     let (back, mut back_rx) = tokio_mpsc::unbounded_channel::<bool>();
+    // From the window: mouse and keyboard, for the phone (`control`).
+    let (input_tx, mut input_rx) = tokio_mpsc::unbounded_channel::<Input>();
     let epoch = session.instant_of(0);
 
     runtime().spawn(async move {
         loop {
             tokio::select! {
                 e = session.next_event() => match e {
+                    // Other streams aren't video: the phone says whether it can be controlled.
+                    Some(Event::Frame(f)) if f.stream != 0 => {
+                        if let (input::STREAM, Some(Input::Status(st))) = (f.stream, Input::parse(&f.data)) {
+                            log::info!("mirror: phone control {st:?}");
+                            control::set_status(st);
+                        }
+                    }
                     Some(Event::Frame(f)) => {
                         let captured = session.to_local_us(f.capture_us);
                         if frames.send(Shown { data: f.data, captured, arrived: f.received_us }).is_err() {
                             break; // the window closed
                         }
+                        woken.signal();
                     }
                     Some(Event::PathChanged(p)) => {
                         log::info!("mirror path: {:?}", p.map(|p| (p.remote, p.kind.name(), p.rtt_us)));
@@ -50,6 +114,9 @@ pub(crate) fn show(mut session: Session, title: String) {
                     Some(Event::KeyframeRequested { .. }) => {}
                     Some(Event::Closed) | None => break,
                 },
+                Some(i) = input_rx.recv() => {
+                    let _ = session.send_message(input::STREAM, i.encode());
+                }
                 b = back_rx.recv() => match b {
                     Some(true) => session.need_keyframe(0),
                     Some(false) | None => break,
@@ -65,12 +132,14 @@ pub(crate) fn show(mut session: Session, title: String) {
             s.received.key_requests,
         );
         session.close();
+        woken.signal(); // the window notices the end
     });
 
     std::thread::Builder::new()
         .name("nudge-mirror".into())
         .spawn(move || {
-            if let Err(e) = window_loop(&title, frames_rx, &back, epoch) {
+            control::set_sender(input_tx);
+            if let Err(e) = window_loop(&title, frames_rx, &back, epoch, &wake) {
                 log::warn!("mirror window: {e}");
             }
             let _ = back.send(false);
@@ -83,59 +152,122 @@ fn window_loop(
     frames: mpsc::Receiver<Shown>,
     back: &tokio_mpsc::UnboundedSender<bool>,
     epoch: Instant,
+    wake: &Wake,
 ) -> windows::core::Result<()> {
-    let now_us = || epoch.elapsed().as_micros() as u64;
-    let mut video = video::Video::new(title)?;
-    let mut stats = Latency::default();
-    // The newest decoded picture, waiting for the display to be ready for it.
-    let mut pending: Option<(video::Picture, Option<u64>, u64, u64)> = None;
-
+    let video = video::Video::new(title)?;
+    PLAYER.set(Some(Player { video, frames, back: back.clone(), epoch, stats: Latency::default(), pending: None }));
     while video::pump() {
-        let mut batch: Vec<Shown> = frames.try_iter().collect();
-        if batch.is_empty() {
-            let wait = if pending.is_some() { 1 } else { 2 };
-            match frames.recv_timeout(Duration::from_millis(wait)) {
-                Ok(f) => batch.push(f),
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break, // the session ended
-            }
-            batch.extend(frames.try_iter());
+        control::tick();
+        match PLAYER.with_borrow_mut(|p| p.as_mut().map(Player::step)) {
+            Some(Step::Busy) => {}
+            // Until a frame, a window message (input) or the next check.
+            Some(Step::Idle { waiting }) => wake.wait(if waiting { 1 } else { 2 }),
+            Some(Step::Ended) | None => break, // the session ended
         }
+    }
+    let started = Instant::now();
+    if let Some(mut p) = PLAYER.take() {
+        p.stats.report("mirror session");
+        video::close(&p.video);
+    }
+    log::info!("mirror window: closed in {} ms", started.elapsed().as_millis());
+    Ok(())
+}
+
+thread_local! {
+    /// The window thread's player: the window loop runs it, and so does the
+    /// window procedure while Windows runs a loop of its own (`step_now`).
+    static PLAYER: RefCell<Option<Player>> = const { RefCell::new(None) };
+}
+
+/// While the window is being moved or resized Windows runs its own message
+/// loop until the mouse is let go, and the window loop stands still: the
+/// picture froze, then raced through everything that had piled up. A timer
+/// in that loop calls this to keep the picture going.
+pub(super) fn step_now() {
+    control::tick();
+    PLAYER.with(|p| {
+        // Busy: called from inside a step (a window message it caused).
+        if let Ok(mut p) = p.try_borrow_mut()
+            && let Some(p) = p.as_mut()
+        {
+            let _ = p.step();
+        }
+    });
+}
+
+enum Step {
+    /// Frames came in.
+    Busy,
+    /// Nothing came; `waiting`: a picture waits for the display.
+    Idle { waiting: bool },
+    Ended,
+}
+
+struct Player {
+    video: video::Video,
+    frames: mpsc::Receiver<Shown>,
+    back: tokio_mpsc::UnboundedSender<bool>,
+    epoch: Instant,
+    stats: Latency,
+    /// The newest decoded picture, waiting for the display to be ready for it.
+    pending: Option<(video::Picture, Option<u64>, u64, u64)>,
+}
+
+impl Player {
+    fn now_us(&self) -> u64 {
+        self.epoch.elapsed().as_micros() as u64
+    }
+
+    /// Decodes what has arrived and shows the newest picture once the display can take it.
+    fn step(&mut self) -> Step {
+        let mut batch = Vec::new();
+        loop {
+            match self.frames.try_recv() {
+                Ok(f) => batch.push(f),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => return Step::Ended,
+            }
+        }
+        let busy = !batch.is_empty();
         // Every frame is decoded (later ones refer to it); only the newest
         // picture is shown.
         for f in batch {
-            match video.decode(&f.data, false, f.captured.unwrap_or(0)) {
+            match self.video.decode(&f.data, false, f.captured.unwrap_or(0)) {
                 Ok(Some(picture)) => {
-                    stats.skipped += pending.is_some() as u64;
-                    pending = Some((picture, f.captured, now_us(), f.arrived));
+                    self.stats.skipped += self.pending.is_some() as u64;
+                    self.pending = Some((picture, f.captured, self.now_us(), f.arrived));
                 }
                 Ok(None) => {}
                 Err(e) => {
                     log::warn!("mirror decode: {e}");
-                    let _ = back.send(true);
+                    let _ = self.back.send(true);
                 }
             }
         }
         // Draw when the display can take a frame right away; if it stops
         // signalling (window covered, starting up), draw anyway after about
-        // a refresh, or the picture looks frozen.
-        let overdue = pending.as_ref().is_some_and(|p| now_us().saturating_sub(p.2) > 20_000);
-        if pending.is_some() && (video.ready_to_present() || overdue) {
-            let (picture, captured, _, arrived) = pending.take().unwrap();
-            if let Err(e) = video.present(&picture) {
-                log::warn!("mirror display: {e}");
-            }
-            let shown = now_us();
-            stats.shown(shown);
-            if let Some(c) = captured {
-                stats.add(shown.saturating_sub(c), arrived.saturating_sub(c), shown.saturating_sub(arrived));
+        // a refresh, or the picture looks frozen; but never wait for it
+        // (minimizing, maximizing: everything else would wait too).
+        let overdue = self.pending.as_ref().is_some_and(|p| self.now_us().saturating_sub(p.2) > 20_000);
+        if self.pending.is_some() && (self.video.ready_to_present() || overdue) {
+            let (picture, captured, decoded, arrived) = self.pending.take().unwrap();
+            match self.video.present(&picture) {
+                Ok(true) => {
+                    let shown = self.now_us();
+                    self.stats.shown(shown);
+                    if let Some(c) = captured {
+                        self.stats.add(shown.saturating_sub(c), arrived.saturating_sub(c), shown.saturating_sub(arrived));
+                    }
+                }
+                // Minimized, or the display still busy: kept for later (a newer one replaces it).
+                Ok(false) => self.pending = Some((picture, captured, decoded, arrived)),
+                Err(e) => log::warn!("mirror display: {e}"),
             }
         }
-        stats.report_every(Duration::from_secs(10), true);
+        self.stats.report_every(Duration::from_secs(10), true);
+        if busy { Step::Busy } else { Step::Idle { waiting: self.pending.is_some() } }
     }
-    stats.report("mirror session");
-    video::close(&video);
-    Ok(())
 }
 
 /// Capture-to-screen times, logged now and then: the same measure as the

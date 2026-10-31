@@ -6,8 +6,10 @@
 //! - only paired devices;
 //! - the shared device's user always agrees: they're asked (`MirrorAsked`),
 //!   or they started it themselves;
-//! - a locked device never shares its screen, and a sharing session ends
-//!   when the device locks;
+//! - a locked device never shares its screen: it's still asked (the
+//!   question waits on the lock screen; answering needs an unlock), but a
+//!   yes while it's locked is refused, and a sharing session ends when it
+//!   locks;
 //! - the app hears when a session starts and ends (`MirrorStarted`,
 //!   `MirrorEnded`), so it can show a "being shared" indicator for as long
 //!   as one runs.
@@ -61,6 +63,19 @@ pub(super) struct Mirrors {
     starting: std::collections::HashSet<Fingerprint>,
 }
 
+impl Mirrors {
+    /// Sessions running with `peer`.
+    pub(super) fn running_with(&self, peer: &Fingerprint) -> Vec<u64> {
+        self.running.iter().filter(|(_, r)| r.peer == *peer).map(|(&id, _)| id).collect()
+    }
+
+    pub(super) fn close(&self, id: u64) {
+        if let Some(r) = self.running.get(&id) {
+            r.handle.close();
+        }
+    }
+}
+
 struct Running {
     peer: Fingerprint,
     role: MirrorRole,
@@ -98,11 +113,10 @@ impl Node {
         role: MirrorRole,
         config: Config,
     ) -> Result<(u64, Session)> {
-        // Over Wi-Fi, onto the direct link first (the PC changing networks
-        // mid-stream would freeze the picture for seconds).
-        if role == MirrorRole::Viewing {
-            shared.link_up_for_mirror(peer).await;
-        }
+        // No network change for mirroring: the PC stays on its own Wi-Fi
+        // (moving it onto the phone's Wi-Fi Direct group took it off the
+        // internet, and a refused request left it there for nothing). The
+        // session takes the best path there is: a cable, else the router.
         let mut stream = connect_any(&shared.tls, &shared.addrs_of(&peer), peer).await?;
         match role {
             MirrorRole::Viewing => Mirror::ShowMe,
@@ -195,14 +209,12 @@ impl Node {
         if !locked {
             return;
         }
-        let mut mirrors = self.shared.mirrors();
+        let mirrors = self.shared.mirrors();
         for r in mirrors.running.values().filter(|r| r.role == MirrorRole::Sharing) {
             r.handle.close();
         }
-        // Questions about sharing can't be answered yes any more.
-        for (_, (_, answer)) in mirrors.asks.drain() {
-            let _ = answer.send(false);
-        }
+        // Open questions stay: answering one needs an unlock first, and a
+        // yes that comes while still locked is refused (`ask_to_share`).
     }
 }
 
@@ -249,10 +261,9 @@ impl Shared {
 
     /// Asks this device's user whether `peer` may see the screen. `None`:
     /// yes; otherwise the reply saying why not.
+    /// Locked (or the screen off: the phone is on the desk) is fine for
+    /// asking: the user picks it up, unlocks, and answers.
     async fn ask_to_share(self: &Arc<Self>, peer: Fingerprint) -> Option<MirrorReply> {
-        if self.screen_locked.load(Ordering::Relaxed) {
-            return Some(MirrorReply::Locked);
-        }
         let (tx, rx) = oneshot::channel();
         let id = {
             let mut mirrors = self.mirrors();
@@ -297,7 +308,6 @@ impl Shared {
             },
         );
         self.emit(NodeEvent::MirrorStarted { id, peer, role });
-        self.link_for_mirror(peer);
         let shared = self.clone();
         tokio::spawn(async move {
             if waits {

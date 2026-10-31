@@ -212,6 +212,9 @@ class NudgeController extends ChangeNotifier {
           : File('$dataDir${Platform.pathSeparator}send_target.json') {
     _subscription = app.events().listen(_onEvent);
     devices = app.devices();
+    for (final m in app.mirrorSessions()) {
+      _mirrors[m.id] = m.deviceId;
+    }
     webShareUrl = app.webShareUrl();
     _loadOrder();
     _loadTarget();
@@ -389,7 +392,7 @@ class NudgeController extends ChangeNotifier {
 
   DeviceInfo? _pairedById(String? id) {
     for (final d in devices) {
-      if (d.id == id && d.paired) return d;
+      if (d.id == id && d.paired && d.connected) return d;
     }
     return null;
   }
@@ -431,7 +434,14 @@ class NudgeController extends ChangeNotifier {
 
   String get deviceName => app.deviceName();
 
-  List<DeviceInfo> get pairedDevices => ordered(devices.where((d) => d.paired).toList());
+  /// Paired and connected: the ones on the home screen.
+  List<DeviceInfo> get pairedDevices =>
+      ordered(devices.where((d) => d.paired && d.connected).toList());
+
+  /// Paired, but disconnected for now: listed on the pairing screen to
+  /// reconnect.
+  List<DeviceInfo> get disconnectedDevices =>
+      devices.where((d) => d.paired && !d.connected).toList();
 
   List<DeviceInfo> get nearbyDevices => devices.where((d) => !d.paired && !d.isBrowser).toList();
 
@@ -512,8 +522,18 @@ class NudgeController extends ChangeNotifier {
     _toSend.hasListener ? _toSend.add(request) : _unclaimed.add(request);
   }
 
+  /// Forget a paired device: pairing again needs a code.
   void unpair(DeviceInfo device) {
     app.unpair(deviceId: device.id);
+  }
+
+  /// Hide and ignore a paired device for now; it stays paired.
+  void disconnect(DeviceInfo device) {
+    app.setConnected(deviceId: device.id, connected: false);
+  }
+
+  void reconnect(DeviceInfo device) {
+    app.setConnected(deviceId: device.id, connected: true);
   }
 
   /// Take one finished transfer off the list.
@@ -656,9 +676,16 @@ class NudgeController extends ChangeNotifier {
       // Screen mirroring: on Android the background service asks and shows
       // "being shared" (a notification, even with the window open); the
       // Windows core declines requests to share this computer's screen.
+      // Here only which device a session is with: its menu says "Stop
+      // sharing" meanwhile.
       case AppEvent_MirrorAsked():
-      case AppEvent_MirrorStarted():
-      case AppEvent_MirrorEnded():
+        return;
+      case AppEvent_MirrorStarted(:final id, :final deviceId):
+        _mirrors[id] = deviceId;
+        notifyListeners();
+        return;
+      case AppEvent_MirrorEnded(:final id):
+        if (_mirrors.remove(id) != null) notifyListeners();
         return;
       case AppEvent_TransferAccepted(:final id):
         final t = _transfer(id);
@@ -728,6 +755,19 @@ class NudgeController extends ChangeNotifier {
     }
   }
 
+  /// Screen-mirroring sessions running, by ID: the device each is with.
+  final Map<int, String> _mirrors = {};
+
+  /// A screen is being shared with [d] (either way).
+  bool isMirroring(DeviceInfo d) => _mirrors.containsValue(d.id);
+
+  /// End screen sharing with [d], from either end.
+  void stopMirroring(DeviceInfo d) {
+    for (final e in _mirrors.entries.where((e) => e.value == d.id).toList()) {
+      app.stopMirror(id: e.key);
+    }
+  }
+
   /// Windows: see [d]'s screen in a window of its own. Its user is asked
   /// first. Returns null once it's showing, or why not.
   Future<String?> mirror(DeviceInfo d) async {
@@ -735,7 +775,10 @@ class NudgeController extends ChangeNotifier {
       await app.mirrorDevice(deviceId: d.id);
       return null;
     } catch (e) {
-      return '$e'.replaceFirst(RegExp(r'^[^:]*Exception: ?'), '');
+      // "AnyhowException(the other device is locked: ...)" -> the message.
+      final text = '$e';
+      final inner = RegExp(r'^\w*Exception\((.*)\)$', dotAll: true).firstMatch(text)?.group(1);
+      return (inner ?? text.replaceFirst(RegExp(r'^[^:]*Exception: ?'), '')).split('\n').first;
     }
   }
 

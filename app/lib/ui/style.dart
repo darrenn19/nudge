@@ -1143,7 +1143,11 @@ class MenuItem {
     this.destructive = false,
     this.toggle,
     this.onToggle,
+    this.beside,
   });
+
+  /// A second action sharing the row: the row splits into two halves.
+  final MenuItem? beside;
 
   final String label;
   final IconData icon;
@@ -1234,6 +1238,19 @@ class _MenuSheetState extends State<_MenuSheet> {
   }
 
   Widget _row(int i, MenuItem item) {
+    final beside = item.beside;
+    if (beside != null) {
+      return IntrinsicHeight(
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(child: _half(item)),
+            const VerticalDivider(width: 1, thickness: 1, color: Palette.glassBorder),
+            Expanded(child: _half(beside)),
+          ],
+        ),
+      );
+    }
     final color = item.destructive ? Palette.bad : Palette.text;
     final value = _values[i];
     void tap() {
@@ -1265,6 +1282,30 @@ class _MenuSheetState extends State<_MenuSheet> {
                   onChanged: (_) {},
                 ),
               ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Half of a split row: icon over label, centred.
+extension on _MenuSheetState {
+  Widget _half(MenuItem item) {
+    final color = item.destructive ? Palette.bad : Palette.text;
+    return Pressable(
+      onTap: () {
+        Navigator.of(context).pop();
+        item.onTap?.call();
+      },
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(item.icon, color: color, size: 20),
+            const SizedBox(height: 6),
+            Text(item.label, textAlign: TextAlign.center, style: TextStyle(color: color, fontSize: 15)),
           ],
         ),
       ),

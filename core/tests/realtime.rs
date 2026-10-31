@@ -201,3 +201,102 @@ async fn a_broken_setup_connection_doesnt_end_the_session() {
     drop(phone);
     collect(&mut laptop, 5, |e| *e == Event::Closed).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn input_messages_arrive_in_order_on_their_own_stream_despite_loss() {
+    use nudge_core::input::{self, Input, TouchAction};
+    let lossy = Config {
+        drop_percent: 10.0,
+        ..Config::default()
+    };
+    // The laptop controls; the phone (sharing) loses a tenth of what comes in.
+    let (mut laptop, phone) = sessions(Config::default(), lossy).await;
+    let mut inputs = phone.subscribe(input::STREAM);
+    collect(&mut laptop, 5, |e| matches!(e, Event::PathChanged(Some(_)))).await;
+
+    // A drag: down, 60 moves ~8 ms apart, up.
+    let mut sent = vec![Input::Touch { action: TouchAction::Down, pointer: 0, x: 100, y: 100 }];
+    sent.extend((1..=60).map(|i| Input::Touch { action: TouchAction::Move, pointer: 0, x: 100 + i * 50, y: 100 }));
+    sent.push(Input::Touch { action: TouchAction::Up, pointer: 0, x: 3100, y: 100 });
+    sent.push(Input::Text("hi".into()));
+    for m in &sent {
+        laptop.send_message(input::STREAM, m.encode()).unwrap();
+        tokio::time::sleep(Duration::from_millis(8)).await;
+    }
+
+    let mut got = Vec::new();
+    let r = tokio::time::timeout(Duration::from_secs(5), async {
+        while got.len() < sent.len() {
+            let f = inputs.recv().await.expect("session ended");
+            got.push(Input::parse(&f.data).expect("valid input"));
+        }
+    })
+    .await;
+    assert!(r.is_ok(), "got {} of {}: {:?}", got.len(), sent.len(), phone.stats().received);
+    assert_eq!(got, sent, "every message, in order");
+    assert!(phone.stats().dropped_on_purpose > 0, "loss was simulated");
+}
+
+/// Input delay, send to arrival, at several loss rates (`cargo test --test
+/// realtime input_latency -- --ignored --nocapture`). On one machine, so
+/// it's the channel's own delay: loss recovery and waiting, not the network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn input_latency() {
+    use nudge_core::input::{self, Input, TouchAction};
+    // As in the app during a session (app/rust/src/timer.rs): 1 ms timers on Windows.
+    #[cfg(windows)]
+    #[allow(unsafe_code)]
+    {
+        #[link(name = "winmm")]
+        unsafe extern "system" {
+            fn timeBeginPeriod(period: u32) -> u32;
+        }
+        // SAFETY: no pointers; ends with the test process.
+        unsafe { timeBeginPeriod(1) };
+    }
+    let losses: Vec<f64> = std::env::var("LOSS").ok().map(|l| vec![l.parse().unwrap()]).unwrap_or(vec![0.0, 2.0, 5.0, 10.0]);
+    for loss in losses {
+        let lossy = Config { drop_percent: loss, ..Config::default() };
+        let (mut laptop, phone) = sessions(Config::default(), lossy).await;
+        let mut inputs = phone.subscribe(input::STREAM);
+        collect(&mut laptop, 5, |e| matches!(e, Event::PathChanged(Some(_)))).await;
+        // Let the clocks be compared.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+
+        // Clicks: a down and an up 60 ms apart, every 150 ms, so a lost
+        // message is often the last one for a while (as a lost "up" is).
+        const CLICKS: usize = 150;
+        let sender = tokio::spawn(async move {
+            for i in 0..CLICKS {
+                for action in [TouchAction::Down, TouchAction::Up] {
+                    let m = Input::Touch { action, pointer: 0, x: i as u16, y: 0 };
+                    laptop.send_message(input::STREAM, m.encode()).unwrap();
+                    tokio::time::sleep(Duration::from_millis(if action == TouchAction::Down { 60 } else { 90 })).await;
+                }
+            }
+            laptop
+        });
+        let mut delays = Vec::new();
+        while delays.len() < CLICKS * 2 {
+            let Ok(Some(f)) = tokio::time::timeout(Duration::from_secs(3), inputs.recv()).await else { break };
+            let sent = phone.to_local_us(f.capture_us).unwrap();
+            delays.push(phone.now_us().saturating_sub(sent));
+        }
+        let _laptop = sender.await.unwrap();
+        delays.sort_unstable();
+        let buckets = [2_000u64, 4_000, 9_000, 14_000, u64::MAX];
+        let counts: Vec<usize> = buckets.iter().scan(0u64, |lo, &hi| { let n = delays.iter().filter(|&&d| d >= *lo && d < hi).count(); *lo = hi; Some(n) }).collect();
+        println!("  under 2 / 4 / 9 / 14 / more ms: {counts:?}");
+        let p = |q: f64| delays[((delays.len() - 1) as f64 * q).round() as usize] as f64 / 1000.0;
+        println!(
+            "loss {loss:>4}%: {} of {} arrived; delay p50 {:.2} ms, p95 {:.2}, p99 {:.2}, max {:.2}",
+            delays.len(),
+            CLICKS * 2,
+            p(0.5),
+            p(0.95),
+            p(0.99),
+            p(1.0)
+        );
+    }
+}

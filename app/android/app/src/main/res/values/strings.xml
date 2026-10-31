@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Shown in Accessibility settings: the prominent disclosure. -->
+    <string name="control_description">Lets a paired computer control this phone while you share your screen with it in Nudge: taps, swipes, scrolling, typing and the Back and Home buttons. It only works during screen sharing that you\'ve allowed on this phone, and stops when sharing ends or the phone locks. Nudge doesn\'t read or keep anything on your screen: it only finds the text field you\'re typing in.</string>
+</resources>

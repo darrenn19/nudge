@@ -20,9 +20,13 @@ enum _Mode { show, scan, paste }
 /// Opens showing this device's code; the other side can scan it, or this
 /// side can switch to scanning theirs.
 class PairScreen extends StatefulWidget {
-  const PairScreen({super.key, required this.controller});
+  const PairScreen({super.key, required this.controller, required this.pairNearby});
 
   final NudgeController controller;
+
+  /// Pairs with an unpaired device nearby (its user confirms); the paired
+  /// device, or null.
+  final Future<DeviceInfo?> Function(BuildContext context, DeviceInfo device) pairNearby;
 
   @override
   State<PairScreen> createState() => _PairScreenState();
@@ -146,6 +150,10 @@ class _PairScreenState extends State<PairScreen> {
                   },
                 ),
               ),
+              ListenableBuilder(
+                listenable: widget.controller,
+                builder: (context, _) => _others(context),
+              ),
               AnimatedSize(
                 duration: const Duration(milliseconds: 250),
                 child: _error == null
@@ -159,6 +167,92 @@ class _PairScreenState extends State<PairScreen> {
                         ),
                       ),
               ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+extension on _PairScreenState {
+  /// Devices nearby that aren't paired (tap to pair without a code), and
+  /// paired ones disconnected for now (tap to reconnect).
+  Widget _others(BuildContext context) {
+    final c = widget.controller;
+    final nearby = c.nearbyDevices;
+    final disconnected = c.disconnectedDevices;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (nearby.isNotEmpty) ...[
+          const SizedBox(height: 32),
+          const Text('Nearby', style: Fonts.small),
+          const SizedBox(height: 8),
+          for (final d in nearby)
+            _DeviceRow(
+              device: d,
+              action: 'Pair',
+              onTap: () async {
+                final paired = await widget.pairNearby(context, d);
+                if (paired != null) _done(paired);
+              },
+            ),
+        ],
+        if (disconnected.isNotEmpty) ...[
+          const SizedBox(height: 32),
+          const Text('Disconnected', style: Fonts.small),
+          const SizedBox(height: 8),
+          for (final d in disconnected)
+            _DeviceRow(
+              device: d,
+              action: 'Reconnect',
+              onTap: () {
+                c.reconnect(d);
+                showToast(context, '${d.name} reconnected', icon: CupertinoIcons.link);
+              },
+            ),
+        ],
+      ],
+    );
+  }
+}
+
+/// A device in the pairing screen's lists.
+class _DeviceRow extends StatelessWidget {
+  const _DeviceRow({required this.device, required this.action, required this.onTap});
+
+  final DeviceInfo device;
+  final String action;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Pressable(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: Palette.glass,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Palette.glassBorder),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                device.platform == 'android' || device.platform == 'ios'
+                    ? CupertinoIcons.device_phone_portrait
+                    : CupertinoIcons.desktopcomputer,
+                color: Palette.text,
+                size: 20,
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(device.name, style: const TextStyle(color: Palette.text, fontSize: 16)),
+              ),
+              Text(action, style: const TextStyle(color: Palette.accent, fontSize: 15)),
             ],
           ),
         ),

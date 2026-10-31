@@ -115,8 +115,11 @@ pub struct Stats {
     /// Add to the other side's clock to get this side's (µs), from the
     /// fastest ping of the last 10 s. Accurate to half that ping's round trip.
     pub clock_offset_us: Option<i64>,
-    /// Round trip of that ping.
+    /// Round trip of that ping: the best of the last 10 s.
     pub clock_rtt_us: Option<u64>,
+    /// The latest round trip on the path in use (not smoothed): with
+    /// `clock_rtt_us`, how much is queuing in the network now.
+    pub rtt_latest_us: Option<u64>,
     /// Packets that failed decryption or came from another session.
     pub rejected_packets: u64,
     /// Fragments thrown away on purpose (`Config::drop_percent`).
@@ -124,7 +127,9 @@ pub struct Stats {
 }
 
 enum Command {
-    Send(OutFrame),
+    /// A frame, with extra fragment flags.
+    Send(OutFrame, u8),
+    Subscribe(u8, mpsc::UnboundedSender<Frame>),
     NeedKeyframe(u8),
     Close,
 }
@@ -223,6 +228,7 @@ impl Session {
             next_send_us: 0,
             clock: Vec::new(),
             events: event_tx,
+            routes: HashMap::new(),
             stats: stats.clone(),
             epoch,
             drop_percent: config.drop_percent,
@@ -252,8 +258,33 @@ impl Session {
     /// Queues a frame to send. Fails once the session has ended.
     pub fn send(&self, frame: OutFrame) -> Result<()> {
         self.commands
-            .send(Command::Send(frame))
+            .send(Command::Send(frame, 0))
             .map_err(|_| Error::Protocol("real-time session closed"))
+    }
+
+    /// Queues a message on `stream` (input events, status): delivered in
+    /// order and recovered like frames, but each stands alone, so a loss
+    /// never waits for a keyframe and nothing is skipped while it can still
+    /// be recovered (about 300 ms). Messages up to ~1 KB fit one packet.
+    pub fn send_message(&self, stream: u8, data: Vec<u8>) -> Result<()> {
+        let frame = OutFrame {
+            stream,
+            data,
+            key: false,
+            intra_refresh: true,
+            capture_us: self.now_us(),
+        };
+        self.commands
+            .send(Command::Send(frame, wire::F_STANDALONE))
+            .map_err(|_| Error::Protocol("real-time session closed"))
+    }
+
+    /// From now on, frames (and messages) of `stream` go to the returned
+    /// receiver instead of `next_event`. It ends with the session.
+    pub fn subscribe(&self, stream: u8) -> mpsc::UnboundedReceiver<Frame> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = self.commands.send(Command::Subscribe(stream, tx));
+        rx
     }
 
     /// The decoder for this stream failed: skip frames until a keyframe and
@@ -427,6 +458,8 @@ struct Driver<C> {
     next_send_us: u64,
     clock: Vec<ClockSample>,
     events: mpsc::UnboundedSender<Event>,
+    /// Streams whose frames go elsewhere (`Session::subscribe`).
+    routes: HashMap<u8, mpsc::UnboundedSender<Frame>>,
     stats: Arc<Mutex<Stats>>,
     epoch: Instant,
     drop_percent: f64,
@@ -455,9 +488,12 @@ impl<C: Control> Driver<C> {
             let deadline = self.epoch + Duration::from_micros(wake);
             tokio::select! {
                 cmd = commands.recv() => match cmd {
-                    Some(Command::Send(f)) => {
+                    Some(Command::Send(f, flags)) => {
                         let now = self.now();
-                        self.senders.entry(f.stream).or_insert_with(|| FrameSender::new(f.stream)).push(&f, now);
+                        self.senders.entry(f.stream).or_insert_with(|| FrameSender::new(f.stream)).push_with(&f, flags, now);
+                    }
+                    Some(Command::Subscribe(stream, to)) => {
+                        self.routes.insert(stream, to);
                     }
                     Some(Command::NeedKeyframe(stream)) => {
                         self.receiver(stream).need_keyframe();
@@ -543,6 +579,9 @@ impl<C: Control> Driver<C> {
             Some(Message::Pong { echo, theirs }) => {
                 let rtt = now.saturating_sub(echo);
                 self.paths.on_pong(from, rtt, now);
+                if self.paths.current().is_some_and(|p| p.remote == from) {
+                    self.local.rtt_latest_us = Some(rtt);
+                }
                 self.clock.retain(|c| now.saturating_sub(c.at) < CLOCK_WINDOW_US);
                 self.clock.push(ClockSample {
                     at: now,
@@ -638,6 +677,13 @@ impl<C: Control> Driver<C> {
         for r in self.receivers.values_mut() {
             let polled = r.poll(now, rtt);
             for f in polled.frames {
+                let f = match self.routes.get(&f.stream) {
+                    Some(to) => match to.send(f) {
+                        Ok(()) => continue,
+                        Err(back) => back.0, // nobody listening any more
+                    },
+                    None => f,
+                };
                 let _ = self.events.send(Event::Frame(f));
             }
             outgoing.extend(polled.nacks);
@@ -679,6 +725,9 @@ impl<C: Control> Driver<C> {
         }
 
         let mut wake = (now + 50_000).min(self.last_addrs_us + ADDRS_EVERY_US);
+        if let Some(t) = self.senders.values().filter_map(|s| s.next_echo_at()).min() {
+            wake = wake.min(t);
+        }
         if let Some(t) = self.paths.next_ping_at() {
             wake = wake.min(t);
         }
@@ -703,6 +752,7 @@ impl<C: Control> Driver<C> {
         s.received = sum_receive(self.receivers.values().map(|x| &x.stats));
         s.clock_offset_us = best.map(|c| c.offset);
         s.clock_rtt_us = best.map(|c| c.rtt);
+        s.rtt_latest_us = self.local.rtt_latest_us;
         s.rejected_packets = self.local.rejected_packets;
         s.dropped_on_purpose = self.local.dropped_on_purpose;
     }

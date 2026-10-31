@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use super::wire::{self, F_INTRA_REFRESH, F_KEY, F_RESENT, Fragment};
+use super::wire::{self, F_INTRA_REFRESH, F_KEY, F_RESENT, F_STANDALONE, Fragment};
 
 /// Data bytes per fragment: a packet stays under ~1200 bytes, which fits
 /// every network's MTU, tunnels included.
@@ -26,6 +26,11 @@ pub const MAX_FRAGMENT: usize = 1150;
 /// a few hundred ms, and requests arriving after that must still find them.
 const HISTORY_FRAMES: usize = 64;
 const HISTORY_US: u64 = 1_000_000;
+/// Standalone messages (input) are sent again this long after the first
+/// time, unasked: a lost one is otherwise noticed only when the next message
+/// arrives, which for the last of a burst (a click's "up") can be much
+/// later. They're tiny, so copies cost nothing.
+const ECHO_US: [u64; 3] = [0, 2_000, 8_000];
 /// A frame not sent within this long is dropped instead (pacing or the
 /// network can't keep up): sending it late only adds delay.
 pub(super) const MAX_QUEUE_US: u64 = 100_000;
@@ -144,6 +149,8 @@ pub(super) struct FrameSender {
     queue: VecDeque<Queued>,
     last_dropped: Option<u32>,
     keyframe_needed: bool,
+    /// Copies of standalone messages, by when they're due (`ECHO_US`).
+    echoes: VecDeque<(u64, Vec<u8>)>,
     pub(super) stats: SendStats,
 }
 
@@ -156,15 +163,22 @@ impl FrameSender {
             queue: VecDeque::new(),
             last_dropped: None,
             keyframe_needed: false,
+            echoes: VecDeque::new(),
             stats: SendStats::default(),
         }
     }
 
     /// Queues a frame; returns its id.
+    #[cfg(test)]
     pub(super) fn push(&mut self, f: &OutFrame, now: u64) -> u32 {
+        self.push_with(f, 0, now)
+    }
+
+    /// Queues a frame with extra fragment flags (`F_STANDALONE`).
+    pub(super) fn push_with(&mut self, f: &OutFrame, extra_flags: u8, now: u64) -> u32 {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        let flags = if f.key { F_KEY } else { 0 } | if f.intra_refresh { F_INTRA_REFRESH } else { 0 };
+        let flags = extra_flags | if f.key { F_KEY } else { 0 } | if f.intra_refresh { F_INTRA_REFRESH } else { 0 };
         let chunks: Vec<&[u8]> = if f.data.is_empty() {
             vec![&[]]
         } else {
@@ -187,6 +201,15 @@ impl FrameSender {
                 })
             })
             .collect();
+        if extra_flags & F_STANDALONE != 0 {
+            for delay in ECHO_US {
+                for m in &msgs {
+                    self.echoes.push_back((now + delay, m.clone()));
+                }
+            }
+            // Kept in order of due time (pushes come in time order).
+            self.echoes.make_contiguous().sort_by_key(|e| e.0);
+        }
         for m in &msgs {
             self.queue.push_back(Queued {
                 msg: m.clone(),
@@ -242,6 +265,12 @@ impl FrameSender {
 
     /// The next message to send. Frames that waited too long are dropped.
     pub(super) fn pop(&mut self, now: u64) -> Option<Vec<u8>> {
+        if self.echoes.front().is_some_and(|e| e.0 <= now) {
+            let (_, msg) = self.echoes.pop_front()?;
+            self.stats.packets += 1;
+            self.stats.bytes += msg.len() as u64;
+            return Some(msg);
+        }
         loop {
             let q = self.queue.pop_front()?;
             if now.saturating_sub(q.at) > MAX_QUEUE_US {
@@ -264,6 +293,11 @@ impl FrameSender {
 
     pub(super) fn has_queued(&self) -> bool {
         !self.queue.is_empty()
+    }
+
+    /// When the next copy of a standalone message is due.
+    pub(super) fn next_echo_at(&self) -> Option<u64> {
+        self.echoes.front().map(|e| e.0)
     }
 
     /// True once after frames were dropped: the encoder should make a keyframe.
@@ -330,6 +364,8 @@ pub(super) struct FrameReceiver {
     /// The decoder can't continue without a keyframe.
     need_key: bool,
     intra_refresh: bool,
+    /// Frames stand alone (`F_STANDALONE`): never a keyframe to wait for.
+    standalone: bool,
     last_key_request: Option<u64>,
     /// Smoothed time from a NACK to its resend arriving: the round trip
     /// plus however long the sender takes to answer.
@@ -353,6 +389,7 @@ impl FrameReceiver {
             highest: None,
             need_key: true,
             intra_refresh: false,
+            standalone: false,
             last_key_request: None,
             resend_rtt: None,
             pause_peak: None,
@@ -411,10 +448,19 @@ impl FrameReceiver {
             self.highest = None;
             self.need_key = true;
         }
+        if f.flags & F_STANDALONE != 0 {
+            self.standalone = true;
+            self.need_key = false;
+        }
         if self.next.is_none() {
             // The first frame is usually a keyframe: give it time to arrive
             // before asking for one.
             self.last_key_request = Some(now);
+            // Standalone streams start at frame 0: anything before this one
+            // was lost, and is asked for like any other gap.
+            if self.standalone && id < RESYNC_FRAMES {
+                self.next = Some(0);
+            }
         }
         let next = *self.next.get_or_insert(id);
         // Frames not heard from at all, between the newest one and this one.
@@ -574,8 +620,9 @@ impl FrameReceiver {
             self.partials.remove(&n);
             self.next = Some(n.wrapping_add(1));
             self.stats.given_up += 1;
-            // Later frames reference the lost one, unless intra-refresh heals it.
-            if !self.intra_refresh {
+            // Later frames reference the lost one, unless intra-refresh heals
+            // it (or they stand alone).
+            if !self.intra_refresh && !self.standalone {
                 self.start_needing_key();
             }
         }
@@ -706,6 +753,30 @@ mod tests {
         }
         assert_eq!(sim.rx.stats.nacks_sent, 0);
         assert_eq!(sim.key_requests, 0, "the first frame is a keyframe");
+    }
+
+    #[test]
+    fn standalone_frames_need_no_keyframe_and_skip_nothing() {
+        let mut sim = Sim::new(2_000);
+        let msg = |i: u8| OutFrame {
+            stream: 0,
+            data: vec![i; 12],
+            key: false,
+            intra_refresh: true,
+            capture_us: 0,
+        };
+        // The very first message (packet 1) and the third (packet 3) are lost
+        // once; the rest follow at once, as input events do.
+        let mut lost = std::collections::HashSet::new();
+        let mut lose = |n: u64, _| (n == 1 || n == 3) && lost.insert(n);
+        for i in 0..6 {
+            sim.tx.push_with(&msg(i), F_STANDALONE, sim.now);
+            sim.run(1, &mut lose);
+        }
+        sim.run(40, &mut lose);
+        assert_eq!(sim.got.iter().map(|f| f.data[0]).collect::<Vec<_>>(), [0, 1, 2, 3, 4, 5]);
+        assert_eq!(sim.key_requests, 0);
+        assert_eq!(sim.rx.stats.given_up, 0);
     }
 
     #[test]

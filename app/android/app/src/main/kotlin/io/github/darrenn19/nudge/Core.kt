@@ -61,6 +61,21 @@ object Core {
     /** End a session. */
     @JvmStatic external fun mirrorClose(id: Long)
 
+    /**
+     * The PC's next input message for session [id] (core/src/input.rs format),
+     * waiting up to [timeoutMs]. Null if none came; empty once the session ended.
+     */
+    @JvmStatic external fun mirrorInput(id: Long, timeoutMs: Int): ByteArray?
+
+    /**
+     * The encoder's bitrate for the network now, kbit/s (new value), or 0 to
+     * keep it. Call every ~200 ms; [maxKbps] is the top rate.
+     */
+    @JvmStatic external fun mirrorRate(id: Long, maxKbps: Int): Int
+
+    /** Tell the PC whether it can control this phone: 1 ready, 2 needs the Accessibility switch, 0 can't. */
+    @JvmStatic external fun mirrorControlStatus(id: Long, status: Int)
+
     /** Locked or screen off: the screen is never shared meanwhile. */
     @JvmStatic external fun setScreenLocked(locked: Boolean)
 

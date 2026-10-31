@@ -215,3 +215,15 @@ What this says:
 - Some Wi-Fi runs are much worse (network p95 >100 ms): Wi-Fi power saving or a busy channel. Which settings were on for each run wasn't recorded; record them next time.
 - Draw p95 ~14 ms is waiting for the display's next refresh (one slot, newest frame wins). Only tearing (`DXGI_PRESENT_ALLOW_TEARING`) avoids it, and these numbers stop at `Present`, so they can't show whether that helps on screen.
 
+## Remote control input (2026-10-29)
+
+PC → phone input messages, send to arrival, both ends on this PC (so the channel's own delay, no network), 300 messages as clicks (down, up 60 ms later, every 150 ms). `cargo test --test realtime input_latency -- --ignored --nocapture`.
+
+| Loss | Before: p50 / p95 / p99 / max (ms) | After: sent 4 times (at once twice, +2, +8 ms) |
+|---|---|---|
+| 0% | 0.9 / 2.0 / 3.2 / 5.3 | 0.9 / 2.2 / 4.9 / 15.5 |
+| 2% | 0.9 / 3.4 / 63 / 106 | 0.9 / 2.2 / 4.8 / 15.2 |
+| 5% | 0.8 / 13 / 93 / 98 | 1.0 / 3.1 / 6.2 / 16.6 |
+| 10% | 0.9 / 96 / 157 / 174 | 0.9 / 2.3 / 14 / 16.6 |
+
+Before, a lost message waited for the next one to show the gap (a click's up: until the next click). The ~15 ms maximums are Windows' default timer (the test process has no window, so Windows 11 ignores its 1 ms request; the app's mirror window gets it).

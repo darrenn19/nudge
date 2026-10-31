@@ -8,6 +8,7 @@ pub mod bench;
 pub mod discovery;
 pub mod error;
 pub mod identity;
+pub mod input;
 pub mod link;
 pub mod logging;
 pub mod node;

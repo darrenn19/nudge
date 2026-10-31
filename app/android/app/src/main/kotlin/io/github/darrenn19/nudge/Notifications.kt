@@ -25,6 +25,8 @@ object Notifications {
     const val SERVICE_ID = 1
     /** "Instant clipboard is paused" (see [clipboardPaused]). */
     private const val CLIP_PAUSED_ID = 2
+    /** "Let <PC> control this phone?" (see [controlSetup]). */
+    const val CONTROL_SETUP_ID = 7
     private val nextId = AtomicInteger(1000)
 
     fun createChannels(context: Context) {
@@ -179,7 +181,8 @@ object Notifications {
      * connects), with Stop: [MirrorService]'s notification, for as long as
      * it runs. Can't be swiped away.
      */
-    fun sharing(context: Context, with: String?): Notification {
+    /** [controlled]: the other device can also control this phone. */
+    fun sharing(context: Context, with: String?, controlled: Boolean = false): Notification {
         val stop = PendingIntent.getBroadcast(
             context,
             SHARING_REQUEST,
@@ -188,9 +191,20 @@ object Notifications {
                 .putExtra(OfferActionReceiver.EXTRA_STOP_MIRROR, true),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+        // Control needs Nudge's Accessibility switch: one tap away from here.
+        val allowControl = if (ControlService.instance == null) {
+            PendingIntent.getActivity(
+                context,
+                CONTROL_SETUP_ID + 1,
+                ControlService.settingsIntent(context).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+            )
+        } else {
+            null
+        }
         return NotificationCompat.Builder(context, OFFERS)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Your screen is being shared")
+            .setContentTitle(if (controlled) "Your screen is being shared and controlled" else "Your screen is being shared")
             .setContentText(if (with == null) "Connecting…" else "With $with")
             .setOngoing(true)
             .setSilent(true)
@@ -202,10 +216,44 @@ object Notifications {
             .setGroup(MIRROR_GROUP)
             .setContentIntent(openApp(context))
             .addAction(0, "Stop", stop)
+            .apply { if (allowControl != null) addAction(0, "Allow control", allowControl) }
             .build()
     }
 
     private const val MIRROR_GROUP = "io.github.darrenn19.nudge.MIRROR"
+
+    /**
+     * The PC tried to control this phone while Nudge's Accessibility switch
+     * is off. Tapping leads there. Android 13+ greys the switch out for
+     * apps installed from a downloaded APK until "Allow restricted settings"
+     * is chosen in Nudge's App info (⋮ menu).
+     */
+    fun controlSetup(context: Context, with: String?): Notification {
+        val open = PendingIntent.getActivity(
+            context,
+            CONTROL_SETUP_ID,
+            ControlService.settingsIntent(context).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val who = with ?: "Your computer"
+        return NotificationCompat.Builder(context, OFFERS)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Let $who control this phone?")
+            .setContentText("Turn on Nudge in Accessibility settings")
+            .setStyle(
+                NotificationCompat.BigTextStyle().bigText(
+                    "$who is trying to tap and type on this phone. To allow it, turn on Nudge in " +
+                        "Accessibility settings. Nudge only uses it while you share your screen.",
+                ),
+            )
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_RECOMMENDATION)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setGroup(MIRROR_GROUP)
+            .setContentIntent(open)
+            .addAction(0, "Open settings", open)
+            .build()
+    }
 
     private const val SHARING_REQUEST = 3000
 

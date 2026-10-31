@@ -150,6 +150,9 @@ pub struct Peer {
     pub clipboard: bool,
     /// Whether files to it can go over a cable.
     pub cable: Cable,
+    /// Paired, but disconnected here for now (`Node::set_connected`): it's
+    /// hidden and ignored until reconnected. True for unpaired devices.
+    pub connected: bool,
 }
 
 /// A cable between this device and another (any kind that carries data:
@@ -542,6 +545,9 @@ struct Shared {
     receiving: Mutex<Receiving>,
     /// Paired devices the clipboard doesn't sync with.
     clip_off: Mutex<HashSet<Fingerprint>>,
+    /// Paired devices disconnected for now: still paired, but nothing goes
+    /// to or comes from them until reconnected.
+    disconnected: Mutex<HashSet<Fingerprint>>,
     /// Measured speeds per device and path.
     speeds: Speeds,
     /// May set up a direct link (the phone's hotspot) for big transfers.
@@ -943,6 +949,7 @@ impl Node {
         let speeds = Speeds::load(&config.data_dir);
         let direct_link = !config.data_dir.join(DIRECT_LINK_OFF_FILE).exists();
         let clip_off = load_fingerprints(&config.data_dir, CLIP_OFF_FILE);
+        let disconnected = load_fingerprints(&config.data_dir, DISCONNECTED_FILE);
         let device_name = clean_name(&config.device_name);
         let (events, events_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {
@@ -964,6 +971,7 @@ impl Node {
             auto_accept: Mutex::new(auto_accept),
             receiving: Mutex::default(),
             clip_off: Mutex::new(clip_off),
+            disconnected: Mutex::new(disconnected),
             speeds,
             direct_link: std::sync::atomic::AtomicBool::new(direct_link),
             cable_unused: std::sync::atomic::AtomicBool::new(false),
@@ -1091,6 +1099,7 @@ impl Node {
                     accepts_from_us: state.remote_auto.get(&fp).copied(),
                     clipboard: self.shared.syncs_clipboard(&fp),
                     cable: cable(&fp, seen.map_or("", |n| n.platform.as_str())),
+                    connected: self.shared.is_connected(&fp),
                 }
             })
             .collect();
@@ -1110,6 +1119,7 @@ impl Node {
                     accepts_from_us: None,
                     clipboard: false,
                     cable: Cable::None,
+                    connected: true,
                 }),
         );
         if let Some(web) = &state.web {
@@ -1128,6 +1138,7 @@ impl Node {
                 } else {
                     Cable::None
                 },
+                connected: true,
             }));
         }
         peers.sort_by(|a, b| {
@@ -1228,6 +1239,28 @@ impl Node {
         if self.shared.trusted.remove(peer) {
             self.shared.trusted.save(&self.shared.data_dir)?;
             self.shared.set_auto_accept(peer, false)?;
+            self.shared.set_disconnected(peer, false)?;
+            self.shared.end_mirrors_with(peer);
+            self.shared.emit(NodeEvent::PeersChanged);
+        }
+        Ok(())
+    }
+
+    /// Disconnect a paired device for now (`false`), or reconnect it. While
+    /// disconnected it stays paired (no new QR pairing to come back) but is
+    /// treated like a stranger: its files, clipboard and screen requests are
+    /// refused, nothing is sent to it, and the app hides it.
+    pub fn set_connected(&self, peer: &Fingerprint, connected: bool) -> Result<()> {
+        if !self.shared.trusted.contains(peer) {
+            return Ok(());
+        }
+        if self.shared.set_disconnected(peer, !connected)? {
+            if !connected {
+                self.shared.end_mirrors_with(peer);
+            } else {
+                // Catch up on its settings, as when it first shows up.
+                self.shared.exchange_status(*peer);
+            }
             self.shared.emit(NodeEvent::PeersChanged);
         }
         Ok(())
@@ -1722,11 +1755,50 @@ impl Shared {
     }
 
     fn syncs_clipboard(&self, peer: &Fingerprint) -> bool {
+        self.is_connected(peer)
+            && !self
+                .clip_off
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .contains(peer)
+    }
+
+    /// Not disconnected (see `Node::set_connected`).
+    fn is_connected(&self, peer: &Fingerprint) -> bool {
         !self
-            .clip_off
+            .disconnected
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains(peer)
+    }
+
+    /// Returns whether it changed.
+    fn set_disconnected(&self, peer: &Fingerprint, on: bool) -> Result<bool> {
+        let list = {
+            let mut set = self.disconnected.lock().unwrap_or_else(|e| e.into_inner());
+            let changed = if on { set.insert(*peer) } else { set.remove(peer) };
+            if !changed {
+                return Ok(false);
+            }
+            set.iter().map(ToString::to_string).collect::<Vec<_>>()
+        };
+        save_fingerprints(
+            &self.data_dir,
+            DISCONNECTED_FILE,
+            "# Paired devices disconnected for now (hidden and ignored until reconnected).",
+            list,
+        )?;
+        Ok(true)
+    }
+
+    /// Ends screen mirroring with `peer` (it was unpaired or disconnected).
+    fn end_mirrors_with(&self, peer: &Fingerprint) {
+        let ids: Vec<u64> = self
+            .mirrors()
+            .running_with(peer);
+        for id in ids {
+            self.mirrors().close(id);
+        }
     }
 
     /// Start deciding whether to take files: at once for auto-accepted
@@ -1937,6 +2009,8 @@ impl Shared {
         }
         self.trusted.add_named(fp, name);
         self.trusted.save(&self.data_dir)?;
+        // Paired again: connected again.
+        self.set_disconnected(&fp, false)?;
         self.save_last_seen();
         self.state().remote_auto.remove(&fp);
         self.emit(NodeEvent::Paired {
@@ -1966,6 +2040,7 @@ impl Shared {
             clipboard: self.trusted.contains(&fp) && self.syncs_clipboard(&fp),
             // Only `Node::peers` works it out; this is for events.
             cable: Cable::None,
+            connected: self.is_connected(&fp),
         }
     }
 
@@ -2072,7 +2147,8 @@ impl Shared {
     where
         S: crate::realtime::Control,
     {
-        let trusted = self.tls.is_trusted(&peer);
+        // A disconnected device is treated like a stranger: refused.
+        let trusted = self.tls.is_trusted(&peer) && self.is_connected(&peer);
         if trusted {
             // An address that just worked: good for sending back, even on a
             // network discovery hasn't seen (a hotspot just joined).
@@ -2784,7 +2860,10 @@ impl Shared {
     fn exchange_status(self: &Arc<Self>, peer: Fingerprint) {
         // Called from outside the runtime, it can't run; the next time the
         // device shows up, the settings are swapped anyway.
-        if !self.trusted.contains(&peer) || tokio::runtime::Handle::try_current().is_err() {
+        if !self.trusted.contains(&peer)
+            || !self.is_connected(&peer)
+            || tokio::runtime::Handle::try_current().is_err()
+        {
             return;
         }
         let shared = self.clone();
@@ -3003,6 +3082,7 @@ fn progress_update(id: u64, active: &mut Active, now: Instant) -> Option<NodeEve
 
 const AUTO_ACCEPT_FILE: &str = "auto_accept.txt";
 const CLIP_OFF_FILE: &str = "clipboard_off.txt";
+const DISCONNECTED_FILE: &str = "disconnected.txt";
 
 /// Where copied images from other devices are kept (see `save_clip_image`).
 const CLIP_DIR: &str = "clipboard";
@@ -3306,6 +3386,42 @@ mod tests {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    /// A disconnected device stays paired but is refused; reconnecting
+    /// lets it send again, with no new pairing. Unpairing clears it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn disconnected_devices_are_refused_until_reconnected() {
+        let ((laptop, mut laptop_events, laptop_dir), (phone, _phone_events, _phone_dir)) =
+            paired_pair().await;
+        let lfp = laptop.fingerprint();
+        phone.set_connected(&lfp, false).unwrap();
+        let seen = phone.peers().into_iter().find(|p| p.fingerprint == lfp).unwrap();
+        assert!(seen.paired && !seen.connected && !seen.clipboard);
+
+        let src = laptop_dir.path().join("note.txt");
+        std::fs::write(&src, b"hi").unwrap();
+        let ids = laptop.send_files(phone.fingerprint(), vec![src.clone()]);
+        next(
+            &mut laptop_events,
+            |e| matches!(e, NodeEvent::TransferFailed { id, .. } if *id == ids[0]),
+        )
+        .await;
+
+        phone.set_connected(&lfp, true).unwrap();
+        assert!(phone.peers().iter().any(|p| p.fingerprint == lfp && p.connected));
+        let ids = laptop.send_files(phone.fingerprint(), vec![src]);
+        next(
+            &mut laptop_events,
+            |e| matches!(e, NodeEvent::TransferDelivered { id } if *id == ids[0]),
+        )
+        .await;
+
+        // Unpairing a disconnected device forgets that too.
+        phone.set_connected(&lfp, false).unwrap();
+        phone.unpair(&lfp).unwrap();
+        assert!(!phone.peers().iter().any(|p| p.fingerprint == lfp && p.paired));
+        assert!(phone.shared.is_connected(&lfp));
     }
 
     /// Files go before the answer; accepting makes them appear at once.
@@ -4114,9 +4230,35 @@ mod tests {
         phone.answer_mirror(id, false);
         assert!(matches!(asking.await.unwrap(), Err(Error::Declined)));
 
-        // Locked: refused without a question.
+        // Locked (the phone on the desk): still asked, so its user can
+        // unlock and answer; a yes while still locked is refused.
         phone.set_screen_locked(true);
-        assert!(matches!(ask(laptop.clone()).await.unwrap(), Err(Error::PeerLocked)));
+        let asking = ask(laptop.clone());
+        let NodeEvent::MirrorAsked { id, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::MirrorAsked { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        phone.answer_mirror(id, true);
+        assert!(matches!(asking.await.unwrap(), Err(Error::PeerLocked)));
+        // Unlocked, then yes: it starts.
+        let asking = ask(laptop.clone());
+        let NodeEvent::MirrorAsked { id, .. } = next(&mut phone_events, |e| {
+            matches!(e, NodeEvent::MirrorAsked { .. })
+        })
+        .await
+        else {
+            unreachable!()
+        };
+        phone.set_screen_locked(false);
+        phone.answer_mirror(id, true);
+        let (started, _viewer) = asking.await.unwrap().unwrap();
+        laptop.stop_mirror(started);
+        next(&mut phone_events, |e| matches!(e, NodeEvent::MirrorEnded { .. })).await;
+        until(|| laptop.mirrors().is_empty() && phone.mirrors().is_empty()).await;
+        phone.set_screen_locked(true);
         assert!(matches!(
             phone.start_mirror(laptop_fp, MirrorRole::Sharing, Config::default()).await,
             Err(Error::ScreenLocked)

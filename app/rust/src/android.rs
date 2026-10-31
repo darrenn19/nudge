@@ -165,7 +165,8 @@ fn device_json(d: &DeviceInfo) -> Value {
            "reachable": d.reachable, "clipboard": d.clipboard})
 }
 
-/// Every known device, as a JSON array.
+/// Every known device, as a JSON array. Disconnected ones are left out:
+/// nothing in the background (share targets, clipboard, mirroring) uses them.
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_darrenn19_nudge_Core_devices<'l>(
     mut env: JNIEnv<'l>,
@@ -181,6 +182,7 @@ pub extern "system" fn Java_io_github_darrenn19_nudge_Core_devices<'l>(
         })
         .unwrap_or_default()
         .iter()
+        .filter(|d| d.connected)
         .map(device_json)
         .collect();
     new_string(&mut env, &Value::Array(devices).to_string())

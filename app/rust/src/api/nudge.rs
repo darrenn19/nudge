@@ -68,6 +68,9 @@ pub struct DeviceInfo {
     /// "tethering" (plugged in, but the phone's USB tethering is off), or
     /// empty.
     pub cable: String,
+    /// Paired but disconnected for now: hidden and ignored until
+    /// reconnected (`NudgeApp::set_connected`). True for unpaired devices.
+    pub connected: bool,
 }
 
 impl From<Peer> for DeviceInfo {
@@ -89,8 +92,18 @@ impl From<Peer> for DeviceInfo {
                 Cable::None => "",
             }
             .into(),
+            connected: p.connected,
         }
     }
+}
+
+/// A screen-mirroring session running.
+#[derive(Debug, Clone)]
+pub struct MirrorSession {
+    pub id: i64,
+    pub device_id: String,
+    /// This device's screen is the one shown.
+    pub sharing: bool,
 }
 
 /// Something the app should react to. See `nudge_core::NodeEvent`.
@@ -556,6 +569,14 @@ impl NudgeApp {
         Ok(self.node.unpair(&parse_id(&device_id)?)?)
     }
 
+    /// Disconnect a paired device for now (false), or reconnect it (true).
+    /// It stays paired: reconnecting needs no QR code.
+    #[frb(sync)]
+    pub fn set_connected(&self, device_id: String, connected: bool) -> Result<()> {
+        let _guard = runtime().enter();
+        Ok(self.node.set_connected(&parse_id(&device_id)?, connected)?)
+    }
+
     /// Answer `AppEvent::OfferReceived`. With `always`, that device's files
     /// are accepted without asking from now on.
     #[frb(sync)]
@@ -704,7 +725,8 @@ impl NudgeApp {
                     .await
             })
             .await
-            .context("Nudge runtime stopped")??;
+            .context("Nudge runtime stopped")?
+            .inspect_err(|e| log::warn!("mirroring {device_id}: {e}"))?;
         #[cfg(windows)]
         crate::mirror::show(session, mirror_title(&self.node, &peer));
         #[cfg(not(windows))]
@@ -722,6 +744,21 @@ impl NudgeApp {
     #[frb(sync)]
     pub fn stop_mirror(&self, id: i64) {
         self.node.stop_mirror(id as u64);
+    }
+
+    /// Screen-mirroring sessions running now, as (session ID, device ID):
+    /// for a window that opens after one started.
+    #[frb(sync)]
+    pub fn mirror_sessions(&self) -> Vec<MirrorSession> {
+        self.node
+            .mirrors()
+            .into_iter()
+            .map(|m| MirrorSession {
+                id: m.id as i64,
+                device_id: m.peer.to_string(),
+                sharing: m.role == MirrorRole::Sharing,
+            })
+            .collect()
     }
 
     /// Whether this device is locked: a locked device's screen is never

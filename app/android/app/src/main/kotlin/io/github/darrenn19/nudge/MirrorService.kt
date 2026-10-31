@@ -33,7 +33,12 @@ import kotlin.concurrent.thread
  * recovery, pacing). Encoder settings are the ones measured best in
  * `spikes/mirror-latency` (docs/BENCHMARKS.md): Qualcomm's low-latency mode at
  * the highest clock (~11 ms to encode), intra-refresh instead of periodic
- * keyframes (no big bursts), constant 30 Mbit/s.
+ * keyframes (no big bursts), 30 Mbit/s constant (lower when the network
+ * can't carry it), with a quality floor for whole-screen changes ([QP_MAX]).
+ * In the PC's game mode the picture is smaller ([GAME_MAX_SIDE]).
+ *
+ * The PC can also control the phone during the session ([RemoteControl],
+ * carried out by [ControlService] once the user turns it on).
  *
  * Its notification is the "your screen is being shared" indicator, with
  * Stop. The session ends when either side stops, the phone locks (the core
@@ -51,6 +56,24 @@ class MirrorService : Service() {
         private const val MBPS = 30
         private const val MAX_SIDE = 2304
         private const val FPS = 60
+
+        /**
+         * Game mode on the PC: a smaller picture (about half the pixels), so
+         * each frame takes about half as long to encode and to send, and the
+         * same bitrate buys a cleaner picture per pixel.
+         */
+        private const val GAME_MAX_SIDE = 1600
+
+        /**
+         * The coarsest quantizer any frame may use (H.264: 0 finest, 51
+         * coarsest). At a constant bitrate with intra-refresh, a frame that
+         * changes the whole screen (next video, next home page) got only an
+         * ordinary frame's bytes: it came out as coarse blocks that sharpened
+         * over the next half second, as if loading in. With this limit such a
+         * frame is sent sharp, as a bigger frame instead (a few ms more to
+         * send, once). Ordinary frames stay well under it.
+         */
+        private const val QP_MAX = 38
 
         /** Intra-refresh: frames for one full sweep of the picture (0.5 s). */
         private const val REFRESH_FRAMES = 30
@@ -102,6 +125,13 @@ class MirrorService : Service() {
     @Volatile
     private var session = -1L
 
+    /** The PC's input for this session. */
+    private var control: RemoteControl? = null
+
+    /** The PC is in game mode: a smaller picture ([GAME_MAX_SIDE]). */
+    @Volatile
+    private var game = false
+
     /** Asked for a session (by answering yes): claim the next one that starts. */
     @Volatile
     private var awaiting = false
@@ -141,6 +171,9 @@ class MirrorService : Service() {
         holdWifi()
         // Nothing came of it (the question lapsed, the other side gave up).
         main.postDelayed({ if (session < 0) finish() }, 30_000)
+        // The user is here (they just answered Android's capture prompt): make
+        // sure the core isn't still going by a stale "locked".
+        LockState.refresh(this)
         if (ask >= 0) {
             // The core starts the session and says so ("mirrorStarted"): see onStarted.
             awaiting = true
@@ -170,7 +203,16 @@ class MirrorService : Service() {
         Log.i(TAG, "mirroring: session $id with $device")
         // A fresh keyframe, for the decoder on the other side.
         requestKeyframe()
-        main.post { Notifications.notify(this, NOTIFICATION_ID, Notifications.sharing(this, deviceName(device))) }
+        val name = deviceName(device)
+        main.post {
+            if (stopping) return@post
+            Notifications.notify(this, NOTIFICATION_ID, Notifications.sharing(this, name))
+            control = RemoteControl(this, id, name, onControl = { controlled ->
+                main.post {
+                    if (!stopping) Notifications.notify(this, NOTIFICATION_ID, Notifications.sharing(this, name, controlled))
+                }
+            }, onGame = ::setGame).also { it.start() }
+        }
     }
 
     private fun deviceName(device: String): String? = runCatching {
@@ -187,8 +229,30 @@ class MirrorService : Service() {
         if (d.rotation == Surface.ROTATION_90 || d.rotation == Surface.ROTATION_270) {
             sw = sh.also { sh = sw }
         }
-        val scale = minOf(1.0, MAX_SIDE.toDouble() / maxOf(sw, sh))
+        val scale = minOf(1.0, (if (game) GAME_MAX_SIDE else MAX_SIDE).toDouble() / maxOf(sw, sh))
         return (sw * scale).toInt() / 8 * 8 to (sh * scale).toInt() / 8 * 8
+    }
+
+    /**
+     * The encoder's bitrate now, kbit/s: follows the network ([Core.mirrorRate]),
+     * from [MBPS] down when Wi-Fi can't carry it. A new encoder (the screen
+     * turned) starts at it.
+     */
+    @Volatile
+    private var kbps = MBPS * 1000
+    private var lastRateCheck = 0L
+
+    /** Every ~200 ms: the bitrate the network can carry now. */
+    private fun followNetwork(c: MediaCodec, id: Long) {
+        val now = System.nanoTime()
+        if (id < 0 || now - lastRateCheck < 200_000_000L) return
+        lastRateCheck = now
+        val rate = Core.mirrorRate(id, MBPS * 1000)
+        if (rate <= 0 || rate == kbps) return
+        kbps = rate
+        runCatching {
+            c.setParameters(Bundle().apply { putInt(MediaCodec.PARAMETER_KEY_VIDEO_BITRATE, rate * 1000) })
+        }
     }
 
     /** The encoder in use and whether intra-refresh is on; replaced when the screen turns. */
@@ -196,22 +260,49 @@ class MirrorService : Service() {
     private var encoder: Pair<MediaCodec, Boolean>? = null
     private var size = 0 to 0
 
+    /**
+     * Encoder settings, fastest first. Each step drops what some encoders
+     * refuse: Samsung's Exynos encoders (Galaxy A54) accept the highest
+     * clock and real-time priority when configured, then fail to start
+     * ("can't get real-time resource"). So a step counts only once the
+     * encoder has started.
+     */
+    private data class Tier(val profile: Boolean, val speedups: Boolean, val fastest: Boolean, val realtime: Boolean)
+
+    private val tiers = listOf(
+        Tier(profile = true, speedups = true, fastest = true, realtime = true),
+        Tier(profile = true, speedups = true, fastest = false, realtime = true),
+        Tier(profile = true, speedups = true, fastest = false, realtime = false),
+        Tier(profile = true, speedups = false, fastest = false, realtime = false),
+        Tier(profile = false, speedups = false, fastest = false, realtime = false),
+    )
+
+    /** The first step that worked on this phone: the screen turning starts there. */
+    private var tier = 0
+
     /** An encoder for [w] x [h], started, with its input surface. */
     private fun startEncoder(w: Int, h: Int): Triple<MediaCodec, Boolean, android.view.Surface> {
-        // Fall back step by step if the encoder refuses a setting.
-        var created: Pair<MediaCodec, Boolean>? = null
-        for ((withProfile, speedups) in listOf(true to true, true to false, false to false)) {
-            created = try {
-                createEncoder(w, h, withProfile, speedups)
+        var failure: Exception? = null
+        for (i in tier until tiers.size) {
+            val t = tiers[i]
+            var codec: MediaCodec? = null
+            try {
+                val (c, refresh) = createEncoder(w, h, t)
+                codec = c
+                val surface = c.createInputSurface()
+                c.start()
+                tier = i
+                return started(c, refresh, surface)
             } catch (e: Exception) {
-                Log.w(TAG, "mirroring: encoder refused profile=$withProfile speed-ups=$speedups", e)
-                null
+                Log.w(TAG, "mirroring: encoder refused $t", e)
+                failure = e
+                codec?.release()
             }
-            if (created != null) break
         }
-        val (c, refresh) = created ?: throw IllegalStateException("no encoder")
-        val surface = c.createInputSurface()
-        c.start()
+        throw IllegalStateException("no encoder", failure)
+    }
+
+    private fun started(c: MediaCodec, refresh: Boolean, surface: android.view.Surface): Triple<MediaCodec, Boolean, android.view.Surface> {
         if (Build.VERSION.SDK_INT >= 31 && QTI_LOW_LATENCY in c.supportedVendorParameters) {
             // Some codecs only take vendor keys after start.
             runCatching { c.setParameters(Bundle().apply { putInt(QTI_LOW_LATENCY, 1) }) }
@@ -259,29 +350,48 @@ class MirrorService : Service() {
         override fun onDisplayAdded(displayId: Int) {}
         override fun onDisplayRemoved(displayId: Int) {}
         override fun onDisplayChanged(displayId: Int) {
-            if (displayId != Display.DEFAULT_DISPLAY || stopping) return
-            val now = runCatching { captureSize() }.getOrNull() ?: return
-            if (now == size) return
-            size = now
-            val old = codec
-            try {
-                val (c, refresh, surface) = startEncoder(now.first, now.second)
-                codec = c
-                encoder = c to refresh
-                display?.resize(now.first, now.second, resources.displayMetrics.densityDpi)
-                display?.surface = surface
-                Log.i(TAG, "mirroring: turned, now ${now.first}x${now.second}")
-            } catch (e: Exception) {
-                Log.w(TAG, "mirroring: couldn't follow the screen turning", e)
-                return
-            }
-            runCatching { old?.stop() }
-            old?.release()
+            if (displayId == Display.DEFAULT_DISPLAY) refit("turned")
         }
     }
 
+    /** The PC turned game mode on or off: a smaller or the full picture. */
+    private fun setGame(on: Boolean) {
+        main.post {
+            if (stopping || game == on) return@post
+            game = on
+            refit(if (on) "game mode" else "game mode off")
+        }
+    }
+
+    /**
+     * Captures at the size wanted now (the screen turned, game mode), if
+     * it changed. On the main thread.
+     */
+    private fun refit(why: String) {
+        if (stopping) return
+        val now = runCatching { captureSize() }.getOrNull() ?: return
+        if (now == size) return
+        size = now
+        val old = codec
+        try {
+            val (c, refresh, surface) = startEncoder(now.first, now.second)
+            codec = c
+            encoder = c to refresh
+            display?.resize(now.first, now.second, resources.displayMetrics.densityDpi)
+            display?.surface = surface
+            Log.i(TAG, "mirroring: $why, now ${now.first}x${now.second}")
+        } catch (e: Exception) {
+            Log.w(TAG, "mirroring: couldn't change the picture ($why)", e)
+            return
+        }
+        runCatching { old?.stop() }
+        old?.release()
+    }
+
     /** The encoder, and whether intra-refresh is really on. */
-    private fun createEncoder(w: Int, h: Int, withProfile: Boolean, speedups: Boolean): Pair<MediaCodec, Boolean> {
+    private fun createEncoder(w: Int, h: Int, t: Tier): Pair<MediaCodec, Boolean> {
+        val withProfile = t.profile
+        val speedups = t.speedups
         val mime = MediaFormat.MIMETYPE_VIDEO_AVC
         val c = MediaCodec.createEncoderByType(mime)
         val codecCaps = c.codecInfo.getCapabilitiesForType(mime)
@@ -291,7 +401,7 @@ class MirrorService : Service() {
         val qti = speedups && vendor != null && QTI_LOW_LATENCY in vendor
         val format = MediaFormat.createVideoFormat(mime, w, h).apply {
             setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, MBPS * 1_000_000)
+            setInteger(MediaFormat.KEY_BIT_RATE, kbps * 1000)
             // Constant bitrate: in variable mode the encoder starved busy scenes.
             if (cbr) setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
             setInteger(MediaFormat.KEY_FRAME_RATE, FPS)
@@ -302,15 +412,21 @@ class MirrorService : Service() {
             } else {
                 setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 10) // plus on demand after a loss
             }
-            setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
+            if (t.realtime) setInteger(MediaFormat.KEY_PRIORITY, 0) // real time
             // Keep sending ~10 fps when the screen is still: the other side sees
             // a live stream, and the encoder sharpens the still picture.
             setLong(MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER, 100_000)
             if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
             if (Build.VERSION.SDK_INT >= 29) setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
+            if (Build.VERSION.SDK_INT >= 31) {
+                // Sharp whole-screen changes (see QP_MAX); encoders without it ignore it.
+                setInteger(MediaFormat.KEY_VIDEO_QP_I_MAX, QP_MAX)
+                setInteger(MediaFormat.KEY_VIDEO_QP_P_MAX, QP_MAX)
+            }
             if (speedups) {
                 // The encoder at its highest clock, each frame out as soon as it's done.
-                setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+                // Highest clock where allowed; else just enough for the frame rate.
+                setInteger(MediaFormat.KEY_OPERATING_RATE, if (t.fastest) Short.MAX_VALUE.toInt() else FPS)
                 if (Build.VERSION.SDK_INT >= 30) setInteger(MediaFormat.KEY_LATENCY, 1)
                 if (qti) setInteger(QTI_LOW_LATENCY, 1)
             }
@@ -330,7 +446,7 @@ class MirrorService : Service() {
             c.release()
             throw e
         }
-        Log.i(TAG, "mirroring: ${c.name} ${w}x$h $MBPS Mbit/s, intra-refresh $refresh, speed-ups $speedups (Qualcomm $qti)")
+        Log.i(TAG, "mirroring: ${c.name} ${w}x$h ${kbps / 1000} Mbit/s, intra-refresh $refresh, game mode $game, $t (Qualcomm $qti)")
         return c to refresh
     }
 
@@ -345,6 +461,7 @@ class MirrorService : Service() {
         while (!stopping) {
             val index = c.dequeueOutputBuffer(info, 10_000)
             val id = session
+            followNetwork(c, id)
             if (index < 0) {
                 // Nothing new (a still screen): check the session now and then.
                 val now = System.nanoTime()
@@ -409,6 +526,7 @@ class MirrorService : Service() {
     override fun onDestroy() {
         stopping = true
         running = null
+        control?.stop()
         if (session >= 0) Core.mirrorClose(session)
         wifiLocks.forEach { if (it.isHeld) it.release() }
         wifiLocks.clear()

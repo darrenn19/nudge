@@ -11,7 +11,7 @@ part 'nudge.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `deliver`, `into_outgoing`, `mirror_title`, `parse_id`, `route_name`, `running_core`, `runtime`, `set_native`, `start_core`, `take_early`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Core`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`
 
 // Rust type: RustOpaqueMoi<flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NudgeApp>>
 abstract class NudgeApp implements RustOpaqueInterface {
@@ -71,6 +71,10 @@ abstract class NudgeApp implements RustOpaqueInterface {
   /// why not: "they declined", "the other device is locked"...).
   Future<void> mirrorDevice({required String deviceId});
 
+  /// Screen-mirroring sessions running now, as (session ID, device ID):
+  /// for a window that opens after one started.
+  List<MirrorSession> mirrorSessions();
+
   /// Pair with the device showing `code` (scanned or pasted).
   Future<DeviceInfo> pair({required String code});
 
@@ -116,6 +120,10 @@ abstract class NudgeApp implements RustOpaqueInterface {
 
   /// Sync the clipboard with a paired device, both ways, or stop.
   void setClipboardSync({required String deviceId, required bool on_});
+
+  /// Disconnect a paired device for now (false), or reconnect it (true).
+  /// It stays paired: reconnecting needs no QR code.
+  void setConnected({required String deviceId, required bool connected});
 
   void setDirectLink({required bool on_});
 
@@ -349,6 +357,10 @@ class DeviceInfo {
   /// empty.
   final String cable;
 
+  /// Paired but disconnected for now: hidden and ignored until
+  /// reconnected (`NudgeApp::set_connected`). True for unpaired devices.
+  final bool connected;
+
   const DeviceInfo({
     required this.id,
     required this.shortId,
@@ -361,6 +373,7 @@ class DeviceInfo {
     this.acceptsFromUs,
     required this.clipboard,
     required this.cable,
+    required this.connected,
   });
 
   @override
@@ -375,7 +388,8 @@ class DeviceInfo {
       autoAccept.hashCode ^
       acceptsFromUs.hashCode ^
       clipboard.hashCode ^
-      cable.hashCode;
+      cable.hashCode ^
+      connected.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -392,7 +406,35 @@ class DeviceInfo {
           autoAccept == other.autoAccept &&
           acceptsFromUs == other.acceptsFromUs &&
           clipboard == other.clipboard &&
-          cable == other.cable;
+          cable == other.cable &&
+          connected == other.connected;
+}
+
+/// A screen-mirroring session running.
+class MirrorSession {
+  final PlatformInt64 id;
+  final String deviceId;
+
+  /// This device's screen is the one shown.
+  final bool sharing;
+
+  const MirrorSession({
+    required this.id,
+    required this.deviceId,
+    required this.sharing,
+  });
+
+  @override
+  int get hashCode => id.hashCode ^ deviceId.hashCode ^ sharing.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is MirrorSession &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          deviceId == other.deviceId &&
+          sharing == other.sharing;
 }
 
 /// A file the platform opened for us: its descriptor and display name. A

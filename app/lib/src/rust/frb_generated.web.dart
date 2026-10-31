@@ -85,6 +85,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DeviceInfo> dco_decode_list_device_info(dynamic raw);
 
   @protected
+  List<MirrorSession> dco_decode_list_mirror_session(dynamic raw);
+
+  @protected
   List<OpenFile> dco_decode_list_open_file(dynamic raw);
 
   @protected
@@ -95,6 +98,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  MirrorSession dco_decode_mirror_session(dynamic raw);
 
   @protected
   OpenFile dco_decode_open_file(dynamic raw);
@@ -174,6 +180,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<DeviceInfo> sse_decode_list_device_info(SseDeserializer deserializer);
 
   @protected
+  List<MirrorSession> sse_decode_list_mirror_session(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<OpenFile> sse_decode_list_open_file(SseDeserializer deserializer);
 
   @protected
@@ -184,6 +195,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  MirrorSession sse_decode_mirror_session(SseDeserializer deserializer);
 
   @protected
   OpenFile sse_decode_open_file(SseDeserializer deserializer);
@@ -276,6 +290,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_mirror_session(
+    List<MirrorSession> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_open_file(List<OpenFile> self, SseSerializer serializer);
 
   @protected
@@ -292,6 +312,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     Uint8List self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_mirror_session(MirrorSession self, SseSerializer serializer);
 
   @protected
   void sse_encode_open_file(OpenFile self, SseSerializer serializer);

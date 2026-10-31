@@ -6,8 +6,9 @@
 //! right colour matrix and range) and scales them smoothly into the window's
 //! swap chain. Nothing is copied back to the CPU.
 
+use std::cell::Cell;
 use std::ffi::c_void;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, size_of};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
 use windows::Win32::Foundation::*;
@@ -20,7 +21,10 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::Win32::Graphics::Gdi::{BLACK_BRUSH, GetStockObject, HBRUSH};
+use windows::Win32::Graphics::Gdi::{
+    BLACK_BRUSH, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    MONITORINFO, MonitorFromPoint, MonitorFromWindow,
+};
 use windows::core::{Error, Interface, PCWSTR, Result, w};
 
 /// A decoded picture, still on the GPU.
@@ -31,24 +35,166 @@ const WAITABLE: DXGI_SWAP_CHAIN_FLAG = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITAB
 // One mirror window at a time (see `super::show`).
 static RESIZED: AtomicBool = AtomicBool::new(false);
 static CLOSED: AtomicBool = AtomicBool::new(false);
+/// Set when the window leaves full screen: re-fit it to the picture, which
+/// may have turned meanwhile.
+static REFIT: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// Where the window was before going full screen; `Some` while it is.
+    static WINDOWED: Cell<Option<WINDOWPLACEMENT>> = const { Cell::new(None) };
+    /// The picture's shape, so resizing by hand keeps it (no black bars).
+    static ASPECT: Cell<Option<(i32, i32)>> = const { Cell::new(None) };
+}
+
+/// The "Full screen" item in the title bar's menu (below 0xF000, low 4 bits clear).
+const MENU_FULLSCREEN: usize = 0x10;
+/// "Game mode": keys work the phone game's joystick (`super::control`).
+const MENU_GAME: usize = 0x20;
+const VK_F2: usize = 0x71;
+const VK_ESCAPE: usize = 0x1B;
+const VK_RETURN: usize = 0x0D;
+const VK_F11: usize = 0x7A;
+
+/// Keeps the picture going while the window is moved or resized (Windows'
+/// own loop runs meanwhile; see `super::step_now`). Windows fires timers at
+/// most every ~10 ms.
+const STEP_TIMER: usize = 1;
+
+const STYLE: WINDOW_STYLE = WS_OVERLAPPEDWINDOW;
+
+fn is_fullscreen() -> bool {
+    WINDOWED.get().is_some()
+}
+
+/// Switches between a normal window and borderless full screen on the
+/// window's monitor. Borderless (not exclusive) keeps the flip swap chain and
+/// lets Windows skip composition, so it costs no latency.
+fn toggle_fullscreen(hwnd: HWND) {
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        match WINDOWED.take() {
+            None => {
+                let mut placement = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+                let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+                if GetWindowPlacement(hwnd, &mut placement).is_err()
+                    || !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool()
+                {
+                    return;
+                }
+                WINDOWED.set(Some(placement));
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style & !(STYLE.0 as isize));
+                let m = mi.rcMonitor;
+                let _ = SetWindowPos(
+                    hwnd,
+                    HWND_TOP,
+                    m.left,
+                    m.top,
+                    m.right - m.left,
+                    m.bottom - m.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                );
+            }
+            Some(placement) => {
+                SetWindowLongPtrW(hwnd, GWL_STYLE, style | STYLE.0 as isize);
+                let _ = SetWindowPlacement(hwnd, &placement);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                );
+                REFIT.store(true, Relaxed);
+            }
+        }
+    }
+}
+
+/// Keeps a window being resized by hand in the picture's shape.
+fn keep_aspect(edge: u32, r: &mut RECT) {
+    let Some((pw, ph)) = ASPECT.get() else { return };
+    let mut frame = RECT::default();
+    if unsafe { AdjustWindowRect(&mut frame, STYLE, false) }.is_err() {
+        return;
+    }
+    let (fw, fh) = (frame.right - frame.left, frame.bottom - frame.top);
+    let (cw, ch) = (r.right - r.left - fw, r.bottom - r.top - fh);
+    match edge {
+        // Top or bottom edge: the height leads.
+        WMSZ_TOP | WMSZ_BOTTOM => r.right = r.left + (ch as f64 * pw as f64 / ph as f64).round() as i32 + fw,
+        // Sides and corners: the width leads.
+        _ => {
+            let h = (cw as f64 * ph as f64 / pw as f64).round() as i32 + fh;
+            if matches!(edge, WMSZ_TOPLEFT | WMSZ_TOPRIGHT) {
+                r.top = r.bottom - h;
+            } else {
+                r.bottom = r.top + h;
+            }
+        }
+    }
+}
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    if let Some(r) = super::control::handle(hwnd, msg, wp, lp) {
+        return r;
+    }
     match msg {
         WM_SIZE => {
             RESIZED.store(true, Relaxed);
             LRESULT(0)
         }
+        WM_SIZING => {
+            keep_aspect(wp.0 as u32, unsafe { &mut *(lp.0 as *mut RECT) });
+            LRESULT(1)
+        }
+        // Moving or resizing (or the title bar's menu): Windows' loop runs
+        // until it's over, so the picture is kept going from a timer.
+        WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => {
+            unsafe { SetTimer(hwnd, STEP_TIMER, 5, None) };
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+        WM_EXITSIZEMOVE | WM_EXITMENULOOP => {
+            let _ = unsafe { KillTimer(hwnd, STEP_TIMER) };
+            unsafe { DefWindowProcW(hwnd, msg, wp, lp) }
+        }
+        WM_TIMER if wp.0 == STEP_TIMER => {
+            super::step_now();
+            LRESULT(0)
+        }
         WM_KEYDOWN => {
             match wp.0 {
-                0x1B => unsafe {
-                    let _ = DestroyWindow(hwnd); // Esc
+                VK_ESCAPE if is_fullscreen() => toggle_fullscreen(hwnd),
+                // Controlling the phone: Esc is its Back button, not "close".
+                VK_ESCAPE if super::control::ready() => super::control::back(),
+                VK_ESCAPE => unsafe {
+                    let _ = DestroyWindow(hwnd);
                 },
+                VK_F11 => toggle_fullscreen(hwnd),
+                VK_F2 => super::control::toggle_game(),
                 _ => {}
             }
             LRESULT(0)
         }
+        // Alt+Enter (bit 29: Alt held); everything else Alt+ goes on to Windows.
+        WM_SYSKEYDOWN if wp.0 == VK_RETURN && lp.0 & (1 << 29) != 0 => {
+            toggle_fullscreen(hwnd);
+            LRESULT(0)
+        }
+        WM_SYSCHAR if wp.0 == VK_RETURN => LRESULT(0), // no beep after Alt+Enter
+        WM_SYSCOMMAND if wp.0 & 0xFFF0 == MENU_FULLSCREEN => {
+            toggle_fullscreen(hwnd);
+            LRESULT(0)
+        }
+        WM_SYSCOMMAND if wp.0 & 0xFFF0 == MENU_GAME => {
+            super::control::toggle_game();
+            LRESULT(0)
+        }
         WM_DESTROY => {
             CLOSED.store(true, Relaxed);
+            WINDOWED.set(None);
+            ASPECT.set(None);
             unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
@@ -96,13 +242,13 @@ fn create_window(title: &str, width: i32, height: i32) -> Result<HWND> {
         };
         RegisterClassW(&wc);
         let mut r = RECT { left: 0, top: 0, right: width, bottom: height };
-        AdjustWindowRect(&mut r, WS_OVERLAPPEDWINDOW, false)?;
+        AdjustWindowRect(&mut r, STYLE, false)?;
         let title: Vec<u16> = title.encode_utf16().chain([0]).collect();
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE::default(),
             class,
             PCWSTR(title.as_ptr()),
-            WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            STYLE | WS_VISIBLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             r.right - r.left,
@@ -112,16 +258,45 @@ fn create_window(title: &str, width: i32, height: i32) -> Result<HWND> {
             instance,
             None,
         )?;
+        // Right-click on the title bar (or Alt+Space): "Full screen".
+        let menu = GetSystemMenu(hwnd, false);
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(menu, MF_STRING, MENU_FULLSCREEN, w!("Full screen\tF11"));
+        let _ = AppendMenuW(menu, MF_STRING, MENU_GAME, w!("Game mode (keys move)\tF2"));
         let _ = SetForegroundWindow(hwnd);
+        super::control::set_window(hwnd, &String::from_utf16_lossy(&title[..title.len() - 1]));
+        super::control::listen_to_touchpad(hwnd);
         Ok(hwnd)
     }
 }
 
-/// A client area fitting a `w` x `h` picture on this screen (90% of it at most).
-fn fitted(w: i32, h: i32) -> (i32, i32) {
-    let screen_h = unsafe { GetSystemMetrics(SM_CYFULLSCREEN) } as f64;
-    let screen_w = unsafe { GetSystemMetrics(SM_CXFULLSCREEN) } as f64;
-    let scale = (screen_h * 0.9 / h as f64).min(screen_w * 0.9 / w as f64).min(1.0);
+/// The usable part (no taskbar) of the monitor `hwnd` is on, or the main
+/// monitor's before there is a window.
+fn work_area(hwnd: Option<HWND>) -> RECT {
+    unsafe {
+        let monitor = match hwnd {
+            Some(h) => MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST),
+            None => MonitorFromPoint(POINT::default(), MONITOR_DEFAULTTOPRIMARY),
+        };
+        let mut mi = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(monitor, &mut mi).as_bool() {
+            mi.rcWork
+        } else {
+            RECT { left: 0, top: 0, right: 1920, bottom: 1040 }
+        }
+    }
+}
+
+/// The largest client area in a `w` x `h` picture's shape whose window
+/// (title bar and borders included) fits in `share` of the work area, and
+/// no bigger than the picture itself.
+fn fitted(hwnd: Option<HWND>, w: i32, h: i32, share: f64) -> (i32, i32) {
+    let area = work_area(hwnd);
+    let mut frame = RECT::default();
+    let _ = unsafe { AdjustWindowRect(&mut frame, STYLE, false) };
+    let room_w = (area.right - area.left) as f64 * share - (frame.right - frame.left) as f64;
+    let room_h = (area.bottom - area.top) as f64 * share - (frame.bottom - frame.top) as f64;
+    let scale = (room_h / h as f64).min(room_w / w as f64).min(1.0);
     ((w as f64 * scale) as i32, (h as f64 * scale) as i32)
 }
 
@@ -365,7 +540,7 @@ impl Video {
                 decoder: None,
             };
             v.decoder = Some(Decoder::new(false, &v.manager)?);
-            let (w, h) = fitted(1056, 2304);
+            let (w, h) = fitted(None, 1056, 2304, 0.96);
             v.open_window(title, w, h)?;
             Ok(v)
         }
@@ -452,7 +627,9 @@ impl Video {
                 let scale = (tw as f64 / sw).min(th as f64 / sh);
                 let (dw, dh) = ((sw * scale).round() as i32, (sh * scale).round() as i32);
                 let (x, y) = ((tw - dw) / 2, (th - dh) / 2);
-                RECT { left: x, top: y, right: x + dw, bottom: y + dh }
+                let r = RECT { left: x, top: y, right: x + dw, bottom: y + dh };
+                super::control::set_picture(r); // the back buffer is the window's client area
+                r
             } else {
                 full
             };
@@ -524,13 +701,18 @@ impl Video {
         Ok(())
     }
 
-    /// Shows a decoded frame in the window.
-    pub fn present(&mut self, sample: &IMFSample) -> Result<()> {
-        let Some(info) = self.stream_info() else { return Ok(()) };
-        let Some((hwnd, swapchain, _)) = self.window.clone() else { return Ok(()) };
+    /// Shows a decoded frame in the window, without waiting for the display:
+    /// false if it wasn't shown (minimized, or the display still busy).
+    pub fn present(&mut self, sample: &IMFSample) -> Result<bool> {
+        let Some(info) = self.stream_info() else { return Ok(true) };
+        let Some((hwnd, swapchain, _)) = self.window.clone() else { return Ok(true) };
+        if unsafe { IsIconic(hwnd).as_bool() } {
+            return Ok(false); // nothing to draw into; resized when it comes back
+        }
         let picture = (info.visible.right - info.visible.left, info.visible.bottom - info.visible.top);
-        if self.fitted_to != Some(picture) {
-            // First frame, or the phone turned: give the window its shape.
+        if self.fitted_to != Some(picture) || REFIT.swap(false, Relaxed) {
+            // First frame, the phone turned, or back from full screen: give
+            // the window the picture's shape.
             self.fit_window(hwnd, picture);
         }
         unsafe {
@@ -545,38 +727,59 @@ impl Video {
             back.GetDesc(&mut desc);
             self.blit(sample, &back, (desc.Width, desc.Height), true)?;
             drop(back);
-            // Interval 0: hand the frame to the compositor now, don't wait for vsync.
-            swapchain.Present(0, DXGI_PRESENT(0)).ok()
+            // Interval 0: hand the frame to the compositor now, don't wait for
+            // vsync; and never block when it can't take one (minimizing,
+            // maximizing): the window's messages would wait too.
+            match swapchain.Present(0, DXGI_PRESENT_DO_NOT_WAIT) {
+                r if r == DXGI_ERROR_WAS_STILL_DRAWING => Ok(false),
+                r => r.ok().map(|()| true),
+            }
         }
     }
 }
 
 impl Video {
-    /// Resizes the window to `picture`'s shape. The first time, to the size
-    /// `fitted` picks; after that the window keeps its longer side, so a phone
-    /// turning sideways keeps about the same window size.
+    /// Resizes the window to `picture`'s shape. The first time, as big as
+    /// fits the screen. After that, a phone turning sideways keeps the
+    /// window's longer side, shrunk only if that no longer fits the screen,
+    /// and the window stays centred where it was and on screen. Full screen
+    /// and maximized windows keep their size: the picture is centred in them.
     fn fit_window(&mut self, hwnd: HWND, picture: (i32, i32)) {
         let first = self.fitted_to.is_none();
         self.fitted_to = Some(picture);
+        ASPECT.set(Some(picture));
         unsafe {
+            if is_fullscreen() || IsZoomed(hwnd).as_bool() {
+                return;
+            }
             let mut client = RECT::default();
-            if GetClientRect(hwnd, &mut client).is_err() {
+            let mut outer = RECT::default();
+            if GetClientRect(hwnd, &mut client).is_err() || GetWindowRect(hwnd, &mut outer).is_err() {
                 return;
             }
             let (cw, ch) = (client.right - client.left, client.bottom - client.top);
             let (pw, ph) = (picture.0 as f64, picture.1 as f64);
+            let most = fitted(Some(hwnd), picture.0, picture.1, if first { 0.96 } else { 1.0 });
             let (w, h) = if first {
-                fitted(picture.0, picture.1)
+                most
             } else {
                 let scale = cw.max(ch) as f64 / pw.max(ph);
-                ((pw * scale) as i32, (ph * scale) as i32)
+                let (w, h) = ((pw * scale) as i32, (ph * scale) as i32);
+                if w > most.0 || h > most.1 { most } else { (w, h) }
             };
             if (w, h) == (cw, ch) {
                 return;
             }
             let mut r = RECT { left: 0, top: 0, right: w, bottom: h };
-            let _ = AdjustWindowRect(&mut r, WS_OVERLAPPEDWINDOW, false);
-            let _ = SetWindowPos(hwnd, None, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER);
+            let _ = AdjustWindowRect(&mut r, STYLE, false);
+            let (ow, oh) = (r.right - r.left, r.bottom - r.top);
+            // Same centre, then pushed back inside the work area.
+            let area = work_area(Some(hwnd));
+            let mut x = (outer.left + outer.right) / 2 - ow / 2;
+            let mut y = (outer.top + outer.bottom) / 2 - oh / 2;
+            x = x.min(area.right - ow).max(area.left);
+            y = y.min(area.bottom - oh).max(area.top);
+            let _ = SetWindowPos(hwnd, None, x, y, ow, oh, SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
 }

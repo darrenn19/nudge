@@ -27,6 +27,10 @@ pub(super) const F_KEY: u8 = 1;
 pub(super) const F_RESENT: u8 = 2;
 /// The encoder heals lost frames by itself (intra-refresh): no keyframe needed.
 pub(super) const F_INTRA_REFRESH: u8 = 4;
+/// Every frame of this stream stands on its own (messages such as input
+/// events, not video): nothing waits for a keyframe, and a later frame never
+/// makes an earlier one unnecessary.
+pub(super) const F_STANDALONE: u8 = 8;
 
 pub(super) const FRAGMENT_HEADER: usize = 1 + 1 + 4 + 2 + 2 + 1 + 8;
 /// `n` in a NACK meaning "every fragment of the frame".

@@ -138,11 +138,12 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  /// Paired devices, open browser pages, then unpaired ones nearby.
+  /// Paired devices, then open browser pages. Unpaired devices nearby
+  /// aren't here (any Nudge on the network would show up): they're on the
+  /// pairing screen.
   List<DeviceInfo> get _targets => [
     ...controller.pairedDevices,
     ...controller.browserDevices,
-    ...controller.nearbyDevices,
   ];
 
   DeviceInfo? get _focus {
@@ -214,8 +215,9 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _openPairing() async {
-    final device = await Navigator.of(context)
-        .push<DeviceInfo>(nudgeRoute((_) => PairScreen(controller: controller)));
+    final device = await Navigator.of(context).push<DeviceInfo>(
+      nudgeRoute((_) => PairScreen(controller: controller, pairNearby: _askNearby)),
+    );
     if (device != null && mounted) {
       showToast(context, 'Paired with ${device.name}');
       _focusId = device.id;
@@ -273,6 +275,13 @@ class _HomeScreenState extends State<HomeScreen> {
       _explainAway(d);
     }
   }
+
+  /// From the pairing screen: pair with a device nearby there (the sheet
+  /// opens over it; a code is already on screen behind).
+  Future<DeviceInfo?> _askNearby(BuildContext context, DeviceInfo d) => showGlassSheet<DeviceInfo>(
+    context,
+    (_) => _PairingSheet(controller: controller, device: d, onUseCode: () {}),
+  );
 
   /// Pair with a device that's nearby: no QR code, just a confirmation on
   /// the other side.
@@ -597,13 +606,21 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         // Screen mirroring: a PC sees a phone's screen (its user is asked);
         // a phone shows its own on a PC.
-        if (!isPhone && d.platform == 'android')
+        // While a screen is shared with it (either way): stop instead.
+        if (controller.isMirroring(d))
+          MenuItem(
+            label: 'Stop sharing',
+            icon: CupertinoIcons.stop_circle,
+            destructive: true,
+            onTap: () => controller.stopMirroring(d),
+          )
+        else if (!isPhone && d.platform == 'android')
           MenuItem(
             label: 'Show its screen',
             icon: CupertinoIcons.device_phone_portrait,
             onTap: () => unawaited(_mirror(d)),
-          ),
-        if (isPhone && d.platform == 'windows')
+          )
+        else if (isPhone && d.platform == 'windows')
           MenuItem(
             label: 'Show my screen on ${d.name}',
             icon: CupertinoIcons.rectangle_on_rectangle,
@@ -634,20 +651,30 @@ class _HomeScreenState extends State<HomeScreen> {
             icon: CupertinoIcons.arrow_up_arrow_down,
             onTap: _arrange,
           ),
+        // Disconnect: gone from here for now, back from the pairing screen
+        // with no code. Unpair: forgotten; pairing again needs a code.
         MenuItem(
-          label: 'Forget this device',
-          icon: CupertinoIcons.trash,
-          destructive: true,
-          onTap: () async {
-            final ok = await confirm(
-              context,
-              title: 'Forget ${d.name}?',
-              message: "You'll need to pair again to send between these devices.",
-              action: 'Forget',
-              destructive: true,
-            );
-            if (ok) controller.unpair(d);
+          label: 'Disconnect',
+          icon: CupertinoIcons.link,
+          onTap: () {
+            controller.disconnect(d);
+            showToast(context, '${d.name} disconnected. Reconnect it from Pair.', icon: CupertinoIcons.link);
           },
+          beside: MenuItem(
+            label: 'Unpair',
+            icon: CupertinoIcons.trash,
+            destructive: true,
+            onTap: () async {
+              final ok = await confirm(
+                context,
+                title: 'Unpair ${d.name}?',
+                message: "It's forgotten: you'll need to pair again with a code to send between these devices.",
+                action: 'Unpair',
+                destructive: true,
+              );
+              if (ok) controller.unpair(d);
+            },
+          ),
         ),
       ],
     );
