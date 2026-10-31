@@ -317,6 +317,11 @@ sealed class AppEvent with _$AppEvent {
     required String deviceId,
     required bool sharing,
   }) = AppEvent_MirrorStarted;
+
+  /// The device whose screen this one asked to see is locked; it shares
+  /// once it's unlocked (the request lasts about a minute).
+  const factory AppEvent.mirrorWaiting({required String deviceId}) =
+      AppEvent_MirrorWaiting;
   const factory AppEvent.mirrorEnded({required PlatformInt64 id}) =
       AppEvent_MirrorEnded;
 }

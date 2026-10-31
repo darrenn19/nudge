@@ -493,6 +493,11 @@ pub enum NodeEvent {
         id: u64,
         peer: Fingerprint,
     },
+    /// The device whose screen this one asked to see is locked: it shares
+    /// once it's unlocked (until the request lapses). Say so meanwhile.
+    MirrorWaiting {
+        peer: Fingerprint,
+    },
     /// A mirroring session started. For one the core started (this device
     /// was asked, or shown a screen), take it with `Node::take_mirror`.
     /// While `role` is `Sharing`, show that the screen is being shared.
@@ -4208,7 +4213,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn mirroring_respects_no_and_locks() {
         use crate::realtime::Config;
-        let ((laptop, _laptop_events, _l), (phone, mut phone_events, _p)) = paired_pair().await;
+        let ((laptop, mut laptop_events, _l), (phone, mut phone_events, _p)) = paired_pair().await;
         let (phone_fp, laptop_fp) = (phone.fingerprint(), laptop.fingerprint());
         let laptop = Arc::new(laptop);
         let ask = |laptop: Arc<Node>| {
@@ -4231,9 +4236,14 @@ mod tests {
         assert!(matches!(asking.await.unwrap(), Err(Error::Declined)));
 
         // Locked (the phone on the desk): still asked, so its user can
-        // unlock and answer; a yes while still locked is refused.
+        // unlock and answer, and the laptop hears it's waiting for that; a
+        // yes while still locked is refused.
         phone.set_screen_locked(true);
         let asking = ask(laptop.clone());
+        assert!(matches!(
+            next(&mut laptop_events, |e| matches!(e, NodeEvent::MirrorWaiting { .. })).await,
+            NodeEvent::MirrorWaiting { peer } if peer == phone_fp
+        ));
         let NodeEvent::MirrorAsked { id, .. } = next(&mut phone_events, |e| {
             matches!(e, NodeEvent::MirrorAsked { .. })
         })

@@ -852,6 +852,8 @@ void showToast(
   IconData icon = CupertinoIcons.checkmark_alt,
   String? action,
   VoidCallback? onAction,
+  // Shown until this completes, instead of a few seconds.
+  Future<void>? until,
 }) {
   final overlay = Overlay.maybeOf(context);
   if (overlay == null) return;
@@ -862,6 +864,7 @@ void showToast(
       icon: icon,
       action: action,
       onAction: onAction,
+      until: until,
       onDone: () => entry.remove(),
     ),
   );
@@ -875,6 +878,7 @@ class _Toast extends StatefulWidget {
     required this.onDone,
     this.action,
     this.onAction,
+    this.until,
   });
 
   final String text;
@@ -882,6 +886,7 @@ class _Toast extends StatefulWidget {
   final String? action;
   final VoidCallback? onAction;
   final VoidCallback onDone;
+  final Future<void>? until;
 
   @override
   State<_Toast> createState() => _ToastState();
@@ -895,12 +900,21 @@ class _ToastState extends State<_Toast> with SingleTickerProviderStateMixin {
   void initState() {
     super.initState();
     _show.forward();
-    _timer = Timer(const Duration(seconds: 4), _hide);
+    final until = widget.until;
+    if (until != null) {
+      until.whenComplete(_hide);
+    } else {
+      _timer = Timer(const Duration(seconds: 4), _hide);
+    }
   }
+
+  bool _hiding = false;
 
   Future<void> _hide() async {
     _timer?.cancel();
-    if (!mounted) return;
+    // Once: a swipe and `until` may both ask.
+    if (!mounted || _hiding) return;
+    _hiding = true;
     await _show.reverse();
     widget.onDone();
   }

@@ -383,6 +383,9 @@ pub enum MirrorReply {
     Locked,
     /// A question about mirroring from this device is already open.
     Busy,
+    /// Not an answer yet: the device is locked, and shares once it's
+    /// unlocked. The real reply follows on the same connection.
+    WaitingForUnlock,
 }
 
 impl MirrorReply {
@@ -393,6 +396,7 @@ impl MirrorReply {
             Self::NoAnswer => 2,
             Self::Locked => 3,
             Self::Busy => 4,
+            Self::WaitingForUnlock => 5,
         })
         .await?;
         w.flush().await?;
@@ -406,6 +410,7 @@ impl MirrorReply {
             2 => Ok(Self::NoAnswer),
             3 => Ok(Self::Locked),
             4 => Ok(Self::Busy),
+            5 => Ok(Self::WaitingForUnlock),
             _ => Err(Error::Protocol("unknown mirror reply")),
         }
     }
@@ -977,6 +982,7 @@ mod tests {
             MirrorReply::NoAnswer,
             MirrorReply::Locked,
             MirrorReply::Busy,
+            MirrorReply::WaitingForUnlock,
         ] {
             let mut buf = Vec::new();
             reply.write_to(&mut buf).await.unwrap();

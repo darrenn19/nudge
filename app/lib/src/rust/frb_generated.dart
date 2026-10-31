@@ -1800,6 +1800,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sharing: dco_decode_bool(raw[3]),
         );
       case 23:
+        return AppEvent_MirrorWaiting(deviceId: dco_decode_String(raw[1]));
+      case 24:
         return AppEvent_MirrorEnded(id: dco_decode_i_64(raw[1]));
       default:
         throw Exception("unreachable");
@@ -2164,6 +2166,9 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sharing: var_sharing,
         );
       case 23:
+        var var_deviceId = sse_decode_String(deserializer);
+        return AppEvent_MirrorWaiting(deviceId: var_deviceId);
+      case 24:
         var var_id = sse_decode_i_64(deserializer);
         return AppEvent_MirrorEnded(id: var_id);
       default:
@@ -2582,8 +2587,11 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
         sse_encode_i_64(id, serializer);
         sse_encode_String(deviceId, serializer);
         sse_encode_bool(sharing, serializer);
-      case AppEvent_MirrorEnded(id: final id):
+      case AppEvent_MirrorWaiting(deviceId: final deviceId):
         sse_encode_i_32(23, serializer);
+        sse_encode_String(deviceId, serializer);
+      case AppEvent_MirrorEnded(id: final id):
+        sse_encode_i_32(24, serializer);
         sse_encode_i_64(id, serializer);
     }
   }

@@ -2377,6 +2377,12 @@ impl SseDecode for crate::api::nudge::AppEvent {
                 };
             }
             23 => {
+                let mut var_deviceId = <String>::sse_decode(deserializer);
+                return crate::api::nudge::AppEvent::MirrorWaiting {
+                    device_id: var_deviceId,
+                };
+            }
+            24 => {
                 let mut var_id = <i64>::sse_decode(deserializer);
                 return crate::api::nudge::AppEvent::MirrorEnded { id: var_id };
             }
@@ -2845,8 +2851,11 @@ impl flutter_rust_bridge::IntoDart for crate::api::nudge::AppEvent {
                 sharing.into_into_dart().into_dart(),
             ]
             .into_dart(),
+            crate::api::nudge::AppEvent::MirrorWaiting { device_id } => {
+                [23.into_dart(), device_id.into_into_dart().into_dart()].into_dart()
+            }
             crate::api::nudge::AppEvent::MirrorEnded { id } => {
-                [23.into_dart(), id.into_into_dart().into_dart()].into_dart()
+                [24.into_dart(), id.into_into_dart().into_dart()].into_dart()
             }
             _ => {
                 unimplemented!("");
@@ -3134,8 +3143,12 @@ impl SseEncode for crate::api::nudge::AppEvent {
                 <String>::sse_encode(device_id, serializer);
                 <bool>::sse_encode(sharing, serializer);
             }
-            crate::api::nudge::AppEvent::MirrorEnded { id } => {
+            crate::api::nudge::AppEvent::MirrorWaiting { device_id } => {
                 <i32>::sse_encode(23, serializer);
+                <String>::sse_encode(device_id, serializer);
+            }
+            crate::api::nudge::AppEvent::MirrorEnded { id } => {
+                <i32>::sse_encode(24, serializer);
                 <i64>::sse_encode(id, serializer);
             }
             _ => {

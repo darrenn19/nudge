@@ -229,6 +229,11 @@ pub enum AppEvent {
         device_id: String,
         sharing: bool,
     },
+    /// The device whose screen this one asked to see is locked; it shares
+    /// once it's unlocked (the request lasts about a minute).
+    MirrorWaiting {
+        device_id: String,
+    },
     MirrorEnded {
         id: i64,
     },
@@ -348,6 +353,7 @@ impl From<NodeEvent> for AppEvent {
                 sharing: role == MirrorRole::Sharing,
             },
             NodeEvent::MirrorEnded { id } => Self::MirrorEnded { id: id as i64 },
+            NodeEvent::MirrorWaiting { peer } => Self::MirrorWaiting { device_id: peer.to_string() },
         }
     }
 }

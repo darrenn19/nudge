@@ -128,11 +128,16 @@ impl Node {
         }
         .write_to(&mut stream)
         .await?;
-        // The other side may be asking its user: give it time to.
-        let reply = tokio::time::timeout(
-            ASK_TIMEOUT + Duration::from_secs(5),
-            MirrorReply::read_from(&mut stream),
-        )
+        // The other side may be asking its user, or waiting to be unlocked
+        // (it says so first): give it time to.
+        let reply = tokio::time::timeout(ASK_TIMEOUT + Duration::from_secs(5), async {
+            loop {
+                match MirrorReply::read_from(&mut stream).await {
+                    Ok(MirrorReply::WaitingForUnlock) => shared.emit(NodeEvent::MirrorWaiting { peer }),
+                    other => return other,
+                }
+            }
+        })
         .await
         .map_err(|_| Error::NoAnswer)?;
         let reply = match reply {
@@ -149,6 +154,7 @@ impl Node {
             MirrorReply::NoAnswer => Some(Error::NoAnswer),
             MirrorReply::Locked => Some(Error::PeerLocked),
             MirrorReply::Busy => Some(Error::MirrorBusy),
+            MirrorReply::WaitingForUnlock => unreachable!("read past above"),
         };
         if let Some(e) = failed {
             let _ = stream.shutdown().await;
@@ -256,6 +262,10 @@ impl Shared {
             Mirror::ShowYou => MirrorRole::Viewing,
         };
         if role == MirrorRole::Sharing {
+            // Locked: it shares once unlocked; the requester can say so meanwhile.
+            if self.screen_locked.load(Ordering::Relaxed) {
+                MirrorReply::WaitingForUnlock.write_to(&mut stream).await?;
+            }
             if let Some(no) = self.ask_to_share(peer).await {
                 no.write_to(&mut stream).await?;
                 let _ = stream.shutdown().await;
@@ -280,9 +290,13 @@ impl Shared {
         let (tx, rx) = oneshot::channel();
         let id = {
             let mut mirrors = self.mirrors();
-            // One question per device at a time.
-            if mirrors.asks.values().any(|(p, _)| *p == peer) {
-                return Some(MirrorReply::Busy);
+            // One question per device at a time: the newest. An older one
+            // still open (asked again, or left unanswered) gives way, its
+            // requester hearing "busy", rather than blocking every later try.
+            let older: Vec<u64> = mirrors.asks.iter().filter(|(_, (p, _))| *p == peer).map(|(&id, _)| id).collect();
+            for id in older {
+                mirrors.asks.remove(&id);
+                self.emit(NodeEvent::OfferClosed { id });
             }
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             mirrors.asks.insert(id, (peer, tx));
@@ -295,6 +309,8 @@ impl Shared {
         match answer {
             _ if self.screen_locked.load(Ordering::Relaxed) => Some(MirrorReply::Locked),
             Ok(Ok(true)) => None,
+            // A newer question from the same device took its place.
+            Ok(Err(_)) => Some(MirrorReply::Busy),
             Ok(_) => Some(MirrorReply::Declined),
             Err(_) => Some(MirrorReply::NoAnswer),
         }

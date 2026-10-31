@@ -581,7 +581,18 @@ class _HomeScreenState extends State<HomeScreen> {
   /// Windows: see [d]'s screen; it opens in a window of its own. Paired
   /// phones share without a question, so nothing to say unless it fails.
   Future<void> _mirror(DeviceInfo d) async {
-    final problem = await controller.mirror(d);
+    final answered = Completer<void>();
+    final problem = await controller.mirror(
+      d,
+      // Locked: it shares once unlocked. Said until then (or it fails).
+      onWaiting: () => showToast(
+        context,
+        'Waiting for ${d.name} to be unlocked',
+        icon: CupertinoIcons.lock,
+        until: answered.future,
+      ),
+    );
+    answered.complete();
     if (problem != null && mounted) {
       showToast(context, "Couldn't show ${d.name}'s screen: $problem", icon: CupertinoIcons.xmark_circle);
     }

@@ -112,7 +112,8 @@ object Background : Core.Listener {
             // is being shared" shows meanwhile). Android's own capture prompt
             // still comes unless Nudge was given PROJECT_MEDIA over adb. A
             // locked phone is asked instead: answering needs an unlock, and
-            // nothing is shared while locked.
+            // nothing is shared while locked: it starts once it's unlocked
+            // (the notification is there in case it can't).
             "mirrorAsked" -> if (!LockState.isLocked(context) && MirrorConsentActivity.answerYes(context, id)) {
                 Log.i("Nudge", "mirroring: ${name(e.getString("device"))} asked to see the screen; sharing")
             } else {
@@ -120,9 +121,10 @@ object Background : Core.Listener {
                     context,
                     id,
                     "${name(e.getString("device"))} wants to see your screen",
-                    "Only allow devices you trust",
+                    "Unlock to share it",
                     mirror = true,
                 )
+                if (LockState.isLocked(context)) MirrorConsentActivity.answerOnUnlock(context, id)
             }
             // MirrorService captures the screen and shows "being shared".
             "mirrorStarted" -> if (e.getBoolean("sharing")) MirrorService.onStarted(id, e.getString("device"))

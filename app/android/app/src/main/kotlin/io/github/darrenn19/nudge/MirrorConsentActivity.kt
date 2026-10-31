@@ -38,6 +38,47 @@ class MirrorConsentActivity : Activity() {
             }.isSuccess
         }
 
+        /**
+         * A request [ask] that came while the phone was locked: says yes as
+         * soon as it's unlocked (the request stays open for a minute), so
+         * nothing has to be tapped (the notification stays if it can't).
+         */
+        fun answerOnUnlock(context: Context, ask: Long) {
+            val app = context.applicationContext
+            val main = android.os.Handler(android.os.Looper.getMainLooper())
+            var done = false
+            lateinit var receiver: android.content.BroadcastReceiver
+            fun finish() {
+                if (done) return
+                done = true
+                runCatching { app.unregisterReceiver(receiver) }
+            }
+            fun tryNow() {
+                if (done || LockState.isLocked(app)) return
+                finish()
+                if (answerYes(app, ask)) {
+                    Notifications.cancelOffer(app, ask)
+                    android.util.Log.i("Nudge", "mirroring: unlocked; sharing as asked while locked")
+                }
+            }
+            receiver = object : android.content.BroadcastReceiver() {
+                override fun onReceive(c: Context, intent: Intent) {
+                    // "User present", or a screen on with no lock screen to pass.
+                    if (intent.action == Intent.ACTION_USER_PRESENT) tryNow() else main.postDelayed({ tryNow() }, 1_000)
+                }
+            }
+            androidx.core.content.ContextCompat.registerReceiver(
+                app, receiver,
+                android.content.IntentFilter().apply {
+                    addAction(Intent.ACTION_USER_PRESENT)
+                    addAction(Intent.ACTION_SCREEN_ON)
+                },
+                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            // The request lapses after a minute (the core's ASK_TIMEOUT).
+            main.postDelayed({ finish() }, 60_000)
+        }
+
         /** Show this phone's screen on [device] (a paired device's ID). */
         fun showOn(context: Context, device: String) {
             context.startActivity(

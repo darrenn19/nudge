@@ -684,6 +684,9 @@ class NudgeController extends ChangeNotifier {
         _mirrors[id] = deviceId;
         notifyListeners();
         return;
+      case AppEvent_MirrorWaiting(:final deviceId):
+        _mirrorWaiting.remove(deviceId)?.call();
+        return;
       case AppEvent_MirrorEnded(:final id):
         if (_mirrors.remove(id) != null) notifyListeners();
         return;
@@ -770,7 +773,12 @@ class NudgeController extends ChangeNotifier {
 
   /// Windows: see [d]'s screen in a window of its own. Its user is asked
   /// first. Returns null once it's showing, or why not.
-  Future<String?> mirror(DeviceInfo d) async {
+  /// [onWaiting]: the phone is locked and shares once it's unlocked.
+  Future<String?> mirror(DeviceInfo d, {void Function()? onWaiting}) async {
+    // Pressed again while the first is on its way (a locked phone answers
+    // once it's unlocked): that one opens the window, this is nothing.
+    if (!_mirroring.add(d.id)) return null;
+    if (onWaiting != null) _mirrorWaiting[d.id] = onWaiting;
     try {
       await app.mirrorDevice(deviceId: d.id);
       return null;
@@ -779,8 +787,15 @@ class NudgeController extends ChangeNotifier {
       final text = '$e';
       final inner = RegExp(r'^\w*Exception\((.*)\)$', dotAll: true).firstMatch(text)?.group(1);
       return (inner ?? text.replaceFirst(RegExp(r'^[^:]*Exception: ?'), '')).split('\n').first;
+    } finally {
+      _mirroring.remove(d.id);
+      _mirrorWaiting.remove(d.id);
     }
   }
+
+  /// Devices whose screen was asked for, until they answer.
+  final _mirroring = <String>{};
+  final _mirrorWaiting = <String, void Function()>{};
 
   /// Send clipboard text to every paired device that syncs it. Returns the
   /// names of the devices it reached. Text that just arrived from one of

@@ -84,6 +84,10 @@ class MirrorService : Service() {
         @Volatile
         private var running: MirrorService? = null
 
+        /** A start that came while the last session was closing: started after it. */
+        @Volatile
+        private var pending: Intent? = null
+
         /**
          * Start capturing, with what the screen-capture prompt returned. Then
          * either answer the question [ask] with yes, or show the screen on
@@ -162,10 +166,25 @@ class MirrorService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null || running != null) return START_NOT_STICKY
-        // Android 14+: the foreground service must exist before the projection.
+        if (intent == null) return START_NOT_STICKY
+        // Android 14+: the foreground service must exist before the projection
+        // (and every start of a foreground service must say so, even one turned away).
         val type = if (Build.VERSION.SDK_INT >= 29) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
-        ServiceCompat.startForeground(this, NOTIFICATION_ID, Notifications.sharing(this, null), type)
+        ServiceCompat.startForeground(this, NOTIFICATION_ID, Notifications.sharing(this, deviceName), type)
+        if (running != null) {
+            if (stopping) {
+                // The last session is still closing: this one starts once it's gone
+                // (unanswered, the request would block the device's next tries).
+                Log.i(TAG, "mirroring: starting once the last session has closed")
+                pending = intent
+                stopSelf()
+            } else {
+                // One shared screen at a time: say no rather than leave it waiting.
+                val ask = intent.getLongExtra(EXTRA_ASK, -1)
+                if (ask >= 0) Core.answerMirror(ask, false)
+            }
+            return START_NOT_STICKY
+        }
         running = this
 
         val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
@@ -737,6 +756,10 @@ class MirrorService : Service() {
     override fun onDestroy() {
         stopping = true
         running = null
+        pending?.let { next ->
+            pending = null
+            main.post { runCatching { applicationContext.startForegroundService(next) } }
+        }
         control?.stop()
         stopAudio()
         unlockWatch?.let { runCatching { unregisterReceiver(it) } }

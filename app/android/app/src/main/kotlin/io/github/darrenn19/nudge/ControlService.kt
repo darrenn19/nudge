@@ -67,6 +67,13 @@ class ControlService : AccessibilityService() {
         /** A new touch's first stretch (its moves already waiting), ms. */
         private const val FIRST_SEGMENT_MS = 8L
 
+        /**
+         * A finger the PC moved or repeated within this long is one it's
+         * working now (it repeats a held one every 200 ms): put back after
+         * Android cancels a gesture. Others give way to a touch on the phone.
+         */
+        private const val ACTIVE_MS = 300L
+
         /** A touchpad swipe starts at least this share of the screen from its edges (room to move). */
         private const val PAN_START_MARGIN = 0.2f
 
@@ -649,17 +656,33 @@ class ControlService : AccessibilityService() {
 
             override fun onCancelled(g: GestureDescription?) {
                 timings.played(SystemClock.uptimeMillis() - now, cancelled = true)
-                // The user touched the screen, or Android cut it short: every
-                // finger is off the screen now. Ones the PC still holds down
-                // (the game joystick) go straight back down where they were,
-                // or they'd stay dead until let go and pressed again.
+                // Usually someone touched the phone itself (or Android cut it
+                // short): every finger is off the screen now. Their touch
+                // wins: putting a finger back down would cancel it (a swipe
+                // on a notification never got through while two fingers
+                // rested on the PC's touchpad). Only a finger the PC is
+                // working right now goes back (the game joystick held by a
+                // key, a drag under way), or it'd stay dead until let go.
                 inFlight = false
+                val now = SystemClock.uptimeMillis()
+                var back = 0
                 for ((id, f) in fingers) {
-                    val held = f.stroke != null && (f.down || id == SCROLL_FINGER && scrolling)
+                    val held = f.stroke != null && f.down && id != SCROLL_FINGER && now - f.heardAt < ACTIVE_MS
                     f.stroke = null
-                    if (held && f.ops.firstOrNull() !is Op.Down) f.ops.addFirst(Op.Down(f.last))
+                    if (held && f.ops.firstOrNull() !is Op.Down) {
+                        f.ops.addFirst(Op.Down(f.last))
+                        back++
+                    } else if (!held) {
+                        f.ops.clear()
+                    }
                 }
-                Log.i(TAG, "control: Android cancelled a gesture; held fingers put back")
+                // A touchpad scroll or wheel steps: over (new ones start afresh).
+                if (scrolling) {
+                    scrolling = false
+                    panning = false
+                    swipe = null
+                }
+                Log.i(TAG, "control: a touch on the phone (or Android) cancelled the PC's gesture; $back finger(s) put back")
                 pump()
             }
         }, handler)
